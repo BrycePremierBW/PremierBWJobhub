@@ -1398,6 +1398,24 @@ def user_access_page():
         st.error("Only admin users can access this page.")
         return
 
+
+    st.markdown("### Restore Master Lists")
+    st.caption("Use this if builders/clients or employees are missing from the online Supabase database.")
+
+    counts = master_list_counts()
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Builders / Clients", counts.get("builders_clients", 0))
+    c2.metric("Employees", counts.get("employees", 0))
+    c3.metric("Jobs", counts.get("jobs", 0))
+    c4.metric("Products", counts.get("products", 0))
+
+    if st.button("Restore Builders / Clients and Employees"):
+        builder_count, employee_count = restore_builders_clients_and_employees()
+        st.success(f"Restored/updated {builder_count} builders/clients and {employee_count} employees.")
+        refresh()
+
+
+
     tab_add, tab_edit, tab_list = st.tabs(["Add User", "Edit / Disable User", "User List"])
 
     employee_options = get_employee_options(active_only=False)
@@ -1759,6 +1777,122 @@ def job_photos_page(employee_restricted=False):
                             refresh()
 
                 st.divider()
+
+
+
+# =============================
+# RESTORE MASTER LIST HELPERS
+# =============================
+def restore_builders_clients_and_employees():
+    builders = [
+        ("Builder","Ausmar Homes Pty Ltd","Compliance Team","07 5319 1500","compliance@ausmargroup.com.au","8 Flinders Lane, Maroochydore QLD 4558","1083000","55 087 236 208","30 Days","Annual Period Trade Contract"),
+        ("Developer / Builder","OneLife Property Group","Bryce Curran","0421 069 817","brycecurran@hotmail.com","Sunshine Coast","","","30 Days","Multi-residential complexes"),
+        ("Builder","Thompson Homes","","","","","","","30 Days","Existing JobHub builder"),
+        ("Client / Developer","Palm Lakes","","","","Pelican Waters","","","30 Days","Palm Lakes Pelican Waters"),
+        ("Interior Designer","Box Clever Interiors","Design Team","07 5309 5640","info@boxcleverinteriors.com.au","PO Box 208, Moffat Beach QLD 4551","","08 007 428 613","","Bannister project designer"),
+        ("Interior Designer","Inka Interiors","Sheena Hanks","0438 308 672","info@inkainteriors.com.au","Basement Level, 811 Stanley St, Woolloongabba","","","","Cunningham project designer"),
+        ("Painting Contractor","Emerald Painting Company Pty Ltd","Anthony Des Johnston","0410 949 719","des@emeraldpainting.com.au","20 Warenna Crescent, Glenvale QLD 4350","","85 169 333 957","","Industry contact"),
+        ("Supplier","Dulux Australia","","07 5443 7255","","Cnr Amaroo St & Maroochydore Rd, Maroochydore QLD 4558","","67 000 049 427","","Supplier"),
+        ("Builder","Greenrock Building","","","","","","","30 Days","Client history"),
+        ("Builder","Rejuvenate Group","","","","","","","30 Days","School works"),
+        ("Builder","Adlar Homes","","","","Maroochydore","","","30 Days","Client history"),
+        ("Builder","Darren Hunt Homes","","","","","","","30 Days","Custom homes"),
+        ("Builder","Watherston Building","","","","","","","30 Days","Custom homes"),
+        ("Commercial Client","Stockland Aura","","","","Aura","","","","Commercial developments"),
+        ("Commercial Builder","FDC Constructions","Simon Hawkins / Adam Pickering","","","","","","","Outreach"),
+        ("Commercial Client","Comiskey Group","Paul / David / Rob & team","","","Sunshine Coast","","","","Hospitality venue"),
+        ("Education Client","Nambour State College","","","","Nambour","","","","School works"),
+        ("Education Client","Currimundi State School","","","","Currimundi","","","","School works"),
+        ("Education Client","Currimundi Special School","","","","Currimundi","","","","School works"),
+        ("Education Client","Gympie South State School","","","","Gympie","","","","School works"),
+        ("Education Client","Good Shepherd Lutheran School","","","","","","","","School works"),
+    ]
+
+    employees = [
+        ("Bryce", "", 60.00, 66.00, "", "", "Active", ""),
+        ("Brodrick", "", 45.00, 49.50, "", "", "Active", ""),
+        ("Sol", "", 50.00, 55.00, "", "", "Active", ""),
+        ("Critter", "", 40.00, 44.00, "", "", "Active", ""),
+        ("Greg", "", 46.00, 50.60, "", "", "Active", ""),
+        ("Chris Nagy", "", 50.00, 55.00, "", "", "Active", ""),
+        ("Isaac", "", 46.00, 50.60, "", "", "Active", ""),
+        ("Rob Pullin", "", 45.00, 49.50, "", "", "Active", ""),
+        ("Ian", "", 46.00, 50.60, "", "", "Active", ""),
+        ("Tim", "", 45.00, 49.50, "", "", "Active", ""),
+        ("Anth", "", 35.00, 38.50, "", "", "Active", ""),
+        ("River", "", 32.50, 35.75, "", "", "Active", ""),
+        ("Dipper", "", 45.00, 49.50, "", "", "Active", ""),
+        ("Vlad 1", "", 45.00, 49.50, "", "", "Active", ""),
+        ("Vlad 2", "", 45.00, 49.50, "", "", "Active", ""),
+        ("Ryan", "", 45.00, 49.50, "", "", "Active", ""),
+    ]
+
+    conn = connect()
+    cur = conn.cursor()
+
+    for row in builders:
+        cur.execute("SELECT id FROM builders_clients WHERE name = ?", (row[1],))
+        existing = cur.fetchone()
+
+        if existing:
+            cur.execute("""
+                UPDATE builders_clients
+                SET type = ?, contact_name = ?, phone = ?, email = ?, address = ?, qbcc = ?, abn = ?, terms = ?, notes = ?
+                WHERE name = ?
+            """, (row[0], row[2], row[3], row[4], row[5], row[6], row[7], row[8], row[9], row[1]))
+        else:
+            cur.execute("""
+                INSERT INTO builders_clients
+                (type, name, contact_name, phone, email, address, qbcc, abn, terms, notes)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, row)
+
+    for row in employees:
+        cur.execute("SELECT id FROM employees WHERE name = ?", (row[0],))
+        existing = cur.fetchone()
+
+        if existing:
+            cur.execute("""
+                UPDATE employees
+                SET role = ?, base_hourly_rate = ?, rate_plus_10 = ?, phone = ?, email = ?, status = ?, notes = ?
+                WHERE name = ?
+            """, (row[1], row[2], row[3], row[4], row[5], row[6], row[7], row[0]))
+        else:
+            cur.execute("""
+                INSERT INTO employees
+                (name, role, base_hourly_rate, rate_plus_10, phone, email, status, notes)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, row)
+
+    try:
+        cur.execute("""
+            INSERT INTO app_settings (setting_key, setting_value)
+            VALUES (?, ?)
+            ON CONFLICT (setting_key) DO UPDATE SET setting_value = EXCLUDED.setting_value
+        """, ("starter_data_seeded", "yes"))
+        cur.execute("""
+            INSERT INTO app_settings (setting_key, setting_value)
+            VALUES (?, ?)
+            ON CONFLICT (setting_key) DO UPDATE SET setting_value = EXCLUDED.setting_value
+        """, ("starter_jobs_disabled", "yes"))
+    except Exception:
+        pass
+
+    conn.commit()
+    conn.close()
+
+    return len(builders), len(employees)
+
+
+def master_list_counts():
+    results = {}
+    for table in ["builders_clients", "employees", "jobs", "products"]:
+        try:
+            df = df_query(f"SELECT COUNT(*) AS count FROM {table}")
+            results[table] = int(df.iloc[0]["count"])
+        except Exception:
+            results[table] = 0
+    return results
 
 
 # =============================
