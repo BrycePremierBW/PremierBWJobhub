@@ -1,0 +1,18 @@
+PB JOBHUB APP BUILDER AI SELF-EDIT AUDIT
+========================================
+
+Checks:
+- app_code_changes table: present.
+- Self-edit UI section: present.
+- Self-edit apply function: present.
+- Apply confirmation: present.
+- Download changed files: present.
+- Compile check: present.
+- Self-edit tab: present.
+- Python compile check passed.
+
+Warnings / Limits:
+- No static warnings found.
+
+Limit:
+- Self-edit can change the running app files, but Streamlit Cloud redeploys from GitHub. Download and upload changed files to GitHub for permanent changes.

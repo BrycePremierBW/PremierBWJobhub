@@ -1,14 +1,18 @@
 
 import sqlite3
 import os
+import tempfile
+import shutil
 import base64
 import hashlib
 import re
+import json
 from pathlib import Path
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from io import BytesIO
 import pandas as pd
 from PIL import Image
+import requests
 import psycopg2
 from psycopg2.pool import ThreadedConnectionPool
 from pypdf import PdfReader
@@ -434,6 +438,25 @@ def init_db():
     """)
 
 
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS timesheet_entries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_id INTEGER NOT NULL,
+        employee_id INTEGER NOT NULL,
+        work_date TEXT,
+        start_time TEXT,
+        finish_time TEXT,
+        break_minutes REAL DEFAULT 0,
+        total_hours REAL DEFAULT 0,
+        work_type TEXT,
+        submitted_by TEXT,
+        submitted_at TEXT,
+        status TEXT DEFAULT 'Submitted',
+        notes TEXT,
+        FOREIGN KEY(job_id) REFERENCES jobs(id),
+        FOREIGN KEY(employee_id) REFERENCES employees(id)
+    )
+    """)
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS estimate_working_sheets (
@@ -510,6 +533,31 @@ def init_db():
     )
     """)
 
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS app_code_changes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT,
+        request TEXT,
+        ai_response TEXT,
+        patch_json TEXT,
+        target_files TEXT,
+        status TEXT,
+        created_at TEXT,
+        applied_at TEXT,
+        result_message TEXT
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS app_builder_notes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        topic TEXT,
+        note TEXT,
+        source TEXT,
+        created_at TEXT
+    )
+    """)
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS app_settings (
@@ -3148,6 +3196,1240 @@ def delete_selected_user_accounts(user_ids):
     return combined
 
 
+
+# =============================
+# JOB COSTS / FORECASTING + JOBHUB AI
+# =============================
+def jc_float(value, default=0.0):
+    try:
+        if value is None or value == "" or pd.isna(value):
+            return float(default)
+        return float(value)
+    except Exception:
+        return float(default)
+
+
+def jc_percent(numerator, denominator):
+    denominator = jc_float(denominator)
+    if denominator == 0:
+        return 0.0
+    return round((jc_float(numerator) / denominator) * 100, 2)
+
+
+def jc_parse_date(value):
+    if value is None or str(value).strip() == "":
+        return None
+    text = str(value).strip()[:10]
+    for fmt in ["%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%Y/%m/%d"]:
+        try:
+            return datetime.strptime(text, fmt).date()
+        except Exception:
+            pass
+    return None
+
+
+def jc_business_days(start_value, end_value):
+    start = jc_parse_date(start_value)
+    end = jc_parse_date(end_value)
+    if not start or not end or end < start:
+        return 0
+    days = 0
+    current = start
+    while current <= end:
+        if current.weekday() < 5:
+            days += 1
+        current += timedelta(days=1)
+    return days
+
+
+def jc_add_business_days(start_date, days):
+    current = start_date or date.today()
+    added = 0
+    days = int(max(days, 0))
+    while added < days:
+        current += timedelta(days=1)
+        if current.weekday() < 5:
+            added += 1
+    return current
+
+
+def jc_month_label(value):
+    d = jc_parse_date(value)
+    return d.strftime("%Y-%m") if d else "Unscheduled"
+
+
+def job_cost_summary_dataframe():
+    jobs = df_query("""
+        SELECT j.id AS 'job_id',
+               j.job_no AS 'Job No',
+               j.job_name AS 'Job Name',
+               COALESCE(bc.name, '') AS 'Builder / Client',
+               j.site_address AS 'Site Address',
+               j.status AS 'Status',
+               j.leading_hand AS 'Leading Hand',
+               j.start_date AS 'Start Date',
+               j.end_date AS 'End Date',
+               COALESCE(j.contract_value, 0) AS 'Contract Value',
+               j.notes AS 'Notes'
+        FROM jobs j
+        LEFT JOIN builders_clients bc ON bc.id = j.builder_client_id
+        ORDER BY j.job_no
+    """)
+
+    if jobs.empty:
+        return jobs
+
+    materials = df_query("""
+        SELECT m.job_id,
+               COALESCE(SUM(COALESCE(m.qty_required, 0) * COALESCE(p.price_ex_gst, 0)), 0) AS 'Actual Material Cost',
+               COALESCE(SUM(COALESCE(m.qty_required, 0)), 0) AS 'Material Qty Required',
+               COALESCE(SUM(COALESCE(m.qty_received, 0)), 0) AS 'Material Qty Received',
+               COUNT(*) AS 'Material Lines'
+        FROM material_entries m
+        LEFT JOIN products p ON p.id = m.product_id
+        GROUP BY m.job_id
+    """)
+
+    wages = df_query("""
+        SELECT w.job_id,
+               COALESCE(SUM(COALESCE(w.hours, 0)), 0) AS 'Wage Hours',
+               COALESCE(SUM(COALESCE(w.hours, 0) * COALESCE(e.rate_plus_10, e.base_hourly_rate, 0)), 0) AS 'Actual Labour Cost',
+               COUNT(*) AS 'Wage Lines'
+        FROM wage_entries w
+        LEFT JOIN employees e ON e.id = w.employee_id
+        GROUP BY w.job_id
+    """)
+
+    timesheets = df_query("""
+        SELECT job_id,
+               COALESCE(SUM(COALESCE(total_hours, 0)), 0) AS 'Timesheet Hours',
+               COUNT(*) AS 'Timesheet Lines'
+        FROM timesheet_entries
+        GROUP BY job_id
+    """)
+
+    estimates = df_query("""
+        SELECT e.job_id,
+               e.estimate_no AS 'Latest Estimate',
+               e.revision AS 'Estimate Revision',
+               COALESCE(e.labour_hours, 0) AS 'Estimated Labour Hours',
+               COALESCE(e.labour_rate, 0) AS 'Estimated Labour Rate',
+               COALESCE(e.material_allowance, 0) AS 'Estimated Materials',
+               COALESCE(e.access_equipment_allowance, 0) AS 'Estimated Access / Equipment',
+               COALESCE(e.subcontractor_allowance, 0) AS 'Estimated Subcontractor',
+               COALESCE(e.sundries_allowance, 0) AS 'Estimated Sundries',
+               COALESCE(e.total_ex_gst, 0) AS 'Estimate Total Ex GST',
+               COALESCE(e.total_inc_gst, 0) AS 'Estimate Total Inc GST'
+        FROM estimate_working_sheets e
+        JOIN (
+            SELECT job_id, MAX(id) AS max_id
+            FROM estimate_working_sheets
+            GROUP BY job_id
+        ) latest ON latest.max_id = e.id
+    """)
+
+    df = jobs.copy()
+    for extra in [materials, wages, timesheets, estimates]:
+        if extra is not None and not extra.empty:
+            df = df.merge(extra, on="job_id", how="left")
+
+    number_cols = [
+        "Contract Value", "Actual Material Cost", "Material Qty Required", "Material Qty Received",
+        "Material Lines", "Wage Hours", "Actual Labour Cost", "Wage Lines", "Timesheet Hours",
+        "Timesheet Lines", "Estimated Labour Hours", "Estimated Labour Rate", "Estimated Materials",
+        "Estimated Access / Equipment", "Estimated Subcontractor", "Estimated Sundries",
+        "Estimate Total Ex GST", "Estimate Total Inc GST"
+    ]
+
+    for col in number_cols:
+        if col not in df.columns:
+            df[col] = 0.0
+        df[col] = df[col].fillna(0)
+
+    for col in ["Latest Estimate", "Estimate Revision"]:
+        if col not in df.columns:
+            df[col] = ""
+        df[col] = df[col].fillna("")
+
+    df["Actual Labour Hours"] = df["Wage Hours"]
+    df["Total Actual Cost"] = df["Actual Material Cost"] + df["Actual Labour Cost"]
+    df["Gross Profit"] = df["Contract Value"] - df["Total Actual Cost"]
+    df["Gross Profit %"] = df.apply(lambda r: jc_percent(r["Gross Profit"], r["Contract Value"]), axis=1)
+    df["Cost to Date %"] = df.apply(lambda r: jc_percent(r["Total Actual Cost"], r["Contract Value"]), axis=1)
+    df["Remaining Labour Hours"] = (df["Estimated Labour Hours"] - df["Timesheet Hours"]).clip(lower=0)
+    df["Working Days Scheduled"] = df.apply(lambda r: jc_business_days(r["Start Date"], r["End Date"]), axis=1)
+    df["Forecast Month"] = df["Start Date"].apply(jc_month_label)
+    return df
+
+
+def job_costs_forecasting_page():
+    st.header("Job Costs / Forecasting")
+    st.caption("Job cost breakdowns, financial forecasting and labour/schedule forecasting.")
+
+    df = job_cost_summary_dataframe()
+    if df.empty:
+        st.info("No jobs found yet.")
+        return
+
+    section = st.radio(
+        "Section",
+        ["Selected Job Breakdown", "Financial Forecast", "Scheduling Forecast", "Export"],
+        horizontal=True,
+        key="job_cost_forecast_section",
+    )
+
+    if section == "Selected Job Breakdown":
+        job_options = {f"{r['Job No']} - {r['Job Name']}": int(r["job_id"]) for _, r in df.iterrows()}
+        selected = st.selectbox("Select Job", list(job_options.keys()), key="job_cost_selected")
+        row = df[df["job_id"].astype(int) == int(job_options[selected])].iloc[0]
+
+        st.subheader(f"{row['Job No']} - {row['Job Name']}")
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Contract Value", f"${jc_float(row['Contract Value']):,.2f}")
+        c2.metric("Actual Cost to Date", f"${jc_float(row['Total Actual Cost']):,.2f}")
+        c3.metric("Gross Profit", f"${jc_float(row['Gross Profit']):,.2f}")
+        c4.metric("Gross Profit %", f"{jc_float(row['Gross Profit %']):.2f}%")
+
+        c5, c6, c7, c8 = st.columns(4)
+        c5.metric("Material Cost", f"${jc_float(row['Actual Material Cost']):,.2f}")
+        c6.metric("Labour Cost", f"${jc_float(row['Actual Labour Cost']):,.2f}")
+        c7.metric("Timesheet Hours", f"{jc_float(row['Timesheet Hours']):.2f}")
+        c8.metric("Remaining Est. Hours", f"{jc_float(row['Remaining Labour Hours']):.2f}")
+
+        st.markdown("### Forecast Inputs")
+        i1, i2, i3, i4 = st.columns(4)
+        target_gp = i1.number_input("Target GP %", min_value=0.0, max_value=100.0, value=35.0, step=1.0)
+        labour_cost_hour = i2.number_input("Labour Cost / Hour", min_value=0.0, value=120.0, step=5.0)
+        crew_size = i3.number_input("Crew Size", min_value=1.0, value=3.0, step=1.0)
+        hours_day = i4.number_input("Hours / Person / Day", min_value=1.0, value=7.5, step=0.5)
+
+        target_cost = jc_float(row["Contract Value"]) * (1 - target_gp / 100)
+        remaining_cost_budget = max(target_cost - jc_float(row["Total Actual Cost"]), 0)
+        remaining_by_budget = remaining_cost_budget / labour_cost_hour if labour_cost_hour else 0
+        remaining_hours = jc_float(row["Remaining Labour Hours"]) or remaining_by_budget
+        daily_capacity = crew_size * hours_day
+        days_required = int((remaining_hours + daily_capacity - 0.001) // daily_capacity) if daily_capacity else 0
+        if daily_capacity and remaining_hours % daily_capacity:
+            days_required += 1
+        finish_date = jc_add_business_days(date.today(), days_required)
+
+        forecast_cost = jc_float(row["Total Actual Cost"]) + remaining_hours * labour_cost_hour
+        forecast_profit = jc_float(row["Contract Value"]) - forecast_cost
+        forecast_gp = jc_percent(forecast_profit, row["Contract Value"])
+
+        f1, f2, f3, f4 = st.columns(4)
+        f1.metric("Remaining Cost Budget", f"${remaining_cost_budget:,.2f}")
+        f2.metric("Forecast Remaining Hours", f"{remaining_hours:,.2f}")
+        f3.metric("Forecast Finish", str(finish_date))
+        f4.metric("Forecast GP %", f"{forecast_gp:.2f}%")
+
+        if forecast_gp < target_gp:
+            st.warning("Forecast is below target. Check labour, materials, scope changes and variations.")
+        else:
+            st.success("Forecast is at or above target based on these inputs.")
+
+        detail_cols = [
+            "Job No", "Job Name", "Builder / Client", "Status", "Leading Hand", "Start Date", "End Date",
+            "Contract Value", "Actual Material Cost", "Actual Labour Cost", "Total Actual Cost",
+            "Gross Profit", "Gross Profit %", "Estimate Total Ex GST", "Estimated Labour Hours",
+            "Timesheet Hours", "Remaining Labour Hours", "Working Days Scheduled"
+        ]
+        st.dataframe(pd.DataFrame([row[detail_cols]]), width="stretch", hide_index=True)
+
+    elif section == "Financial Forecast":
+        st.subheader("Financial Forecast by Job")
+        statuses = ["All"] + sorted([str(x) for x in df["Status"].fillna("").unique() if str(x).strip()])
+        selected_status = st.selectbox("Status Filter", statuses)
+        filtered = df.copy()
+        if selected_status != "All":
+            filtered = filtered[filtered["Status"].astype(str) == selected_status]
+
+        total_contract = jc_float(filtered["Contract Value"].sum()) if not filtered.empty else 0
+        total_cost = jc_float(filtered["Total Actual Cost"].sum()) if not filtered.empty else 0
+        total_profit = total_contract - total_cost
+        total_gp = jc_percent(total_profit, total_contract)
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Contract Value", f"${total_contract:,.2f}")
+        c2.metric("Cost to Date", f"${total_cost:,.2f}")
+        c3.metric("Gross Profit", f"${total_profit:,.2f}")
+        c4.metric("Gross Profit %", f"{total_gp:.2f}%")
+
+        show_cols = [
+            "Job No", "Job Name", "Builder / Client", "Status", "Start Date", "End Date",
+            "Contract Value", "Total Actual Cost", "Gross Profit", "Gross Profit %",
+            "Actual Material Cost", "Actual Labour Cost", "Timesheet Hours", "Estimate Total Ex GST"
+        ]
+        st.dataframe(filtered[[c for c in show_cols if c in filtered.columns]], width="stretch", hide_index=True)
+
+        monthly = filtered.groupby("Forecast Month", dropna=False).agg({
+            "Contract Value": "sum",
+            "Total Actual Cost": "sum",
+            "Gross Profit": "sum",
+            "Timesheet Hours": "sum",
+        }).reset_index()
+        if not monthly.empty:
+            monthly["Gross Profit %"] = monthly.apply(lambda r: jc_percent(r["Gross Profit"], r["Contract Value"]), axis=1)
+            st.markdown("### Forecast by Month")
+            st.dataframe(monthly, width="stretch", hide_index=True)
+
+    elif section == "Scheduling Forecast":
+        st.subheader("Scheduling / Labour Forecast")
+        hours_day = st.number_input("Default Hours / Person / Day", min_value=1.0, value=7.5, step=0.5)
+        sched = df.copy()
+        sched["Budget Labour Hours"] = sched["Estimated Labour Hours"]
+        sched["Budget Labour Hours"] = sched.apply(
+            lambda r: jc_float(r["Budget Labour Hours"]) if jc_float(r["Budget Labour Hours"]) > 0 else jc_float(r["Contract Value"]) / 120,
+            axis=1,
+        )
+        sched["Remaining Hours"] = (sched["Budget Labour Hours"] - sched["Timesheet Hours"]).clip(lower=0)
+        sched["Remaining Painter Days"] = (sched["Remaining Hours"] / hours_day).round(2)
+        sched["Required Painters"] = sched.apply(
+            lambda r: round(jc_float(r["Budget Labour Hours"]) / (jc_float(r["Working Days Scheduled"]) * hours_day), 2)
+            if jc_float(r["Working Days Scheduled"]) > 0 else 0,
+            axis=1,
+        )
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Remaining Labour Hours", f"{jc_float(sched['Remaining Hours'].sum()):,.2f}")
+        c2.metric("Remaining Painter Days", f"{jc_float(sched['Remaining Painter Days'].sum()):,.2f}")
+        c3.metric("Jobs in Forecast", len(sched))
+
+        cols = [
+            "Job No", "Job Name", "Status", "Leading Hand", "Start Date", "End Date",
+            "Working Days Scheduled", "Budget Labour Hours", "Timesheet Hours",
+            "Remaining Hours", "Required Painters", "Remaining Painter Days"
+        ]
+        st.dataframe(sched[[c for c in cols if c in sched.columns]], width="stretch", hide_index=True)
+
+    else:
+        st.subheader("Export Job Cost / Forecast Data")
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            df.drop(columns=["job_id"], errors="ignore").to_excel(writer, index=False, sheet_name="Job Forecast")
+            monthly = df.groupby("Forecast Month", dropna=False).agg({
+                "Contract Value": "sum",
+                "Total Actual Cost": "sum",
+                "Gross Profit": "sum",
+                "Timesheet Hours": "sum",
+            }).reset_index()
+            if not monthly.empty:
+                monthly["Gross Profit %"] = monthly.apply(lambda r: jc_percent(r["Gross Profit"], r["Contract Value"]), axis=1)
+            monthly.to_excel(writer, index=False, sheet_name="Monthly Forecast")
+            for ws in writer.book.worksheets:
+                for column_cells in ws.columns:
+                    max_len = 0
+                    col_letter = column_cells[0].column_letter
+                    for cell in column_cells:
+                        value = "" if cell.value is None else str(cell.value)
+                        max_len = max(max_len, len(value))
+                    ws.column_dimensions[col_letter].width = min(max(max_len + 2, 12), 45)
+        output.seek(0)
+        st.download_button(
+            "Download Job Cost / Forecast Excel",
+            data=output.getvalue(),
+            file_name="PB_JobHub_Job_Cost_Forecast.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+
+def jobhub_ai_api_key():
+    try:
+        if "OPENAI_API_KEY" in st.secrets:
+            return st.secrets["OPENAI_API_KEY"]
+    except Exception:
+        pass
+    return os.environ.get("OPENAI_API_KEY", "")
+
+
+def jobhub_ai_model():
+    try:
+        if "OPENAI_MODEL" in st.secrets:
+            return st.secrets["OPENAI_MODEL"]
+    except Exception:
+        pass
+    return os.environ.get("OPENAI_MODEL", "gpt-5.5")
+
+
+def jobhub_ai_context(selected_job_id=None):
+    df = job_cost_summary_dataframe()
+    lines = []
+
+    if selected_job_id and not df.empty:
+        selected = df[df["job_id"].astype(int) == int(selected_job_id)]
+        if not selected.empty:
+            r = selected.iloc[0]
+            lines.append("SELECTED JOB SUMMARY")
+            for col in [
+                "Job No", "Job Name", "Builder / Client", "Status", "Leading Hand", "Start Date", "End Date",
+                "Contract Value", "Actual Material Cost", "Actual Labour Cost", "Total Actual Cost",
+                "Gross Profit", "Gross Profit %", "Timesheet Hours", "Estimated Labour Hours", "Remaining Labour Hours"
+            ]:
+                if col in selected.columns:
+                    lines.append(f"{col}: {r.get(col, '')}")
+
+            materials = df_query("""
+                SELECT p.product_code AS 'Product Code',
+                       p.product_name AS 'Product Name',
+                       m.qty_required AS 'Qty Required',
+                       m.qty_received AS 'Qty Received',
+                       p.price_ex_gst AS 'Unit Price',
+                       ROUND(COALESCE(m.qty_required, 0) * COALESCE(p.price_ex_gst, 0), 2) AS 'Line Cost',
+                       m.notes AS 'Notes'
+                FROM material_entries m
+                LEFT JOIN products p ON p.id = m.product_id
+                WHERE m.job_id = ?
+                ORDER BY m.id DESC
+                LIMIT 50
+            """, (selected_job_id,))
+            if not materials.empty:
+                lines.append("\nMATERIALS")
+                lines.append(materials.to_csv(index=False))
+
+            timesheets = df_query("""
+                SELECT e.name AS 'Employee',
+                       t.work_date AS 'Date',
+                       t.total_hours AS 'Hours',
+                       t.work_type AS 'Work Type',
+                       t.status AS 'Status',
+                       t.notes AS 'Notes'
+                FROM timesheet_entries t
+                LEFT JOIN employees e ON e.id = t.employee_id
+                WHERE t.job_id = ?
+                ORDER BY t.work_date DESC
+                LIMIT 50
+            """, (selected_job_id,))
+            if not timesheets.empty:
+                lines.append("\nTIMESHEETS")
+                lines.append(timesheets.to_csv(index=False))
+    else:
+        if not df.empty:
+            overview_cols = [
+                "Job No", "Job Name", "Status", "Start Date", "End Date", "Contract Value",
+                "Total Actual Cost", "Gross Profit", "Gross Profit %", "Timesheet Hours"
+            ]
+            lines.append("ALL JOBS OVERVIEW")
+            lines.append(df[[c for c in overview_cols if c in df.columns]].head(60).to_csv(index=False))
+
+    return "\n".join(lines)[:18000]
+
+
+def jobhub_ai_answer(question, context_text):
+    api_key = jobhub_ai_api_key()
+    if not api_key:
+        return None, "OPENAI_API_KEY is missing. Add it in Streamlit Secrets first."
+
+    payload = {
+        "model": jobhub_ai_model(),
+        "input": (
+            "You are JobHub AI for Premier Brushworks, a painting and decorating business. "
+            "Use only the JobHub context provided. Give practical, direct advice for quoting, job costs, scheduling, materials, "
+            "staffing, risks and next actions. If data is missing, say what is missing. Do not invent details.\n\n"
+            "JOBHUB CONTEXT:\n" + context_text + "\n\nUSER QUESTION:\n" + str(question)
+        ),
+    }
+
+    try:
+        response = requests.post(
+            "https://api.openai.com/v1/responses",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=60,
+        )
+        if response.status_code >= 400:
+            return None, f"OpenAI API error {response.status_code}: {response.text[:1000]}"
+
+        data = response.json()
+        if data.get("output_text"):
+            return data["output_text"], None
+
+        parts = []
+        for item in data.get("output", []) or []:
+            for content in item.get("content", []) or []:
+                if isinstance(content, dict) and content.get("text"):
+                    parts.append(str(content["text"]))
+
+        return "\n".join(parts) if parts else json.dumps(data)[:3000], None
+    except Exception as e:
+        return None, f"OpenAI request failed: {e}"
+
+
+def jobhub_ai_assistant_page():
+    st.header("JobHub AI Assistant")
+    st.caption("Ask an AI assistant about your JobHub data, job costs, quotes, scheduling and risks.")
+
+    if not jobhub_ai_api_key():
+        st.warning("OPENAI_API_KEY is not set yet. Add it in Streamlit Secrets.")
+        st.code('OPENAI_API_KEY = "sk-..."\nOPENAI_MODEL = "gpt-5.5"', language="toml")
+        return
+
+    job_options = get_job_options()
+    mode = st.radio("Context", ["All Jobs Overview", "Selected Job"], horizontal=True, key="ai_context_mode")
+    selected_job_id = None
+
+    if mode == "Selected Job":
+        if not job_options:
+            st.info("Create a job first.")
+            return
+        selected_job = st.selectbox("Select Job", list(job_options.keys()), key="ai_selected_job")
+        selected_job_id = job_options[selected_job]
+
+    quick = st.selectbox(
+        "Quick Question",
+        [
+            "Custom",
+            "Which jobs are at risk of running over budget?",
+            "What should I check before quoting this job?",
+            "How many painters do I need to finish this job on time?",
+            "What materials or timesheets look unusual?",
+            "Give me a director-level summary for this week.",
+        ],
+        key="ai_quick_question",
+    )
+    default_question = "" if quick == "Custom" else quick
+
+    question = st.text_area(
+        "Ask JobHub AI",
+        value=default_question,
+        height=120,
+        placeholder="Example: Review this job and tell me the margin risk, labour pressure and next actions.",
+        key="ai_question",
+    )
+
+    context_text = jobhub_ai_context(selected_job_id)
+    if st.checkbox("Show data being sent to AI", value=False, key="ai_show_context"):
+        st.text_area("Context Preview", value=context_text, height=300)
+
+    if st.button("Ask JobHub AI", key="ask_jobhub_ai"):
+        if not question.strip():
+            st.error("Enter a question first.")
+        else:
+            with st.spinner("JobHub AI is reviewing your data..."):
+                answer, error = jobhub_ai_answer(question, context_text)
+            if error:
+                st.error(error)
+            else:
+                st.markdown("### Answer")
+                st.write(answer)
+
+
+
+# =============================
+# APP BUILDER AI
+# =============================
+def app_builder_read_file(path, max_chars=12000):
+    try:
+        p = Path(path)
+        if not p.exists() or not p.is_file():
+            return ""
+        text = p.read_text(encoding="utf-8", errors="ignore")
+        if len(text) > max_chars:
+            return text[:max_chars] + f"\n\n...[trimmed after {max_chars} characters]..."
+        return text
+    except Exception as e:
+        return f"Could not read {path}: {e}"
+
+
+def app_builder_file_tree():
+    allowed = []
+    try:
+        root = Path(".")
+        for p in root.rglob("*"):
+            if p.is_file():
+                name = str(p).replace("\\", "/")
+                if "__pycache__" in name or ".git" in name or "pb_jobhub.db" in name or "secrets.toml" in name:
+                    continue
+                if name.endswith((".py", ".txt", ".toml", ".sql")):
+                    allowed.append(name)
+    except Exception:
+        allowed = ["pb_jobhub_app.py", "requirements.txt", "SUPABASE_SCHEMA_MANUAL_BACKUP.sql"]
+    return sorted(allowed)[:80]
+
+
+def app_builder_relevant_code_snippets(question, max_snippets=8, chars_per_snippet=1800):
+    """
+    Pulls relevant sections from pb_jobhub_app.py without sending the full app every time.
+    """
+    source = app_builder_read_file("pb_jobhub_app.py", max_chars=400000)
+    if not source:
+        return ""
+
+    terms = []
+    for raw in re.findall(r"[A-Za-z_]{4,}", str(question).lower()):
+        if raw not in ["this", "that", "with", "from", "your", "have", "will", "make", "need", "want", "please"]:
+            terms.append(raw)
+
+    priority_terms = [
+        "streamlit", "supabase", "postgres", "connect", "df_query", "execute", "job", "employee",
+        "timesheet", "estimate", "material", "product", "user", "login", "forecast", "ai", "openai"
+    ]
+    terms = list(dict.fromkeys(terms + priority_terms))
+
+    snippets = []
+    lines = source.splitlines()
+    lower_lines = [l.lower() for l in lines]
+
+    matched_indexes = []
+    for i, line in enumerate(lower_lines):
+        if any(t in line for t in terms):
+            matched_indexes.append(i)
+
+    # group nearby line matches
+    used = set()
+    for idx in matched_indexes:
+        if len(snippets) >= max_snippets:
+            break
+        start = max(idx - 20, 0)
+        end = min(idx + 60, len(lines))
+        key = (start // 40, end // 40)
+        if key in used:
+            continue
+        used.add(key)
+        snippet = "\n".join(lines[start:end])
+        if len(snippet) > chars_per_snippet:
+            snippet = snippet[:chars_per_snippet] + "\n...[snippet trimmed]..."
+        snippets.append(f"--- pb_jobhub_app.py lines approx {start+1}-{end} ---\n{snippet}")
+
+    return "\n\n".join(snippets)
+
+
+def app_builder_notes_context(limit=20):
+    try:
+        notes = df_query("""
+            SELECT topic AS 'Topic', note AS 'Note', source AS 'Source', created_at AS 'Created'
+            FROM app_builder_notes
+            ORDER BY id DESC
+            LIMIT ?
+        """, (limit,))
+        if notes.empty:
+            return ""
+        return notes.to_csv(index=False)
+    except Exception:
+        return ""
+
+
+def save_app_builder_note(topic, note, source="Manual / AI"):
+    execute("""
+        INSERT INTO app_builder_notes (topic, note, source, created_at)
+        VALUES (?, ?, ?, ?)
+    """, (topic, note, source, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+
+
+def app_builder_ai_call(question, include_web=False, require_web=False, selected_mode="Code Helper"):
+    api_key = jobhub_ai_api_key()
+    if not api_key:
+        return None, "OPENAI_API_KEY is missing. Add it in Streamlit Secrets first."
+
+    file_tree = "\n".join(app_builder_file_tree())
+    reqs = app_builder_read_file("requirements.txt", max_chars=6000)
+    schema = app_builder_read_file("SUPABASE_SCHEMA_MANUAL_BACKUP.sql", max_chars=12000)
+    snippets = app_builder_relevant_code_snippets(question)
+    saved_notes = app_builder_notes_context()
+
+    system_prompt = f"""
+You are App Builder AI inside Premier Brushworks JobHub.
+You help the owner improve and maintain this Streamlit + Supabase business app.
+
+Rules:
+- Be practical and direct.
+- Help design features, find likely bugs, improve speed, improve database structure, and plan safe changes.
+- If asked to change the app, provide a clear build plan and exact code/pseudocode sections.
+- Do NOT pretend you have already changed GitHub or deployed the app.
+- Do NOT expose or ask for secrets.
+- If live web research is enabled, use current public documentation and include citations in the answer where available.
+- If something is risky, say so and suggest the safest next step.
+- This AI can learn by saving notes in app_builder_notes. It does not retrain model weights.
+Mode: {selected_mode}
+"""
+
+    context = f"""
+APP FILE TREE:
+{file_tree}
+
+REQUIREMENTS:
+{reqs}
+
+DATABASE SCHEMA EXCERPT:
+{schema}
+
+RELEVANT CURRENT APP CODE SNIPPETS:
+{snippets}
+
+SAVED APP BUILDER LEARNINGS:
+{saved_notes}
+"""
+
+    payload = {
+        "model": jobhub_ai_model(),
+        "input": system_prompt + "\n\n" + context + "\n\nUSER REQUEST:\n" + str(question),
+    }
+
+    if include_web:
+        payload["tools"] = [{"type": "web_search"}]
+        payload["tool_choice"] = "required" if require_web else "auto"
+
+    try:
+        response = requests.post(
+            "https://api.openai.com/v1/responses",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=90,
+        )
+        if response.status_code >= 400:
+            return None, f"OpenAI API error {response.status_code}: {response.text[:1200]}"
+
+        data = response.json()
+
+        if data.get("output_text"):
+            return data["output_text"], None
+
+        parts = []
+        for item in data.get("output", []) or []:
+            for content in item.get("content", []) or []:
+                if isinstance(content, dict):
+                    if content.get("text"):
+                        parts.append(str(content["text"]))
+                    elif content.get("type") == "output_text" and content.get("text"):
+                        parts.append(str(content["text"]))
+
+        return "\n".join(parts) if parts else json.dumps(data)[:4000], None
+    except Exception as e:
+        return None, f"OpenAI request failed: {e}"
+
+
+def app_builder_ai_page():
+    st.header("App Builder AI")
+    st.caption("Use this to help build, improve and research the JobHub app. It can use live internet research and save learnings for later.")
+
+    if not jobhub_ai_api_key():
+        st.warning("OPENAI_API_KEY is not set yet. Add it in Streamlit Secrets.")
+        st.code('OPENAI_API_KEY = "sk-..."\nOPENAI_MODEL = "gpt-5.5"', language="toml")
+        return
+
+    section = st.radio(
+        "Section",
+        ["Build / Fix the App", "Self-Edit Code", "Internet Learning", "Saved Learnings"],
+        horizontal=True,
+        key="app_builder_section",
+    )
+
+    if section == "Build / Fix the App":
+        st.subheader("Build / Fix the App")
+        mode = st.selectbox(
+            "Mode",
+            ["Code Helper", "Bug Fixer", "Feature Planner", "Speed Optimiser", "Database / Supabase Helper", "Streamlit UI Helper"],
+            key="app_builder_mode",
+        )
+
+        include_web = st.checkbox("Allow live internet research", value=True, key="app_builder_include_web")
+        require_web = st.checkbox("Force web search for this request", value=False, key="app_builder_require_web")
+
+        quick = st.selectbox(
+            "Quick request",
+            [
+                "Custom",
+                "Review this app and suggest the next 5 improvements",
+                "Help me make the app faster",
+                "Help me add a new feature safely",
+                "Review the latest Streamlit/Supabase/OpenAI docs before answering",
+                "Tell me what code files need changing for this feature",
+            ],
+            key="app_builder_quick",
+        )
+        default_question = "" if quick == "Custom" else quick
+
+        question = st.text_area(
+            "What do you want to build or fix?",
+            value=default_question,
+            height=150,
+            placeholder="Example: Add a daily dashboard showing jobs starting this week, overdue invoices, missing timesheets and jobs at margin risk.",
+            key="app_builder_question",
+        )
+
+        if st.checkbox("Show app code context being sent", value=False, key="app_builder_show_context"):
+            st.markdown("### File tree")
+            st.code("\n".join(app_builder_file_tree()))
+            st.markdown("### Relevant snippets")
+            st.code(app_builder_relevant_code_snippets(question or "jobhub app"))
+
+        if st.button("Ask App Builder AI", key="ask_app_builder_ai"):
+            if not question.strip():
+                st.error("Enter a build/fix request first.")
+            else:
+                with st.spinner("App Builder AI is reviewing JobHub..."):
+                    answer, error = app_builder_ai_call(
+                        question=question,
+                        include_web=include_web,
+                        require_web=require_web,
+                        selected_mode=mode,
+                    )
+
+                if error:
+                    st.error(error)
+                else:
+                    st.markdown("### App Builder AI")
+                    st.write(answer)
+
+                    with st.expander("Save this as a learning note"):
+                        note_topic = st.text_input("Topic", value=question[:80], key="save_ai_learning_topic")
+                        note_text = st.text_area("Note to save", value=answer[:4000], height=200, key="save_ai_learning_text")
+                        if st.button("Save Learning Note", key="save_ai_learning_button"):
+                            save_app_builder_note(note_topic, note_text, source="App Builder AI")
+                            st.success("Learning note saved.")
+
+    elif section == "Self-Edit Code":
+        app_builder_self_edit_section()
+
+    elif section == "Internet Learning":
+        st.subheader("Internet Learning")
+        st.caption("Ask the AI to research current docs or ideas online, then save the best findings into JobHub's learning notes.")
+
+        topic = st.text_input(
+            "Research topic",
+            value="Latest Streamlit performance best practices for database apps",
+            key="internet_learning_topic",
+        )
+        focus = st.text_area(
+            "What should it learn?",
+            value="Find current practical guidance that would help improve Premier Brushworks JobHub. Keep it focused on Streamlit, Supabase, OpenAI, security, speed and maintainability.",
+            height=120,
+            key="internet_learning_focus",
+        )
+
+        if st.button("Research Internet and Summarise", key="internet_learning_button"):
+            prompt = (
+                f"Research this topic using current web sources: {topic}\n\n"
+                f"Focus: {focus}\n\n"
+                "Return practical findings, implementation notes for this app, risks, and links/citations where available. "
+                "Then finish with a short 'Save this learning' summary."
+            )
+            with st.spinner("Researching online..."):
+                answer, error = app_builder_ai_call(
+                    question=prompt,
+                    include_web=True,
+                    require_web=True,
+                    selected_mode="Internet Researcher",
+                )
+
+            if error:
+                st.error(error)
+            else:
+                st.markdown("### Research Summary")
+                st.write(answer)
+
+                with st.expander("Save research into JobHub learning notes", expanded=True):
+                    note_topic = st.text_input("Topic to save", value=topic, key="save_research_topic")
+                    note_text = st.text_area("Research note", value=answer[:6000], height=250, key="save_research_note")
+                    if st.button("Save Research Learning", key="save_research_button"):
+                        save_app_builder_note(note_topic, note_text, source="Internet Research")
+                        st.success("Research learning saved.")
+
+    else:
+        st.subheader("Saved Learnings")
+        notes = df_query("""
+            SELECT id AS 'ID',
+                   topic AS 'Topic',
+                   source AS 'Source',
+                   created_at AS 'Created',
+                   note AS 'Note'
+            FROM app_builder_notes
+            ORDER BY id DESC
+        """)
+
+        if notes.empty:
+            st.info("No saved learnings yet.")
+        else:
+            st.dataframe(notes[["ID", "Topic", "Source", "Created"]], width="stretch", hide_index=True)
+
+            note_options = {f"{row['Topic']} | {row['Source']} | ID {row['ID']}": int(row["ID"]) for _, row in notes.iterrows()}
+            selected = st.selectbox("Open learning note", list(note_options.keys()), key="open_learning_note")
+            selected_id = note_options[selected]
+            row = notes[notes["ID"].astype(int) == selected_id].iloc[0]
+            st.markdown(f"### {row['Topic']}")
+            st.caption(f"{row['Source']} • {row['Created']}")
+            st.write(row["Note"])
+
+            col1, col2 = st.columns(2)
+            if col1.button("Delete This Learning Note", key="delete_learning_note"):
+                execute("DELETE FROM app_builder_notes WHERE id = ?", (selected_id,))
+                st.success("Learning note deleted.")
+                refresh()
+
+        with st.expander("Add manual learning note"):
+            with st.form("manual_learning_note_form"):
+                topic = st.text_input("Topic")
+                source = st.text_input("Source", value="Manual")
+                note = st.text_area("Note", height=180)
+                submitted = st.form_submit_button("Save Manual Learning")
+                if submitted:
+                    if not topic.strip() or not note.strip():
+                        st.error("Topic and note are required.")
+                    else:
+                        save_app_builder_note(topic, note, source=source)
+                        st.success("Learning note saved.")
+                        refresh()
+
+
+
+# =============================
+# APP BUILDER SELF-EDIT HELPERS
+# =============================
+SELF_EDIT_ALLOWED_FILES = {
+    "pb_jobhub_app.py",
+    "requirements.txt",
+    "SUPABASE_SCHEMA_MANUAL_BACKUP.sql",
+    ".streamlit/config.toml",
+}
+
+
+def self_edit_safe_path(target_file):
+    target_file = str(target_file or "").strip().replace("\\", "/")
+    if target_file not in SELF_EDIT_ALLOWED_FILES:
+        return None, f"File not allowed for self-edit: {target_file}"
+
+    p = Path(target_file)
+    if ".." in p.parts or p.is_absolute():
+        return None, "Unsafe file path."
+
+    return p, None
+
+
+def self_edit_extract_json(text):
+    """
+    Extracts a JSON array from AI output.
+    Expected format:
+    [
+      {
+        "target_file": "pb_jobhub_app.py",
+        "find": "exact old text",
+        "replace": "new text",
+        "reason": "why"
+      }
+    ]
+    """
+    raw = str(text or "").strip()
+
+    # Remove markdown fences if present.
+    raw = re.sub(r"^```(?:json)?", "", raw.strip(), flags=re.I).strip()
+    raw = re.sub(r"```$", "", raw.strip()).strip()
+
+    try:
+        data = json.loads(raw)
+        if isinstance(data, dict) and "replacements" in data:
+            data = data["replacements"]
+        return data if isinstance(data, list) else []
+    except Exception:
+        pass
+
+    # Try to find the first JSON array in text.
+    start = raw.find("[")
+    end = raw.rfind("]")
+    if start != -1 and end != -1 and end > start:
+        try:
+            data = json.loads(raw[start:end+1])
+            return data if isinstance(data, list) else []
+        except Exception:
+            pass
+
+    return []
+
+
+def self_edit_validate_replacements(replacements):
+    issues = []
+    if not replacements:
+        issues.append("No replacement JSON found.")
+        return issues
+
+    for i, item in enumerate(replacements, start=1):
+        if not isinstance(item, dict):
+            issues.append(f"Replacement {i} is not an object.")
+            continue
+
+        target = item.get("target_file", "")
+        find = item.get("find", "")
+        replace = item.get("replace", "")
+
+        path, error = self_edit_safe_path(target)
+        if error:
+            issues.append(f"Replacement {i}: {error}")
+
+        if not find:
+            issues.append(f"Replacement {i}: find text is empty.")
+
+        if replace is None:
+            issues.append(f"Replacement {i}: replace text is missing.")
+
+        if path and path.exists():
+            try:
+                file_text = path.read_text(encoding="utf-8", errors="ignore")
+                if find and find not in file_text:
+                    issues.append(f"Replacement {i}: find text was not found in {target}.")
+            except Exception as e:
+                issues.append(f"Replacement {i}: could not read {target}: {e}")
+        elif path:
+            issues.append(f"Replacement {i}: target file does not exist: {target}")
+
+    return issues
+
+
+def self_edit_apply_replacements(replacements):
+    """
+    Applies exact find/replace patches.
+    Creates backups first.
+    If pb_jobhub_app.py compile fails, restores the backup.
+    """
+    result = {
+        "applied": 0,
+        "backups": [],
+        "messages": [],
+        "success": False,
+    }
+
+    issues = self_edit_validate_replacements(replacements)
+    if issues:
+        result["messages"].extend(issues)
+        return result
+
+    backup_root = Path(tempfile.gettempdir()) / "pb_jobhub_self_edit_backups"
+    backup_root.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    touched_files = set()
+
+    try:
+        for item in replacements:
+            target_file = item["target_file"]
+            find = item["find"]
+            replace = item["replace"]
+
+            path, error = self_edit_safe_path(target_file)
+            if error:
+                raise RuntimeError(error)
+
+            if str(path) not in touched_files:
+                backup_path = backup_root / f"{path.name}.{stamp}.bak"
+                backup_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(path, backup_path)
+                result["backups"].append(str(backup_path))
+                touched_files.add(str(path))
+
+            current = path.read_text(encoding="utf-8", errors="ignore")
+            updated = current.replace(find, replace, 1)
+            path.write_text(updated, encoding="utf-8")
+            result["applied"] += 1
+            result["messages"].append(f"Applied replacement to {target_file}: {item.get('reason', 'No reason provided')}")
+
+        # Compile check and rollback for Python app file.
+        if "pb_jobhub_app.py" in [str(item.get("target_file")) for item in replacements]:
+            try:
+                py_compile.compile("pb_jobhub_app.py", doraise=True)
+                result["messages"].append("Python compile check passed after self-edit.")
+            except Exception as compile_error:
+                # Restore all backups.
+                for backup in result["backups"]:
+                    backup_path = Path(backup)
+                    original_name = backup_path.name.split(".")[0]
+                    if original_name == "pb_jobhub_app":
+                        # backup filename is pb_jobhub_app.py.TIMESTAMP.bak
+                        shutil.copy2(backup_path, Path("pb_jobhub_app.py"))
+                result["messages"].append(f"Compile failed. Restored backup. Error: {compile_error}")
+                return result
+
+        result["success"] = True
+        return result
+
+    except Exception as e:
+        result["messages"].append(f"Self-edit failed: {e}")
+        return result
+
+
+def save_app_code_change(title, request, ai_response, patch_json, target_files, status, result_message=""):
+    execute("""
+        INSERT INTO app_code_changes
+        (title, request, ai_response, patch_json, target_files, status, created_at, applied_at, result_message)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        title,
+        request,
+        ai_response,
+        patch_json,
+        target_files,
+        status,
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S") if status == "Applied" else "",
+        result_message,
+    ))
+
+
+def app_builder_self_edit_prompt(user_request):
+    current_code = app_builder_relevant_code_snippets(user_request, max_snippets=12, chars_per_snippet=2500)
+    file_tree = "\n".join(app_builder_file_tree())
+
+    return f"""
+You are App Builder AI for Premier Brushworks JobHub.
+
+The user wants you to alter the app code. You must return ONLY valid JSON. No markdown. No explanation outside JSON.
+
+Return a JSON array of exact text replacements:
+[
+  {{
+    "target_file": "pb_jobhub_app.py",
+    "find": "exact existing text to find",
+    "replace": "replacement text",
+    "reason": "short reason"
+  }}
+]
+
+Rules:
+- Only target these files: pb_jobhub_app.py, requirements.txt, SUPABASE_SCHEMA_MANUAL_BACKUP.sql, .streamlit/config.toml
+- Use exact find text from the code context.
+- Keep changes small and safe.
+- If the request needs a large rebuild, return one small safe first step.
+- Do not include secrets.
+- Do not include markdown fences.
+- Do not invent code locations that are not in context.
+
+FILE TREE:
+{file_tree}
+
+RELEVANT CODE:
+{current_code}
+
+USER REQUEST:
+{user_request}
+"""
+
+
+def app_builder_self_edit_section():
+    st.subheader("Controlled Self-Edit")
+    st.warning(
+        "This lets App Builder AI apply exact code replacements to the running app files. "
+        "On Streamlit Cloud, file changes may not permanently survive a redeploy unless you download the changed file and upload it to GitHub."
+    )
+
+    st.caption(
+        "Safety: only exact text replacements are allowed, only approved files can be changed, "
+        "a backup is created, and pb_jobhub_app.py is compile-checked after changes."
+    )
+
+    request = st.text_area(
+        "What code change should the AI make?",
+        height=140,
+        placeholder="Example: Add a dashboard card showing jobs with missing timesheets this week.",
+        key="self_edit_request",
+    )
+
+    if st.checkbox("Show relevant code context", value=False, key="self_edit_show_context"):
+        st.code(app_builder_relevant_code_snippets(request or "jobhub app"), language="python")
+
+    if st.button("Generate Self-Edit Patch", key="generate_self_edit_patch"):
+        if not request.strip():
+            st.error("Enter a code change request first.")
+        else:
+            prompt = app_builder_self_edit_prompt(request)
+            with st.spinner("Generating safe code replacement JSON..."):
+                answer, error = jobhub_ai_answer(prompt, "")
+
+            if error:
+                st.error(error)
+            else:
+                st.session_state["self_edit_ai_response"] = answer
+                st.session_state["self_edit_request"] = request
+                st.success("Patch proposal generated.")
+
+    ai_response = st.session_state.get("self_edit_ai_response", "")
+    stored_request = st.session_state.get("self_edit_request", request)
+
+    if ai_response:
+        st.markdown("### Proposed Patch JSON")
+        st.code(ai_response, language="json")
+
+        replacements = self_edit_extract_json(ai_response)
+        issues = self_edit_validate_replacements(replacements)
+
+        if issues:
+            st.error("Patch is not ready to apply:")
+            for issue in issues:
+                st.write(f"- {issue}")
+        else:
+            st.success(f"Patch validated. {len(replacements)} replacement(s) ready.")
+            preview_rows = []
+            for i, item in enumerate(replacements, start=1):
+                preview_rows.append({
+                    "No": i,
+                    "Target File": item.get("target_file", ""),
+                    "Find Length": len(str(item.get("find", ""))),
+                    "Replace Length": len(str(item.get("replace", ""))),
+                    "Reason": item.get("reason", ""),
+                })
+            st.dataframe(pd.DataFrame(preview_rows), width="stretch", hide_index=True)
+
+            confirm = st.text_input(
+                "To apply this AI code change to the running app, type: APPLY CODE CHANGE",
+                key="self_edit_confirm",
+            )
+
+            if st.button("Apply AI Code Change", key="apply_self_edit_patch"):
+                if confirm.strip().upper() != "APPLY CODE CHANGE":
+                    st.error("Type APPLY CODE CHANGE exactly before applying.")
+                else:
+                    result = self_edit_apply_replacements(replacements)
+                    status = "Applied" if result["success"] else "Failed"
+                    save_app_code_change(
+                        title=stored_request[:100],
+                        request=stored_request,
+                        ai_response=ai_response,
+                        patch_json=json.dumps(replacements, indent=2),
+                        target_files=", ".join(sorted(set(str(x.get("target_file", "")) for x in replacements))),
+                        status=status,
+                        result_message="\n".join(result["messages"]),
+                    )
+
+                    if result["success"]:
+                        st.success(f"Applied {result['applied']} code replacement(s).")
+                        st.info("Download the changed file below and upload it to GitHub so the change persists after redeploy.")
+                    else:
+                        st.error("Patch was not applied or was rolled back.")
+
+                    with st.expander("Self-edit result details", expanded=True):
+                        for msg in result["messages"]:
+                            st.write(msg)
+
+    st.markdown("### Download Current App Files")
+    for file_name in ["pb_jobhub_app.py", "requirements.txt", "SUPABASE_SCHEMA_MANUAL_BACKUP.sql"]:
+        p, error = self_edit_safe_path(file_name)
+        if p and p.exists():
+            data = p.read_text(encoding="utf-8", errors="ignore").encode("utf-8")
+            st.download_button(
+                f"Download {file_name}",
+                data=data,
+                file_name=file_name,
+                mime="text/plain",
+                key=f"download_{file_name}",
+            )
+
+    st.markdown("### Code Change History")
+    try:
+        changes = df_query("""
+            SELECT id AS 'ID',
+                   title AS 'Title',
+                   target_files AS 'Target Files',
+                   status AS 'Status',
+                   created_at AS 'Created',
+                   result_message AS 'Result'
+            FROM app_code_changes
+            ORDER BY id DESC
+            LIMIT 50
+        """)
+        if changes.empty:
+            st.info("No code changes saved yet.")
+        else:
+            st.dataframe(changes, width="stretch", hide_index=True)
+    except Exception:
+        st.info("Code change history table will be available after the app initializes the database.")
+
+
 # =============================
 # START APP
 # =============================
@@ -3172,6 +4454,9 @@ elif role == "manager":
         "Dashboard",
         "Jobs",
         "Estimate Working Sheet",
+        "Job Costs / Forecasting",
+        "JobHub AI Assistant",
+        "App Builder AI",
         "Builders & Clients",
         "Employees",
         "Products",
@@ -3187,6 +4472,9 @@ else:
         "Dashboard",
         "Jobs",
         "Estimate Working Sheet",
+        "Job Costs / Forecasting",
+        "JobHub AI Assistant",
+        "App Builder AI",
         "Builders & Clients",
         "Employees",
         "Products",
@@ -3207,6 +4495,10 @@ menu = st.sidebar.radio("Menu", allowed_menu)
 # =============================
 if menu == "Employee Portal":
     employee_portal()
+
+elif menu == "App Builder AI":
+    app_builder_ai_page()
+
 
 elif menu == "User Access":
     user_access_page()
@@ -3575,6 +4867,14 @@ elif menu == "Estimate Working Sheet":
 # =============================
 # BUILDERS / CLIENTS - ADD / EDIT / REMOVE
 # =============================
+elif menu == "Job Costs / Forecasting":
+    job_costs_forecasting_page()
+
+
+elif menu == "JobHub AI Assistant":
+    jobhub_ai_assistant_page()
+
+
 elif menu == "Builders & Clients":
     st.header("Builders & Clients")
 
