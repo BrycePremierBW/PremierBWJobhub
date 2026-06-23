@@ -142,23 +142,6 @@ CREATE TABLE IF NOT EXISTS imported_material_entries (
 );
 
 
-
-CREATE TABLE IF NOT EXISTS timesheet_entries (
-    id SERIAL PRIMARY KEY,
-    job_id INTEGER NOT NULL REFERENCES jobs(id),
-    employee_id INTEGER NOT NULL REFERENCES employees(id),
-    work_date TEXT,
-    start_time TEXT,
-    finish_time TEXT,
-    break_minutes REAL DEFAULT 0,
-    total_hours REAL DEFAULT 0,
-    work_type TEXT,
-    submitted_by TEXT,
-    submitted_at TEXT,
-    status TEXT DEFAULT 'Submitted',
-    notes TEXT
-);
-
 CREATE TABLE IF NOT EXISTS estimate_working_sheets (
     id SERIAL PRIMARY KEY,
     job_id INTEGER NOT NULL REFERENCES jobs(id),
@@ -226,3 +209,14 @@ CREATE TABLE IF NOT EXISTS app_settings (
     setting_key TEXT PRIMARY KEY,
     setting_value TEXT
 );
+
+-- Helpful performance indexes
+
+CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
+CREATE INDEX IF NOT EXISTS idx_jobs_builder_client_id ON jobs(builder_client_id);
+CREATE INDEX IF NOT EXISTS idx_wage_entries_job_id ON wage_entries(job_id);
+CREATE INDEX IF NOT EXISTS idx_wage_entries_employee_id ON wage_entries(employee_id);
+CREATE INDEX IF NOT EXISTS idx_material_entries_job_id ON material_entries(job_id);
+CREATE INDEX IF NOT EXISTS idx_equipment_entries_job_id ON equipment_entries(job_id);
+CREATE INDEX IF NOT EXISTS idx_job_photos_job_id ON job_photos(job_id);
+

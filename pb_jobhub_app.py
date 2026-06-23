@@ -434,25 +434,6 @@ def init_db():
     """)
 
 
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS timesheet_entries (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        job_id INTEGER NOT NULL,
-        employee_id INTEGER NOT NULL,
-        work_date TEXT,
-        start_time TEXT,
-        finish_time TEXT,
-        break_minutes REAL DEFAULT 0,
-        total_hours REAL DEFAULT 0,
-        work_type TEXT,
-        submitted_by TEXT,
-        submitted_at TEXT,
-        status TEXT DEFAULT 'Submitted',
-        notes TEXT,
-        FOREIGN KEY(job_id) REFERENCES jobs(id),
-        FOREIGN KEY(employee_id) REFERENCES employees(id)
-    )
-    """)
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS estimate_working_sheets (
@@ -1726,7 +1707,7 @@ def user_access_page():
             st.markdown("### Delete User Account")
             st.warning(
                 "This deletes the selected login account and will also delete the linked employee record where safe. "
-                "wages, timesheets or job history."
+                "If the employee has wages, timesheets or job history, they will be marked Inactive instead."
             )
 
             admin_count_df = df_query("""
@@ -2116,288 +2097,6 @@ def job_photos_page(employee_restricted=False):
                             refresh()
 
                 st.divider()
-
-
-
-# =============================
-# TIMESHEET HELPERS
-# =============================
-def calculate_hours_from_times(start_time, finish_time, break_minutes):
-    """
-    Calculates total hours from HH:MM start/finish time.
-    Handles simple overnight finish times by adding 24 hours where finish < start.
-    """
-    try:
-        if not start_time or not finish_time:
-            return 0.0
-
-        start_parts = str(start_time).split(":")
-        finish_parts = str(finish_time).split(":")
-
-        start_minutes = int(start_parts[0]) * 60 + int(start_parts[1])
-        finish_minutes = int(finish_parts[0]) * 60 + int(finish_parts[1])
-
-        if finish_minutes < start_minutes:
-            finish_minutes += 24 * 60
-
-        total_minutes = finish_minutes - start_minutes - float(break_minutes or 0)
-        return max(round(total_minutes / 60, 2), 0.0)
-    except Exception:
-        return 0.0
-
-
-def save_timesheet_entry(job_id, employee_id, work_date, start_time, finish_time, break_minutes, total_hours, work_type, notes):
-    submitted_by = ""
-    try:
-        user = get_current_user()
-        if user:
-            submitted_by = user.get("username", "")
-    except Exception:
-        submitted_by = ""
-
-    submitted_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    execute("""
-        INSERT INTO timesheet_entries
-        (job_id, employee_id, work_date, start_time, finish_time, break_minutes, total_hours,
-         work_type, submitted_by, submitted_at, status, notes)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
-        job_id, employee_id, work_date, start_time, finish_time, break_minutes, total_hours,
-        work_type, submitted_by, submitted_at, "Submitted", notes
-    ))
-
-    # Also save to wage_entries so existing wage/job cost reports continue to work.
-    execute("""
-        INSERT INTO wage_entries
-        (job_id, employee_id, work_date, hours, notes)
-        VALUES (?, ?, ?, ?, ?)
-    """, (
-        job_id,
-        employee_id,
-        work_date,
-        total_hours,
-        f"Timesheet: {start_time}-{finish_time}, break {break_minutes} min. {notes}"
-    ))
-
-
-def timesheet_entry_form(employee_id=None, employee_restricted=False):
-    job_options = get_job_options()
-
-    if not job_options:
-        st.info("Create a job first, then timesheets can be submitted.")
-        return
-
-    if employee_id is None:
-        employee_options = get_employee_options(active_only=True)
-        if not employee_options:
-            st.info("Create employees first.")
-            return
-    else:
-        employee_options = None
-
-    with st.form("timesheet_entry_form"):
-        selected_job = st.selectbox("Job", list(job_options.keys()), key="timesheet_job")
-
-        if employee_restricted and employee_id is not None:
-            employee_df = df_query("SELECT name FROM employees WHERE id = ?", (employee_id,))
-            employee_name = employee_df.iloc[0]["name"] if not employee_df.empty else "Current Employee"
-            st.text_input("Employee", value=str(employee_name), disabled=True)
-            selected_employee_id = employee_id
-        else:
-            selected_employee = st.selectbox("Employee", list(employee_options.keys()), key="timesheet_employee")
-            selected_employee_id = employee_options[selected_employee]
-
-        col1, col2, col3, col4 = st.columns(4)
-        work_date = col1.text_input("Date", value=str(date.today()))
-        start_time = col2.text_input("Start Time", value="07:00", help="Use 24 hour time, for example 07:00")
-        finish_time = col3.text_input("Finish Time", value="15:30", help="Use 24 hour time, for example 15:30")
-        break_minutes = col4.number_input("Break Minutes", min_value=0.0, step=15.0, value=30.0)
-
-        calculated_hours = calculate_hours_from_times(start_time, finish_time, break_minutes)
-        total_hours = st.number_input("Total Hours", min_value=0.0, step=0.25, value=float(calculated_hours))
-        work_type = st.selectbox("Work Type", ["Painting", "Prep", "Spraying", "Touch-ups", "Travel", "Site Setup", "Other"])
-        notes = st.text_area("Notes")
-        submitted = st.form_submit_button("Submit Timesheet")
-
-        if submitted:
-            if total_hours <= 0:
-                st.error("Total hours must be greater than 0.")
-            else:
-                save_timesheet_entry(
-                    job_id=job_options[selected_job],
-                    employee_id=selected_employee_id,
-                    work_date=work_date,
-                    start_time=start_time,
-                    finish_time=finish_time,
-                    break_minutes=break_minutes,
-                    total_hours=total_hours,
-                    work_type=work_type,
-                    notes=notes,
-                )
-                st.success("Timesheet submitted and linked to the selected job.")
-                refresh()
-
-
-def timesheets_page(employee_restricted=False):
-    st.header("Timesheets")
-    st.caption("Submit and review employee hours linked to specific jobs.")
-
-    user = get_current_user()
-    current_employee_id = user.get("employee_id") if user else None
-
-    if employee_restricted:
-        tab_submit, tab_my = st.tabs(["Submit Timesheet", "My Timesheets"])
-
-        with tab_submit:
-            if not current_employee_id:
-                st.warning("Your login is not linked to an employee record. Ask admin to link your user to your employee profile.")
-            else:
-                timesheet_entry_form(employee_id=current_employee_id, employee_restricted=True)
-
-        with tab_my:
-            st.subheader("My Timesheets")
-            if not current_employee_id:
-                st.warning("Your login is not linked to an employee record.")
-            else:
-                my_df = df_query("""
-                    SELECT t.work_date AS "Date",
-                           j.job_no AS "Job No",
-                           j.job_name AS "Job Name",
-                           t.start_time AS "Start",
-                           t.finish_time AS "Finish",
-                           t.break_minutes AS "Break Minutes",
-                           t.total_hours AS "Hours",
-                           t.work_type AS "Work Type",
-                           t.status AS "Status",
-                           t.notes AS "Notes"
-                    FROM timesheet_entries t
-                    JOIN jobs j ON j.id = t.job_id
-                    WHERE t.employee_id = ?
-                    ORDER BY t.work_date DESC, t.id DESC
-                    LIMIT 100
-                """, (current_employee_id,))
-                st.dataframe(my_df, width="stretch", hide_index=True)
-
-        return
-
-    tab_submit, tab_review, tab_by_job = st.tabs(["Add Timesheet", "Review / Edit Timesheets", "Timesheets by Job"])
-
-    with tab_submit:
-        timesheet_entry_form(employee_id=None, employee_restricted=False)
-
-    with tab_review:
-        st.subheader("Review / Edit Timesheets")
-
-        timesheets_df = df_query("""
-            SELECT t.id,
-                   t.work_date AS "Date",
-                   j.job_no AS "Job No",
-                   j.job_name AS "Job Name",
-                   e.name AS "Employee",
-                   t.start_time AS "Start",
-                   t.finish_time AS "Finish",
-                   t.break_minutes AS "Break Minutes",
-                   t.total_hours AS "Hours",
-                   t.work_type AS "Work Type",
-                   t.status AS "Status",
-                   t.submitted_by AS "Submitted By",
-                   t.submitted_at AS "Submitted At",
-                   t.notes AS "Notes"
-            FROM timesheet_entries t
-            JOIN jobs j ON j.id = t.job_id
-            JOIN employees e ON e.id = t.employee_id
-            ORDER BY t.work_date DESC, t.id DESC
-            LIMIT 500
-        """)
-
-        if timesheets_df.empty:
-            st.info("No timesheets submitted yet.")
-        else:
-            st.dataframe(timesheets_df.drop(columns=["id"]), width="stretch", hide_index=True)
-
-            timesheet_options = {
-                f"{row['Date']} - {row['Employee']} - {row['Job No']} - {row['Hours']} hrs": int(row["id"])
-                for _, row in timesheets_df.iterrows()
-            }
-
-            selected_ts = st.selectbox("Select timesheet to edit/delete", list(timesheet_options.keys()))
-            selected_id = timesheet_options[selected_ts]
-            current = timesheets_df[timesheets_df["id"] == selected_id].iloc[0]
-
-            with st.form("edit_timesheet_form"):
-                col1, col2, col3, col4 = st.columns(4)
-                work_date = col1.text_input("Date", value=str(current["Date"]), key="edit_ts_date")
-                start_time = col2.text_input("Start", value=str(current["Start"] or ""), key="edit_ts_start")
-                finish_time = col3.text_input("Finish", value=str(current["Finish"] or ""), key="edit_ts_finish")
-                break_minutes = col4.number_input("Break Minutes", min_value=0.0, step=15.0, value=float(current["Break Minutes"] or 0), key="edit_ts_break")
-
-                calc_hours = calculate_hours_from_times(start_time, finish_time, break_minutes)
-                hours = st.number_input("Hours", min_value=0.0, step=0.25, value=float(current["Hours"] or calc_hours), key="edit_ts_hours")
-                work_type = st.selectbox(
-                    "Work Type",
-                    ["Painting", "Prep", "Spraying", "Touch-ups", "Travel", "Site Setup", "Other"],
-                    index=["Painting", "Prep", "Spraying", "Touch-ups", "Travel", "Site Setup", "Other"].index(str(current["Work Type"])) if str(current["Work Type"]) in ["Painting", "Prep", "Spraying", "Touch-ups", "Travel", "Site Setup", "Other"] else 0,
-                    key="edit_ts_work_type"
-                )
-                status = st.selectbox(
-                    "Status",
-                    ["Submitted", "Approved", "Rejected", "Paid"],
-                    index=["Submitted", "Approved", "Rejected", "Paid"].index(str(current["Status"])) if str(current["Status"]) in ["Submitted", "Approved", "Rejected", "Paid"] else 0,
-                    key="edit_ts_status"
-                )
-                notes = st.text_area("Notes", value=str(current["Notes"] or ""), key="edit_ts_notes")
-
-                col_save, col_delete = st.columns(2)
-                save_button = col_save.form_submit_button("Save Timesheet")
-                delete_button = col_delete.form_submit_button("Delete Timesheet")
-
-                if save_button:
-                    execute("""
-                        UPDATE timesheet_entries
-                        SET work_date = ?, start_time = ?, finish_time = ?, break_minutes = ?,
-                            total_hours = ?, work_type = ?, status = ?, notes = ?
-                        WHERE id = ?
-                    """, (work_date, start_time, finish_time, break_minutes, hours, work_type, status, notes, selected_id))
-                    st.success("Timesheet updated.")
-                    refresh()
-
-                if delete_button:
-                    execute("DELETE FROM timesheet_entries WHERE id = ?", (selected_id,))
-                    st.success("Timesheet deleted.")
-                    refresh()
-
-    with tab_by_job:
-        st.subheader("Timesheets by Job")
-        job_options = get_job_options()
-
-        if not job_options:
-            st.info("No jobs found.")
-        else:
-            selected_job = st.selectbox("Select Job", list(job_options.keys()), key="timesheets_by_job")
-            selected_job_id = job_options[selected_job]
-
-            by_job_df = df_query("""
-                SELECT t.work_date AS "Date",
-                       e.name AS "Employee",
-                       t.start_time AS "Start",
-                       t.finish_time AS "Finish",
-                       t.break_minutes AS "Break Minutes",
-                       t.total_hours AS "Hours",
-                       t.work_type AS "Work Type",
-                       t.status AS "Status",
-                       t.notes AS "Notes"
-                FROM timesheet_entries t
-                JOIN employees e ON e.id = t.employee_id
-                WHERE t.job_id = ?
-                ORDER BY t.work_date DESC, e.name
-            """, (selected_job_id,))
-
-            if by_job_df.empty:
-                st.info("No timesheets saved for this job.")
-            else:
-                st.metric("Total Hours for Job", f"{float(by_job_df['Hours'].fillna(0).sum()):.2f}")
-                st.dataframe(by_job_df, width="stretch", hide_index=True)
 
 
 
@@ -3867,6 +3566,13 @@ elif menu == "Jobs":
 
 
 # =============================
+# ESTIMATE WORKING SHEET
+# =============================
+elif menu == "Estimate Working Sheet":
+    estimate_working_sheet_page()
+
+
+# =============================
 # BUILDERS / CLIENTS - ADD / EDIT / REMOVE
 # =============================
 elif menu == "Builders & Clients":
@@ -4074,29 +3780,24 @@ elif menu == "Employees":
                 refresh()
 
             if col2.button("Delete Employee"):
-                linked_items = []
+                result = delete_employee_and_linked_users(selected_id)
 
-                if has_related_records("wage_entries", "employee_id", selected_id):
-                    linked_items.append("wage records")
+                if result["deleted_users"]:
+                    st.success(f"Deleted {result['deleted_users']} linked user login account(s).")
 
-                if has_related_records("timesheet_entries", "employee_id", selected_id):
-                    linked_items.append("timesheets")
+                if result["deleted_employee"]:
+                    st.success(f"Deleted {result['deleted_employee']} employee record(s).")
 
-                if has_related_records("app_users", "employee_id", selected_id):
-                    linked_items.append("user login")
+                if result["deactivated_employee"]:
+                    st.info(f"Marked {result['deactivated_employee']} employee(s) as Inactive because they had job history or protected linked records.")
 
-                if linked_items:
-                    execute("UPDATE employees SET status = 'Inactive' WHERE id = ?", (selected_id,))
-                    if has_related_records("app_users", "employee_id", selected_id):
-                        execute("UPDATE app_users SET active = 0 WHERE employee_id = ?", (selected_id,))
-                    st.info(
-                        "Employee is linked to "
-                        + ", ".join(linked_items)
-                        + ", so they were marked Inactive instead of deleted. Any linked login was disabled."
-                    )
-                else:
-                    execute("DELETE FROM employees WHERE id = ?", (selected_id,))
-                    st.success("Employee deleted.")
+                if result["skipped"]:
+                    st.warning(f"Skipped {result['skipped']} item(s).")
+
+                with st.expander("Employee delete details"):
+                    for msg in result["messages"]:
+                        st.write(msg)
+
                 refresh()
 
     with tab_list:
