@@ -2,13 +2,14 @@
 import sqlite3
 import os
 import tempfile
+from urllib.parse import urlparse
 import shutil
 import base64
 import hashlib
 import re
 import json
 from pathlib import Path
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timedelta
 from io import BytesIO
 import pandas as pd
 from PIL import Image
@@ -438,25 +439,7 @@ def init_db():
     """)
 
 
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS timesheet_entries (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        job_id INTEGER NOT NULL,
-        employee_id INTEGER NOT NULL,
-        work_date TEXT,
-        start_time TEXT,
-        finish_time TEXT,
-        break_minutes REAL DEFAULT 0,
-        total_hours REAL DEFAULT 0,
-        work_type TEXT,
-        submitted_by TEXT,
-        submitted_at TEXT,
-        status TEXT DEFAULT 'Submitted',
-        notes TEXT,
-        FOREIGN KEY(job_id) REFERENCES jobs(id),
-        FOREIGN KEY(employee_id) REFERENCES employees(id)
-    )
-    """)
+
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS estimate_working_sheets (
@@ -535,6 +518,75 @@ def init_db():
 
 
     cur.execute("""
+    CREATE TABLE IF NOT EXISTS job_budgets (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_id INTEGER UNIQUE,
+        quoted_labour_hours REAL DEFAULT 0,
+        quoted_labour_cost REAL DEFAULT 0,
+        quoted_materials REAL DEFAULT 0,
+        quoted_access_equipment REAL DEFAULT 0,
+        quoted_subcontractors REAL DEFAULT 0,
+        quoted_sundries REAL DEFAULT 0,
+        target_gp_percent REAL DEFAULT 35,
+        locked_at TEXT,
+        locked_by TEXT,
+        notes TEXT,
+        FOREIGN KEY(job_id) REFERENCES jobs(id)
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS job_variations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_id INTEGER,
+        variation_no TEXT,
+        description TEXT,
+        reason TEXT,
+        amount_ex_gst REAL DEFAULT 0,
+        status TEXT DEFAULT 'Draft',
+        sent_date TEXT,
+        approved_date TEXT,
+        approved_by TEXT,
+        notes TEXT,
+        created_at TEXT,
+        FOREIGN KEY(job_id) REFERENCES jobs(id)
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS invoice_claims (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_id INTEGER,
+        claim_no TEXT,
+        description TEXT,
+        amount_ex_gst REAL DEFAULT 0,
+        invoice_date TEXT,
+        due_date TEXT,
+        paid_date TEXT,
+        status TEXT DEFAULT 'Draft',
+        notes TEXT,
+        created_at TEXT,
+        FOREIGN KEY(job_id) REFERENCES jobs(id)
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS staff_schedule (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_id INTEGER,
+        employee_id INTEGER,
+        schedule_date TEXT,
+        start_time TEXT,
+        finish_time TEXT,
+        site_role TEXT,
+        notes TEXT,
+        created_at TEXT,
+        FOREIGN KEY(job_id) REFERENCES jobs(id),
+        FOREIGN KEY(employee_id) REFERENCES employees(id)
+    )
+    """)
+
+    cur.execute("""
     CREATE TABLE IF NOT EXISTS app_code_changes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         title TEXT,
@@ -546,6 +598,19 @@ def init_db():
         created_at TEXT,
         applied_at TEXT,
         result_message TEXT
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS app_learning_sources (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        topic TEXT,
+        url TEXT,
+        active INTEGER DEFAULT 1,
+        last_checked TEXT,
+        last_summary TEXT,
+        notes TEXT,
+        created_at TEXT
     )
     """)
 
@@ -4430,6 +4495,1287 @@ def app_builder_self_edit_section():
         st.info("Code change history table will be available after the app initializes the database.")
 
 
+
+# =============================
+# FREE LOCAL AI / OLLAMA OVERRIDES
+# =============================
+def ai_secret(name, default=""):
+    try:
+        if name in st.secrets:
+            return st.secrets[name]
+    except Exception:
+        pass
+    return os.environ.get(name, default)
+
+
+def ai_provider():
+    provider = str(ai_secret("AI_PROVIDER", "ollama")).strip().lower()
+    if provider not in ["ollama", "openai", "auto"]:
+        provider = "ollama"
+    return provider
+
+
+def ollama_base_url():
+    return str(ai_secret("OLLAMA_BASE_URL", "http://localhost:11434")).rstrip("/")
+
+
+def ollama_model():
+    return str(ai_secret("OLLAMA_MODEL", "llama3.2:3b")).strip() or "llama3.2:3b"
+
+
+def ollama_timeout():
+    try:
+        return int(ai_secret("OLLAMA_TIMEOUT", "120"))
+    except Exception:
+        return 120
+
+
+def openai_enabled():
+    return bool(str(jobhub_ai_api_key() or "").strip())
+
+
+def ollama_status():
+    try:
+        response = requests.get(f"{ollama_base_url()}/api/tags", timeout=5)
+        if response.status_code == 200:
+            return True, f"Ollama connected at {ollama_base_url()} using model {ollama_model()}."
+        return False, f"Ollama responded with status {response.status_code}. Check Ollama is running."
+    except Exception as e:
+        return False, f"Ollama not reachable at {ollama_base_url()}. Start Ollama on this computer. Details: {e}"
+
+
+def ai_backend_ready():
+    provider = ai_provider()
+    if provider == "openai":
+        if openai_enabled():
+            return True, f"Using OpenAI model {jobhub_ai_model()}."
+        return False, "AI_PROVIDER is openai but OPENAI_API_KEY is missing."
+
+    if provider == "auto" and openai_enabled():
+        return True, f"Using OpenAI model {jobhub_ai_model()}."
+
+    return ollama_status()
+
+
+def ollama_generate(prompt, system="", context="", model=None, timeout=None):
+    model = model or ollama_model()
+    timeout = timeout or ollama_timeout()
+
+    full_prompt = ""
+    if system:
+        full_prompt += "SYSTEM:\n" + str(system).strip() + "\n\n"
+    if context:
+        full_prompt += "CONTEXT:\n" + str(context).strip() + "\n\n"
+    full_prompt += "USER:\n" + str(prompt).strip()
+
+    payload = {
+        "model": model,
+        "prompt": full_prompt,
+        "stream": False,
+    }
+
+    try:
+        response = requests.post(
+            f"{ollama_base_url()}/api/generate",
+            json=payload,
+            timeout=timeout,
+        )
+        if response.status_code >= 400:
+            return None, f"Ollama error {response.status_code}: {response.text[:1000]}"
+
+        data = response.json()
+        return data.get("response", "").strip(), None
+    except Exception as e:
+        return None, f"Ollama request failed: {e}"
+
+
+def openai_responses_answer(prompt, context_text="", include_web=False, require_web=False, system_text=""):
+    api_key = jobhub_ai_api_key()
+    if not api_key:
+        return None, "OPENAI_API_KEY is missing."
+
+    payload = {
+        "model": jobhub_ai_model(),
+        "input": (
+            (system_text or "You are a helpful assistant for Premier Brushworks JobHub.") +
+            "\n\nCONTEXT:\n" + str(context_text or "") +
+            "\n\nUSER REQUEST:\n" + str(prompt)
+        ),
+    }
+
+    if include_web:
+        payload["tools"] = [{"type": "web_search"}]
+        payload["tool_choice"] = "required" if require_web else "auto"
+
+    try:
+        response = requests.post(
+            "https://api.openai.com/v1/responses",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=90,
+        )
+        if response.status_code >= 400:
+            return None, f"OpenAI API error {response.status_code}: {response.text[:1000]}"
+
+        data = response.json()
+        if data.get("output_text"):
+            return data["output_text"], None
+
+        parts = []
+        for item in data.get("output", []) or []:
+            for content in item.get("content", []) or []:
+                if isinstance(content, dict) and content.get("text"):
+                    parts.append(str(content["text"]))
+
+        return "\n".join(parts) if parts else json.dumps(data)[:3000], None
+    except Exception as e:
+        return None, f"OpenAI request failed: {e}"
+
+
+def jobhub_ai_answer(question, context_text):
+    system = (
+        "You are JobHub AI for Premier Brushworks, a painting and decorating business. "
+        "Use only the JobHub context provided. Give practical, direct advice for quoting, job costs, scheduling, "
+        "materials, staffing, risks and next actions. If data is missing, say what is missing. Do not invent details."
+    )
+
+    provider = ai_provider()
+    if provider == "openai" or (provider == "auto" and openai_enabled()):
+        return openai_responses_answer(question, context_text, include_web=False, require_web=False, system_text=system)
+
+    return ollama_generate(question, system=system, context=context_text)
+
+
+def app_builder_ai_call(question, include_web=False, require_web=False, selected_mode="Code Helper"):
+    file_tree = "\n".join(app_builder_file_tree())
+    reqs = app_builder_read_file("requirements.txt", max_chars=6000)
+    schema = app_builder_read_file("SUPABASE_SCHEMA_MANUAL_BACKUP.sql", max_chars=12000)
+    snippets = app_builder_relevant_code_snippets(question)
+    saved_notes = app_builder_notes_context()
+
+    system_prompt = f"""
+You are App Builder AI inside Premier Brushworks JobHub.
+You help improve and maintain this Streamlit + Supabase business app.
+
+Rules:
+- Be practical and direct.
+- Help design features, find likely bugs, improve speed, improve database structure, and plan safe changes.
+- If asked to change the app, provide a clear build plan and exact code/pseudocode sections.
+- Do not pretend you have already changed GitHub or deployed the app.
+- Do not expose or ask for secrets.
+- If internet/web content is provided in context, use it and mention source URLs.
+- If something is risky, say so and suggest the safest next step.
+- This AI learns by saving notes in app_builder_notes. It does not retrain model weights.
+Mode: {selected_mode}
+"""
+
+    context = f"""
+APP FILE TREE:
+{file_tree}
+
+REQUIREMENTS:
+{reqs}
+
+DATABASE SCHEMA EXCERPT:
+{schema}
+
+RELEVANT CURRENT APP CODE SNIPPETS:
+{snippets}
+
+SAVED APP BUILDER LEARNINGS:
+{saved_notes}
+"""
+
+    provider = ai_provider()
+    if provider == "openai" or (provider == "auto" and openai_enabled()):
+        return openai_responses_answer(
+            question,
+            context,
+            include_web=include_web,
+            require_web=require_web,
+            system_text=system_prompt,
+        )
+
+    if include_web:
+        context += (
+            "\n\nNOTE: Local Ollama mode does not have paid live web_search. "
+            "Use the Internet Learning section with specific URLs to fetch pages for free and save notes."
+        )
+
+    return ollama_generate(question, system=system_prompt, context=context, timeout=ollama_timeout())
+
+
+def fetch_web_page_text(url, max_chars=18000):
+    """
+    Free URL fetcher for internet learning.
+    The user provides URLs. JobHub fetches the page and local Ollama summarises it.
+    """
+    url = str(url or "").strip()
+    if not url:
+        return "", "URL is blank."
+
+    parsed = urlparse(url)
+    if parsed.scheme not in ["http", "https"]:
+        return "", "Only http and https URLs are allowed."
+
+    try:
+        response = requests.get(
+            url,
+            timeout=20,
+            headers={
+                "User-Agent": "PremierBrushworksJobHubLearningBot/1.0"
+            }
+        )
+        if response.status_code >= 400:
+            return "", f"Could not fetch URL. Status {response.status_code}"
+
+        text = response.text
+        text = re.sub(r"(?is)<script.*?>.*?</script>", " ", text)
+        text = re.sub(r"(?is)<style.*?>.*?</style>", " ", text)
+        text = re.sub(r"(?is)<noscript.*?>.*?</noscript>", " ", text)
+        text = re.sub(r"(?s)<[^>]+>", " ", text)
+        text = re.sub(r"&nbsp;", " ", text)
+        text = re.sub(r"&amp;", "&", text)
+        text = re.sub(r"&lt;", "<", text)
+        text = re.sub(r"&gt;", ">", text)
+        text = re.sub(r"\s+", " ", text).strip()
+
+        if len(text) > max_chars:
+            text = text[:max_chars] + "\n...[trimmed]..."
+
+        return text, None
+    except Exception as e:
+        return "", f"Fetch failed: {e}"
+
+
+def save_learning_source(topic, url, summary="", active=1):
+    execute("""
+        INSERT INTO app_learning_sources
+        (topic, url, active, last_checked, last_summary, notes, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (
+        topic,
+        url,
+        int(active),
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S") if summary else "",
+        summary,
+        "",
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    ))
+
+
+def summarise_url_into_learning(topic, url):
+    page_text, error = fetch_web_page_text(url)
+    if error:
+        return None, error
+
+    prompt = (
+        "Summarise this web page into practical JobHub learning notes for Premier Brushworks. "
+        "Focus on what should be saved for future app building, quoting, cost forecasting, Streamlit, Supabase, "
+        "Ollama/local AI, safety, or business operations. "
+        "Return concise notes and include the source URL.\n\n"
+        f"TOPIC: {topic}\nSOURCE URL: {url}\nPAGE TEXT:\n{page_text}"
+    )
+
+    answer, ai_error = app_builder_ai_call(
+        question=prompt,
+        include_web=False,
+        require_web=False,
+        selected_mode="Internet Learning Summariser",
+    )
+    if ai_error:
+        return None, ai_error
+
+    save_app_builder_note(topic, answer, source=f"URL: {url}")
+    save_learning_source(topic, url, summary=answer, active=1)
+    return answer, None
+
+
+def free_local_ai_setup_page():
+    st.header("Free Local AI Setup")
+    st.caption("Use Ollama for free local AI and save learnings into JobHub.")
+
+    status_ok, status_message = ai_backend_ready()
+
+    c1, c2 = st.columns(2)
+    c1.metric("AI Provider", ai_provider())
+    c2.metric("Ollama Model", ollama_model())
+
+    if status_ok:
+        st.success(status_message)
+    else:
+        st.warning(status_message)
+
+    st.markdown("### Recommended Streamlit Secrets")
+    st.code(
+        'AI_PROVIDER = "ollama"\n'
+        'OLLAMA_BASE_URL = "http://localhost:11434"\n'
+        'OLLAMA_MODEL = "llama3.2:3b"\n'
+        'OLLAMA_TIMEOUT = "120"\n\n'
+        '# Optional paid fallback only if you ever want it:\n'
+        '# OPENAI_API_KEY = "sk-..."\n'
+        '# OPENAI_MODEL = "gpt-5.5"\n',
+        language="toml",
+    )
+
+    st.markdown("### Test Local AI")
+    test_prompt = st.text_input("Test prompt", value="Say hello and confirm you are connected to JobHub.")
+    if st.button("Test Ollama Local AI", key="test_ollama_ai"):
+        answer, error = ollama_generate(test_prompt, system="You are a local AI test assistant.")
+        if error:
+            st.error(error)
+        else:
+            st.success("Local AI responded.")
+            st.write(answer)
+
+    st.markdown("### What free learning means")
+    st.info(
+        "The model learns by saving useful notes into JobHub's database. "
+        "It does not retrain the AI model weights. Saved notes are reused as context in future AI answers."
+    )
+
+
+def app_builder_ai_page():
+    st.header("App Builder AI")
+    st.caption("Build, improve and learn for JobHub using free local Ollama AI by default.")
+
+    status_ok, status_message = ai_backend_ready()
+    if status_ok:
+        st.success(status_message)
+    else:
+        st.warning(status_message)
+        st.info("Open the Free Local AI Setup tab for install and connection steps.")
+
+    section = st.radio(
+        "Section",
+        ["Build / Fix the App", "Self-Edit Code", "Internet Learning", "Saved Learnings", "Free Local AI Setup"],
+        horizontal=True,
+        key="app_builder_section",
+    )
+
+    if section == "Build / Fix the App":
+        st.subheader("Build / Fix the App")
+        mode = st.selectbox(
+            "Mode",
+            ["Code Helper", "Bug Fixer", "Feature Planner", "Speed Optimiser", "Database / Supabase Helper", "Streamlit UI Helper"],
+            key="app_builder_mode",
+        )
+
+        include_web = False
+        require_web = False
+
+        if ai_provider() == "openai" or (ai_provider() == "auto" and openai_enabled()):
+            include_web = st.checkbox("Allow OpenAI live internet research", value=True, key="app_builder_include_web")
+            require_web = st.checkbox("Force OpenAI web search for this request", value=False, key="app_builder_require_web")
+        else:
+            st.info("Free local Ollama mode is active. For internet learning, use the Internet Learning tab with URLs.")
+
+        quick = st.selectbox(
+            "Quick request",
+            [
+                "Custom",
+                "Review this app and suggest the next 5 improvements",
+                "Help me make the app faster",
+                "Help me add a new feature safely",
+                "Review saved learning notes and suggest the best next JobHub upgrade",
+                "Tell me what code files need changing for this feature",
+            ],
+            key="app_builder_quick",
+        )
+        default_question = "" if quick == "Custom" else quick
+
+        question = st.text_area(
+            "What do you want to build or fix?",
+            value=default_question,
+            height=150,
+            placeholder="Example: Add a daily dashboard showing jobs starting this week, overdue invoices, missing timesheets and jobs at margin risk.",
+            key="app_builder_question",
+        )
+
+        if st.checkbox("Show app code context being sent", value=False, key="app_builder_show_context"):
+            st.markdown("### File tree")
+            st.code("\n".join(app_builder_file_tree()))
+            st.markdown("### Relevant snippets")
+            st.code(app_builder_relevant_code_snippets(question or "jobhub app"))
+
+        if st.button("Ask App Builder AI", key="ask_app_builder_ai"):
+            if not question.strip():
+                st.error("Enter a build/fix request first.")
+            else:
+                with st.spinner("App Builder AI is reviewing JobHub..."):
+                    answer, error = app_builder_ai_call(
+                        question=question,
+                        include_web=include_web,
+                        require_web=require_web,
+                        selected_mode=mode,
+                    )
+
+                if error:
+                    st.error(error)
+                else:
+                    st.markdown("### App Builder AI")
+                    st.write(answer)
+
+                    with st.expander("Save this as a learning note"):
+                        note_topic = st.text_input("Topic", value=question[:80], key="save_ai_learning_topic")
+                        note_text = st.text_area("Note to save", value=answer[:4000], height=200, key="save_ai_learning_text")
+                        if st.button("Save Learning Note", key="save_ai_learning_button"):
+                            save_app_builder_note(note_topic, note_text, source="App Builder AI")
+                            st.success("Learning note saved.")
+
+    elif section == "Self-Edit Code":
+        app_builder_self_edit_section()
+
+    elif section == "Internet Learning":
+        st.subheader("Free Internet Learning by URL")
+        st.caption("Paste useful URLs. JobHub fetches the page, local AI summarises it, and the learning is saved for future use.")
+
+        with st.form("url_learning_form"):
+            topic = st.text_input(
+                "Learning topic",
+                value="Streamlit / Supabase / JobHub app improvement",
+            )
+            urls_text = st.text_area(
+                "URLs to learn from, one per line",
+                height=140,
+                placeholder="https://docs.streamlit.io/...\nhttps://docs.ollama.com/...",
+            )
+            submitted = st.form_submit_button("Fetch URLs, Summarise and Save Learning")
+
+        if submitted:
+            urls = [u.strip() for u in urls_text.splitlines() if u.strip()]
+            if not urls:
+                st.error("Paste at least one URL.")
+            else:
+                for url in urls:
+                    st.markdown(f"### Learning from: {url}")
+                    with st.spinner(f"Fetching and summarising {url}..."):
+                        summary, error = summarise_url_into_learning(topic, url)
+                    if error:
+                        st.error(error)
+                    else:
+                        st.success("Saved learning note.")
+                        st.write(summary)
+
+        st.markdown("### Saved Learning Sources")
+        sources = df_query("""
+            SELECT id AS 'ID',
+                   topic AS 'Topic',
+                   url AS 'URL',
+                   active AS 'Active',
+                   last_checked AS 'Last Checked',
+                   last_summary AS 'Last Summary'
+            FROM app_learning_sources
+            ORDER BY id DESC
+            LIMIT 100
+        """)
+        if sources.empty:
+            st.info("No learning sources saved yet.")
+        else:
+            st.dataframe(sources[["ID", "Topic", "URL", "Active", "Last Checked"]], width="stretch", hide_index=True)
+
+            if st.button("Refresh All Active Learning Sources", key="refresh_learning_sources"):
+                active_sources = sources[sources["Active"].astype(int) == 1]
+                if active_sources.empty:
+                    st.info("No active sources to refresh.")
+                else:
+                    for _, row in active_sources.iterrows():
+                        st.markdown(f"Refreshing: {row['URL']}")
+                        summary, error = summarise_url_into_learning(row["Topic"], row["URL"])
+                        if error:
+                            st.error(error)
+                        else:
+                            execute(
+                                "UPDATE app_learning_sources SET last_checked = ?, last_summary = ? WHERE id = ?",
+                                (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), summary, int(row["ID"]))
+                            )
+                            st.success("Refreshed and saved.")
+
+    elif section == "Saved Learnings":
+        st.subheader("Saved Learnings")
+        notes = df_query("""
+            SELECT id AS 'ID',
+                   topic AS 'Topic',
+                   source AS 'Source',
+                   created_at AS 'Created',
+                   note AS 'Note'
+            FROM app_builder_notes
+            ORDER BY id DESC
+        """)
+
+        if notes.empty:
+            st.info("No saved learnings yet.")
+        else:
+            st.dataframe(notes[["ID", "Topic", "Source", "Created"]], width="stretch", hide_index=True)
+
+            note_options = {f"{row['Topic']} | {row['Source']} | ID {row['ID']}": int(row["ID"]) for _, row in notes.iterrows()}
+            selected = st.selectbox("Open learning note", list(note_options.keys()), key="open_learning_note")
+            selected_id = note_options[selected]
+            row = notes[notes["ID"].astype(int) == selected_id].iloc[0]
+            st.markdown(f"### {row['Topic']}")
+            st.caption(f"{row['Source']} • {row['Created']}")
+            st.write(row["Note"])
+
+            col1, col2 = st.columns(2)
+            if col1.button("Delete This Learning Note", key="delete_learning_note"):
+                execute("DELETE FROM app_builder_notes WHERE id = ?", (selected_id,))
+                st.success("Learning note deleted.")
+                refresh()
+
+        with st.expander("Add manual learning note"):
+            with st.form("manual_learning_note_form"):
+                topic = st.text_input("Topic")
+                source = st.text_input("Source", value="Manual")
+                note = st.text_area("Note", height=180)
+                submitted = st.form_submit_button("Save Manual Learning")
+                if submitted:
+                    if not topic.strip() or not note.strip():
+                        st.error("Topic and note are required.")
+                    else:
+                        save_app_builder_note(topic, note, source=source)
+                        st.success("Learning note saved.")
+                        refresh()
+
+    else:
+        free_local_ai_setup_page()
+
+
+def jobhub_ai_assistant_page():
+    st.header("JobHub AI Assistant")
+    st.caption("Ask an AI assistant about your JobHub data, job costs, quotes, scheduling and risks.")
+
+    status_ok, status_message = ai_backend_ready()
+    if status_ok:
+        st.success(status_message)
+    else:
+        st.warning(status_message)
+        st.info("For free mode, install Ollama and use App Builder AI > Free Local AI Setup.")
+        return
+
+    job_options = get_job_options()
+    mode = st.radio("Context", ["All Jobs Overview", "Selected Job"], horizontal=True, key="ai_context_mode")
+    selected_job_id = None
+
+    if mode == "Selected Job":
+        if not job_options:
+            st.info("Create a job first.")
+            return
+        selected_job = st.selectbox("Select Job", list(job_options.keys()), key="ai_selected_job")
+        selected_job_id = job_options[selected_job]
+
+    quick = st.selectbox(
+        "Quick Question",
+        [
+            "Custom",
+            "Which jobs are at risk of running over budget?",
+            "What should I check before quoting this job?",
+            "How many painters do I need to finish this job on time?",
+            "What materials or timesheets look unusual?",
+            "Give me a director-level summary for this week.",
+        ],
+        key="ai_quick_question",
+    )
+    default_question = "" if quick == "Custom" else quick
+
+    question = st.text_area(
+        "Ask JobHub AI",
+        value=default_question,
+        height=120,
+        placeholder="Example: Review this job and tell me the margin risk, labour pressure and next actions.",
+        key="ai_question",
+    )
+
+    context_text = jobhub_ai_context(selected_job_id)
+    learning_context = app_builder_notes_context(limit=20)
+    if learning_context:
+        context_text += "\n\nSAVED JOBHUB LEARNINGS:\n" + learning_context
+
+    if st.checkbox("Show data being sent to AI", value=False, key="ai_show_context"):
+        st.text_area("Context Preview", value=context_text, height=300)
+
+    if st.button("Ask JobHub AI", key="ask_jobhub_ai"):
+        if not question.strip():
+            st.error("Enter a question first.")
+        else:
+            with st.spinner("JobHub AI is reviewing your data..."):
+                answer, error = jobhub_ai_answer(question, context_text)
+            if error:
+                st.error(error)
+            else:
+                st.markdown("### Answer")
+                st.write(answer)
+
+
+
+# =============================
+# PB CONTROL CENTRE
+# =============================
+def pb_float(value, default=0.0):
+    try:
+        if value is None or value == "" or pd.isna(value):
+            return float(default)
+        return float(value)
+    except Exception:
+        return float(default)
+
+
+def pb_date(value):
+    if value is None or str(value).strip() == "":
+        return None
+    text = str(value).strip()[:10]
+    for fmt in ["%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%Y/%m/%d"]:
+        try:
+            return datetime.strptime(text, fmt).date()
+        except Exception:
+            pass
+    return None
+
+
+def pb_percent(numerator, denominator):
+    denominator = pb_float(denominator)
+    if denominator == 0:
+        return 0.0
+    return round((pb_float(numerator) / denominator) * 100, 2)
+
+
+def pb_business_days(start_value, end_value):
+    start = pb_date(start_value)
+    end = pb_date(end_value)
+    if not start or not end or end < start:
+        return 0
+    total = 0
+    current = start
+    while current <= end:
+        if current.weekday() < 5:
+            total += 1
+        current += timedelta(days=1)
+    return total
+
+
+def pb_next_variation_no(job_id):
+    df = df_query("SELECT COUNT(*) AS c FROM job_variations WHERE job_id = ?", (job_id,))
+    return f"VAR-{int(df.iloc[0]['c']) + 1:03d}" if not df.empty else "VAR-001"
+
+
+def pb_next_claim_no(job_id):
+    df = df_query("SELECT COUNT(*) AS c FROM invoice_claims WHERE job_id = ?", (job_id,))
+    return f"CLAIM-{int(df.iloc[0]['c']) + 1:03d}" if not df.empty else "CLAIM-001"
+
+
+def pb_job_cost_frame():
+    jobs = df_query("""
+        SELECT j.id AS job_id,
+               j.job_no AS 'Job No',
+               j.job_name AS 'Job Name',
+               COALESCE(bc.name, '') AS 'Builder / Client',
+               j.site_address AS 'Site Address',
+               j.status AS 'Status',
+               j.leading_hand AS 'Leading Hand',
+               j.start_date AS 'Start Date',
+               j.end_date AS 'End Date',
+               COALESCE(j.contract_value, 0) AS 'Contract Value',
+               j.notes AS 'Notes'
+        FROM jobs j
+        LEFT JOIN builders_clients bc ON bc.id = j.builder_client_id
+        ORDER BY j.job_no
+    """)
+    if jobs.empty:
+        return jobs
+
+    materials = df_query("""
+        SELECT m.job_id,
+               COALESCE(SUM(COALESCE(m.qty_required, 0) * COALESCE(p.price_ex_gst, 0)), 0) AS 'Material Cost',
+               COALESCE(SUM(COALESCE(m.qty_required, 0)), 0) AS 'Material Qty Required',
+               COALESCE(SUM(COALESCE(m.qty_received, 0)), 0) AS 'Material Qty Received',
+               COUNT(*) AS 'Material Lines'
+        FROM material_entries m
+        LEFT JOIN products p ON p.id = m.product_id
+        GROUP BY m.job_id
+    """)
+
+    wages = df_query("""
+        SELECT w.job_id,
+               COALESCE(SUM(COALESCE(w.hours, 0)), 0) AS 'Wage Hours',
+               COALESCE(SUM(COALESCE(w.hours, 0) * COALESCE(e.rate_plus_10, e.base_hourly_rate, 0)), 0) AS 'Labour Cost'
+        FROM wage_entries w
+        LEFT JOIN employees e ON e.id = w.employee_id
+        GROUP BY w.job_id
+    """)
+
+    timesheets = df_query("""
+        SELECT job_id,
+               COALESCE(SUM(COALESCE(total_hours, 0)), 0) AS 'Timesheet Hours',
+               COUNT(*) AS 'Timesheet Lines'
+        FROM timesheet_entries
+        WHERE COALESCE(status, 'Submitted') <> 'Rejected'
+        GROUP BY job_id
+    """)
+
+    budgets = df_query("""
+        SELECT job_id,
+               COALESCE(quoted_labour_hours, 0) AS 'Budget Labour Hours',
+               COALESCE(quoted_labour_cost, 0) AS 'Budget Labour Cost',
+               COALESCE(quoted_materials, 0) AS 'Budget Materials',
+               COALESCE(quoted_access_equipment, 0) AS 'Budget Access',
+               COALESCE(quoted_subcontractors, 0) AS 'Budget Subcontractors',
+               COALESCE(quoted_sundries, 0) AS 'Budget Sundries',
+               COALESCE(target_gp_percent, 35) AS 'Target GP %',
+               locked_at AS 'Budget Locked'
+        FROM job_budgets
+    """)
+
+    variations = df_query("""
+        SELECT job_id,
+               COALESCE(SUM(CASE WHEN status IN ('Approved', 'Sent') THEN COALESCE(amount_ex_gst, 0) ELSE 0 END), 0) AS 'Variation Value',
+               COALESCE(SUM(CASE WHEN status = 'Approved' THEN COALESCE(amount_ex_gst, 0) ELSE 0 END), 0) AS 'Approved Variation Value',
+               COUNT(*) AS 'Variation Count'
+        FROM job_variations
+        GROUP BY job_id
+    """)
+
+    claims = df_query("""
+        SELECT job_id,
+               COALESCE(SUM(COALESCE(amount_ex_gst, 0)), 0) AS 'Claimed Amount',
+               COALESCE(SUM(CASE WHEN status = 'Paid' THEN COALESCE(amount_ex_gst, 0) ELSE 0 END), 0) AS 'Paid Amount',
+               COUNT(*) AS 'Claim Count'
+        FROM invoice_claims
+        GROUP BY job_id
+    """)
+
+    df = jobs.copy()
+    for extra in [materials, wages, timesheets, budgets, variations, claims]:
+        if extra is not None and not extra.empty:
+            df = df.merge(extra, on="job_id", how="left")
+
+    numeric_cols = [
+        "Contract Value", "Material Cost", "Material Qty Required", "Material Qty Received", "Material Lines",
+        "Wage Hours", "Labour Cost", "Timesheet Hours", "Timesheet Lines", "Budget Labour Hours",
+        "Budget Labour Cost", "Budget Materials", "Budget Access", "Budget Subcontractors", "Budget Sundries",
+        "Target GP %", "Variation Value", "Approved Variation Value", "Variation Count", "Claimed Amount",
+        "Paid Amount", "Claim Count"
+    ]
+    for col in numeric_cols:
+        if col not in df.columns:
+            df[col] = 0.0
+        df[col] = df[col].fillna(0)
+
+    for col in ["Budget Locked"]:
+        if col not in df.columns:
+            df[col] = ""
+        df[col] = df[col].fillna("")
+
+    df["Adjusted Contract Value"] = df["Contract Value"] + df["Approved Variation Value"]
+    df["Total Budget Cost"] = df["Budget Labour Cost"] + df["Budget Materials"] + df["Budget Access"] + df["Budget Subcontractors"] + df["Budget Sundries"]
+    df["Total Actual Cost"] = df["Material Cost"] + df["Labour Cost"]
+    df["Gross Profit"] = df["Adjusted Contract Value"] - df["Total Actual Cost"]
+    df["Gross Profit %"] = df.apply(lambda r: pb_percent(r["Gross Profit"], r["Adjusted Contract Value"]), axis=1)
+    df["Cost to Date %"] = df.apply(lambda r: pb_percent(r["Total Actual Cost"], r["Adjusted Contract Value"]), axis=1)
+    df["Remaining Budget"] = (df["Adjusted Contract Value"] - df["Total Actual Cost"]).clip(lower=0)
+    df["Budget Variance"] = df["Total Budget Cost"] - df["Total Actual Cost"]
+    df["Remaining Labour Hours"] = (df["Budget Labour Hours"] - df["Timesheet Hours"]).clip(lower=0)
+    df["Working Days"] = df.apply(lambda r: pb_business_days(r["Start Date"], r["End Date"]), axis=1)
+    df["Unclaimed Amount"] = (df["Adjusted Contract Value"] - df["Claimed Amount"]).clip(lower=0)
+    df["Unpaid Claimed"] = (df["Claimed Amount"] - df["Paid Amount"]).clip(lower=0)
+
+    def health(row):
+        today = date.today()
+        issues = []
+        gp = pb_float(row["Gross Profit %"])
+        cost_pct = pb_float(row["Cost to Date %"])
+        target_gp = pb_float(row["Target GP %"], 35)
+        end = pb_date(row["End Date"])
+
+        if pb_float(row["Adjusted Contract Value"]) <= 0:
+            issues.append("No contract value")
+        if row["Budget Locked"] in [None, ""]:
+            issues.append("Budget not locked")
+        if gp < target_gp:
+            issues.append("GP below target")
+        if cost_pct > 85 and str(row["Status"]).lower() not in ["complete", "completed", "closed", "archived"]:
+            issues.append("Cost high")
+        if end and end < today and str(row["Status"]).lower() not in ["complete", "completed", "closed", "archived"]:
+            issues.append("Past end date")
+        if pb_float(row["Material Qty Required"]) > 0 and pb_float(row["Material Qty Received"]) < pb_float(row["Material Qty Required"]):
+            issues.append("Materials short")
+
+        if len(issues) >= 2:
+            return "Red", "; ".join(issues)
+        if len(issues) == 1:
+            return "Orange", "; ".join(issues)
+        return "Green", "On track"
+
+    health_data = df.apply(health, axis=1)
+    df["Health"] = [x[0] for x in health_data]
+    df["Health Notes"] = [x[1] for x in health_data]
+    return df
+
+
+def pb_control_daily_dashboard(df):
+    st.subheader("Daily Dashboard")
+
+    today = date.today()
+    week_end = today + timedelta(days=7)
+
+    active = df[~df["Status"].astype(str).str.lower().isin(["complete", "completed", "closed", "archived"])]
+    red = df[df["Health"] == "Red"]
+    orange = df[df["Health"] == "Orange"]
+
+    pending_timesheets = df_query("""
+        SELECT COUNT(*) AS c
+        FROM timesheet_entries
+        WHERE COALESCE(status, 'Submitted') = 'Submitted'
+    """)
+    pending_count = int(pending_timesheets.iloc[0]["c"]) if not pending_timesheets.empty else 0
+
+    overdue_claims = df_query("""
+        SELECT COUNT(*) AS c,
+               COALESCE(SUM(COALESCE(amount_ex_gst, 0)), 0) AS total
+        FROM invoice_claims
+        WHERE status <> 'Paid'
+          AND due_date IS NOT NULL
+          AND due_date <> ''
+          AND due_date < ?
+    """, (str(today),))
+    overdue_count = int(overdue_claims.iloc[0]["c"]) if not overdue_claims.empty else 0
+    overdue_total = pb_float(overdue_claims.iloc[0]["total"]) if not overdue_claims.empty else 0
+
+    cols = st.columns(6)
+    cols[0].metric("Active Jobs", len(active))
+    cols[1].metric("Red Jobs", len(red))
+    cols[2].metric("Orange Jobs", len(orange))
+    cols[3].metric("Timesheets Pending", pending_count)
+    cols[4].metric("Overdue Claims", overdue_count)
+    cols[5].metric("Overdue $", f"${overdue_total:,.0f}")
+
+    st.markdown("### Jobs Needing Attention")
+    risk_cols = ["Job No", "Job Name", "Status", "Health", "Health Notes", "Adjusted Contract Value", "Total Actual Cost", "Gross Profit %", "End Date"]
+    risks = df[df["Health"].isin(["Red", "Orange"])][risk_cols]
+    if risks.empty:
+        st.success("No red or orange jobs found.")
+    else:
+        st.dataframe(risks, width="stretch", hide_index=True)
+
+    st.markdown("### Jobs Starting / Finishing This Week")
+    week_rows = []
+    for _, row in df.iterrows():
+        start = pb_date(row["Start Date"])
+        end = pb_date(row["End Date"])
+        if (start and today <= start <= week_end) or (end and today <= end <= week_end):
+            week_rows.append(row)
+    if week_rows:
+        week_df = pd.DataFrame(week_rows)
+        st.dataframe(week_df[["Job No", "Job Name", "Status", "Leading Hand", "Start Date", "End Date", "Health"]], width="stretch", hide_index=True)
+    else:
+        st.info("No jobs starting or finishing in the next 7 days.")
+
+
+def pb_control_job_health(df):
+    st.subheader("Job Health Score")
+    st.caption("Green = on track, Orange = needs attention, Red = margin/schedule/data risk.")
+
+    status_filter = st.selectbox("Status Filter", ["All"] + sorted([str(x) for x in df["Status"].fillna("").unique() if str(x).strip()]), key="health_status_filter")
+    filtered = df.copy()
+    if status_filter != "All":
+        filtered = filtered[filtered["Status"].astype(str) == status_filter]
+
+    health_filter = st.multiselect("Health Filter", ["Green", "Orange", "Red"], default=["Green", "Orange", "Red"], key="health_filter")
+    filtered = filtered[filtered["Health"].isin(health_filter)]
+
+    cols = ["Job No", "Job Name", "Builder / Client", "Status", "Health", "Health Notes", "Adjusted Contract Value", "Total Actual Cost", "Gross Profit %", "Cost to Date %", "Remaining Labour Hours", "End Date"]
+    st.dataframe(filtered[cols], width="stretch", hide_index=True)
+
+
+def pb_control_budget_lock(df):
+    st.subheader("Job Budget Lock-In")
+    st.caption("Lock in accepted quote budgets so actual labour/materials can be compared against the allowed budget.")
+
+    job_options = get_job_options()
+    if not job_options:
+        st.info("Create a job first.")
+        return
+
+    selected_job = st.selectbox("Job", list(job_options.keys()), key="budget_lock_job")
+    job_id = job_options[selected_job]
+
+    existing = df_query("SELECT * FROM job_budgets WHERE job_id = ?", (job_id,))
+    current = existing.iloc[0].to_dict() if not existing.empty else {}
+
+    with st.form("job_budget_form"):
+        c1, c2, c3 = st.columns(3)
+        quoted_labour_hours = c1.number_input("Quoted Labour Hours", min_value=0.0, value=pb_float(current.get("quoted_labour_hours", 0)), step=1.0)
+        quoted_labour_cost = c2.number_input("Quoted Labour Cost", min_value=0.0, value=pb_float(current.get("quoted_labour_cost", 0)), step=100.0)
+        quoted_materials = c3.number_input("Quoted Materials", min_value=0.0, value=pb_float(current.get("quoted_materials", 0)), step=100.0)
+
+        c4, c5, c6 = st.columns(3)
+        quoted_access = c4.number_input("Access / Equipment Allowance", min_value=0.0, value=pb_float(current.get("quoted_access_equipment", 0)), step=100.0)
+        quoted_subbies = c5.number_input("Subcontractor Allowance", min_value=0.0, value=pb_float(current.get("quoted_subcontractors", 0)), step=100.0)
+        quoted_sundries = c6.number_input("Sundries / Consumables", min_value=0.0, value=pb_float(current.get("quoted_sundries", 0)), step=50.0)
+
+        target_gp = st.number_input("Target GP %", min_value=0.0, max_value=100.0, value=pb_float(current.get("target_gp_percent", 35), 35), step=1.0)
+        notes = st.text_area("Budget Notes", value=str(current.get("notes", "") or ""))
+        submitted = st.form_submit_button("Save / Lock Job Budget")
+
+    if submitted:
+        if existing.empty:
+            execute("""
+                INSERT INTO job_budgets
+                (job_id, quoted_labour_hours, quoted_labour_cost, quoted_materials, quoted_access_equipment,
+                 quoted_subcontractors, quoted_sundries, target_gp_percent, locked_at, locked_by, notes)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (job_id, quoted_labour_hours, quoted_labour_cost, quoted_materials, quoted_access, quoted_subbies, quoted_sundries, target_gp, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), current_username(), notes))
+        else:
+            execute("""
+                UPDATE job_budgets
+                SET quoted_labour_hours = ?, quoted_labour_cost = ?, quoted_materials = ?, quoted_access_equipment = ?,
+                    quoted_subcontractors = ?, quoted_sundries = ?, target_gp_percent = ?, locked_at = ?, locked_by = ?, notes = ?
+                WHERE job_id = ?
+            """, (quoted_labour_hours, quoted_labour_cost, quoted_materials, quoted_access, quoted_subbies, quoted_sundries, target_gp, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), current_username(), notes, job_id))
+        st.success("Job budget saved.")
+        refresh()
+
+    budget_df = df_query("""
+        SELECT j.job_no AS 'Job No',
+               j.job_name AS 'Job Name',
+               b.quoted_labour_hours AS 'Labour Hours',
+               b.quoted_labour_cost AS 'Labour Cost',
+               b.quoted_materials AS 'Materials',
+               b.quoted_access_equipment AS 'Access',
+               b.quoted_subcontractors AS 'Subcontractors',
+               b.quoted_sundries AS 'Sundries',
+               b.target_gp_percent AS 'Target GP %',
+               b.locked_at AS 'Locked At',
+               b.locked_by AS 'Locked By'
+        FROM job_budgets b
+        JOIN jobs j ON j.id = b.job_id
+        ORDER BY j.job_no
+    """)
+    st.markdown("### Locked Budgets")
+    st.dataframe(budget_df, width="stretch", hide_index=True)
+
+
+def pb_control_variations():
+    st.subheader("Variations Register")
+    job_options = get_job_options()
+    if not job_options:
+        st.info("Create a job first.")
+        return
+
+    with st.expander("Add Variation", expanded=True):
+        selected_job = st.selectbox("Job", list(job_options.keys()), key="variation_job")
+        job_id = job_options[selected_job]
+        with st.form("variation_form"):
+            c1, c2, c3 = st.columns(3)
+            variation_no = c1.text_input("Variation No", value=pb_next_variation_no(job_id))
+            amount = c2.number_input("Amount Ex GST", min_value=0.0, step=100.0)
+            status = c3.selectbox("Status", ["Draft", "Sent", "Approved", "Rejected"])
+            description = st.text_area("Description")
+            reason = st.text_area("Reason")
+            c4, c5, c6 = st.columns(3)
+            sent_date = c4.text_input("Sent Date", value=str(date.today()) if status in ["Sent", "Approved"] else "")
+            approved_date = c5.text_input("Approved Date", value=str(date.today()) if status == "Approved" else "")
+            approved_by = c6.text_input("Approved By")
+            notes = st.text_area("Notes")
+            submitted = st.form_submit_button("Save Variation")
+        if submitted:
+            execute("""
+                INSERT INTO job_variations
+                (job_id, variation_no, description, reason, amount_ex_gst, status, sent_date, approved_date, approved_by, notes, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (job_id, variation_no, description, reason, amount, status, sent_date, approved_date, approved_by, notes, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+            st.success("Variation saved.")
+            refresh()
+
+    variations = df_query("""
+        SELECT v.id AS 'ID',
+               j.job_no AS 'Job No',
+               j.job_name AS 'Job Name',
+               v.variation_no AS 'Variation',
+               v.description AS 'Description',
+               v.amount_ex_gst AS 'Amount Ex GST',
+               v.status AS 'Status',
+               v.sent_date AS 'Sent',
+               v.approved_date AS 'Approved',
+               v.approved_by AS 'Approved By'
+        FROM job_variations v
+        JOIN jobs j ON j.id = v.job_id
+        ORDER BY v.id DESC
+    """)
+    st.dataframe(variations, width="stretch", hide_index=True)
+
+
+def pb_control_invoice_claims():
+    st.subheader("Invoice / Claim Tracker")
+    job_options = get_job_options()
+    if not job_options:
+        st.info("Create a job first.")
+        return
+
+    with st.expander("Add Invoice / Claim", expanded=True):
+        selected_job = st.selectbox("Job", list(job_options.keys()), key="claim_job")
+        job_id = job_options[selected_job]
+        with st.form("claim_form"):
+            c1, c2, c3 = st.columns(3)
+            claim_no = c1.text_input("Claim / Invoice No", value=pb_next_claim_no(job_id))
+            amount = c2.number_input("Amount Ex GST", min_value=0.0, step=100.0)
+            status = c3.selectbox("Status", ["Draft", "Sent", "Approved", "Paid", "Overdue", "Void"])
+            description = st.text_area("Description")
+            c4, c5, c6 = st.columns(3)
+            invoice_date = c4.text_input("Invoice Date", value=str(date.today()))
+            due_date = c5.text_input("Due Date")
+            paid_date = c6.text_input("Paid Date")
+            notes = st.text_area("Notes")
+            submitted = st.form_submit_button("Save Claim")
+        if submitted:
+            execute("""
+                INSERT INTO invoice_claims
+                (job_id, claim_no, description, amount_ex_gst, invoice_date, due_date, paid_date, status, notes, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (job_id, claim_no, description, amount, invoice_date, due_date, paid_date, status, notes, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+            st.success("Invoice / claim saved.")
+            refresh()
+
+    claims = df_query("""
+        SELECT c.id AS 'ID',
+               j.job_no AS 'Job No',
+               j.job_name AS 'Job Name',
+               c.claim_no AS 'Claim',
+               c.description AS 'Description',
+               c.amount_ex_gst AS 'Amount Ex GST',
+               c.invoice_date AS 'Invoice Date',
+               c.due_date AS 'Due Date',
+               c.paid_date AS 'Paid Date',
+               c.status AS 'Status'
+        FROM invoice_claims c
+        JOIN jobs j ON j.id = c.job_id
+        ORDER BY c.id DESC
+    """)
+    st.dataframe(claims, width="stretch", hide_index=True)
+
+
+def pb_control_staff_schedule():
+    st.subheader("Staff Scheduling Board")
+    job_options = get_job_options()
+    employee_options = get_employee_options(active_only=True)
+    if not job_options or not employee_options:
+        st.info("Create jobs and active employees first.")
+        return
+
+    with st.expander("Add Staff Schedule Entry", expanded=True):
+        with st.form("staff_schedule_form"):
+            c1, c2 = st.columns(2)
+            selected_job = c1.selectbox("Job", list(job_options.keys()), key="schedule_job")
+            selected_employee = c2.selectbox("Employee", list(employee_options.keys()), key="schedule_employee")
+            c3, c4, c5 = st.columns(3)
+            schedule_date = c3.text_input("Date", value=str(date.today()))
+            start_time = c4.text_input("Start Time", value="07:00")
+            finish_time = c5.text_input("Finish Time", value="15:00")
+            site_role = st.selectbox("Site Role", ["Painter", "Leading Hand", "Supervisor", "Apprentice", "Subcontractor", "Other"])
+            notes = st.text_area("Notes")
+            submitted = st.form_submit_button("Save Schedule Entry")
+        if submitted:
+            execute("""
+                INSERT INTO staff_schedule
+                (job_id, employee_id, schedule_date, start_time, finish_time, site_role, notes, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (job_options[selected_job], employee_options[selected_employee], schedule_date, start_time, finish_time, site_role, notes, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+            st.success("Schedule entry saved.")
+            refresh()
+
+    c1, c2 = st.columns(2)
+    start_filter = c1.text_input("From Date", value=str(date.today()))
+    end_filter = c2.text_input("To Date", value=str(date.today() + timedelta(days=7)))
+    schedule = df_query("""
+        SELECT s.id AS 'ID',
+               s.schedule_date AS 'Date',
+               e.name AS 'Employee',
+               j.job_no AS 'Job No',
+               j.job_name AS 'Job Name',
+               s.start_time AS 'Start',
+               s.finish_time AS 'Finish',
+               s.site_role AS 'Role',
+               s.notes AS 'Notes'
+        FROM staff_schedule s
+        JOIN jobs j ON j.id = s.job_id
+        JOIN employees e ON e.id = s.employee_id
+        WHERE s.schedule_date >= ? AND s.schedule_date <= ?
+        ORDER BY s.schedule_date, e.name
+    """, (start_filter, end_filter))
+    st.dataframe(schedule, width="stretch", hide_index=True)
+
+
+def pb_control_timesheet_approval():
+    st.subheader("Timesheet Approval")
+    st.caption("Approve or reject submitted timesheets before they are treated as final.")
+
+    pending = df_query("""
+        SELECT t.id AS 'ID',
+               t.work_date AS 'Date',
+               e.name AS 'Employee',
+               j.job_no AS 'Job No',
+               j.job_name AS 'Job Name',
+               t.start_time AS 'Start',
+               t.finish_time AS 'Finish',
+               t.break_minutes AS 'Break',
+               t.total_hours AS 'Hours',
+               t.work_type AS 'Work Type',
+               COALESCE(t.status, 'Submitted') AS 'Status',
+               t.notes AS 'Notes'
+        FROM timesheet_entries t
+        JOIN jobs j ON j.id = t.job_id
+        JOIN employees e ON e.id = t.employee_id
+        WHERE COALESCE(t.status, 'Submitted') = 'Submitted'
+        ORDER BY t.work_date DESC, t.id DESC
+    """)
+
+    if pending.empty:
+        st.success("No submitted timesheets waiting for approval.")
+        return
+
+    st.dataframe(pending, width="stretch", hide_index=True)
+    options = {f"{row['Date']} | {row['Employee']} | {row['Job No']} | {row['Hours']} hrs | ID {row['ID']}": int(row["ID"]) for _, row in pending.iterrows()}
+    selected = st.multiselect("Select timesheets", list(options.keys()), key="approve_timesheets_select")
+    selected_ids = [options[x] for x in selected]
+
+    c1, c2, c3 = st.columns(3)
+    if c1.button("Approve Selected Timesheets"):
+        for ts_id in selected_ids:
+            execute("UPDATE timesheet_entries SET status = 'Approved' WHERE id = ?", (ts_id,))
+        st.success(f"Approved {len(selected_ids)} timesheet(s).")
+        refresh()
+    if c2.button("Reject Selected Timesheets"):
+        for ts_id in selected_ids:
+            execute("UPDATE timesheet_entries SET status = 'Rejected' WHERE id = ?", (ts_id,))
+        st.warning(f"Rejected {len(selected_ids)} timesheet(s).")
+        refresh()
+    if c3.button("Mark Selected As Paid/Processed"):
+        for ts_id in selected_ids:
+            execute("UPDATE timesheet_entries SET status = 'Processed' WHERE id = ?", (ts_id,))
+        st.info(f"Marked {len(selected_ids)} timesheet(s) as processed.")
+        refresh()
+
+
+def pb_control_ai_job_review(df):
+    st.subheader("AI Job Review")
+    st.caption("Uses your JobHub AI/local Ollama setup to review margin, labour, material and schedule risk.")
+
+    job_options = {f"{r['Job No']} - {r['Job Name']}": int(r["job_id"]) for _, r in df.iterrows()}
+    if not job_options:
+        st.info("Create a job first.")
+        return
+
+    selected = st.selectbox("Select Job", list(job_options.keys()), key="control_ai_review_job")
+    job_id = job_options[selected]
+    row = df[df["job_id"].astype(int) == int(job_id)].iloc[0]
+
+    context = "\n".join([f"{col}: {row[col]}" for col in df.columns if col != "job_id"])
+    prompt = (
+        "Review this painting job for Premier Brushworks. "
+        "Give a practical job risk review with: margin risk, labour risk, materials risk, schedule risk, "
+        "missing information, and the next 5 actions for Nick/Bryce.\n\n"
+        + context
+    )
+
+    if st.checkbox("Show AI context", value=False, key="show_control_ai_context"):
+        st.text_area("Context", value=context, height=300)
+
+    if st.button("Review This Job With AI"):
+        with st.spinner("AI reviewing job..."):
+            answer, error = jobhub_ai_answer(prompt, context)
+        if error:
+            st.error(error)
+        else:
+            st.markdown("### AI Review")
+            st.write(answer)
+
+
+def control_centre_page():
+    st.header("Premier Brushworks Control Centre")
+    st.caption("Daily dashboard, job health, budget lock-in, variations, claims, scheduling, timesheet approval and AI job review.")
+
+    df = pb_job_cost_frame()
+    if df.empty:
+        st.info("Create your first job to start using the Control Centre.")
+        return
+
+    section = st.radio(
+        "Control Centre Section",
+        [
+            "Daily Dashboard",
+            "Job Health Score",
+            "Job Budget Lock-In",
+            "Variations Register",
+            "Invoice / Claim Tracker",
+            "Staff Scheduling Board",
+            "Timesheet Approval",
+            "AI Job Review",
+            "Export Control Centre"
+        ],
+        horizontal=False,
+        key="control_centre_section"
+    )
+
+    if section == "Daily Dashboard":
+        pb_control_daily_dashboard(df)
+    elif section == "Job Health Score":
+        pb_control_job_health(df)
+    elif section == "Job Budget Lock-In":
+        pb_control_budget_lock(df)
+    elif section == "Variations Register":
+        pb_control_variations()
+    elif section == "Invoice / Claim Tracker":
+        pb_control_invoice_claims()
+    elif section == "Staff Scheduling Board":
+        pb_control_staff_schedule()
+    elif section == "Timesheet Approval":
+        pb_control_timesheet_approval()
+    elif section == "AI Job Review":
+        pb_control_ai_job_review(df)
+    else:
+        st.subheader("Export Control Centre")
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            df.drop(columns=["job_id"], errors="ignore").to_excel(writer, index=False, sheet_name="Job Health")
+            df_query("""
+                SELECT v.*, j.job_no, j.job_name
+                FROM job_variations v
+                JOIN jobs j ON j.id = v.job_id
+                ORDER BY v.id DESC
+            """).to_excel(writer, index=False, sheet_name="Variations")
+            df_query("""
+                SELECT c.*, j.job_no, j.job_name
+                FROM invoice_claims c
+                JOIN jobs j ON j.id = c.job_id
+                ORDER BY c.id DESC
+            """).to_excel(writer, index=False, sheet_name="Claims")
+            df_query("""
+                SELECT s.*, j.job_no, j.job_name, e.name AS employee
+                FROM staff_schedule s
+                JOIN jobs j ON j.id = s.job_id
+                JOIN employees e ON e.id = s.employee_id
+                ORDER BY s.schedule_date DESC
+            """).to_excel(writer, index=False, sheet_name="Staff Schedule")
+            for ws in writer.book.worksheets:
+                for column_cells in ws.columns:
+                    max_len = 0
+                    col_letter = column_cells[0].column_letter
+                    for cell in column_cells:
+                        value = "" if cell.value is None else str(cell.value)
+                        max_len = max(max_len, len(value))
+                    ws.column_dimensions[col_letter].width = min(max(max_len + 2, 12), 45)
+        output.seek(0)
+        st.download_button(
+            "Download Control Centre Excel",
+            data=output.getvalue(),
+            file_name="PB_JobHub_Control_Centre.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+
+def current_username():
+    user = get_current_user() or {}
+    return str(user.get("username", "unknown"))
+
+
 # =============================
 # START APP
 # =============================
@@ -4452,6 +5798,7 @@ if role == "employee":
 elif role == "manager":
     allowed_menu = [
         "Dashboard",
+        "Control Centre",
         "Jobs",
         "Estimate Working Sheet",
         "Job Costs / Forecasting",
@@ -4470,6 +5817,7 @@ elif role == "manager":
 else:
     allowed_menu = [
         "Dashboard",
+        "Control Centre",
         "Jobs",
         "Estimate Working Sheet",
         "Job Costs / Forecasting",
@@ -4507,6 +5855,10 @@ elif menu == "User Access":
 # =============================
 # DASHBOARD
 # =============================
+elif menu == "Control Centre":
+    control_centre_page()
+
+
 elif menu == "Dashboard":
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Jobs", int(df_query("SELECT COUNT(*) AS c FROM jobs").iloc[0]["c"]))

@@ -1,0 +1,26 @@
+PB JOBHUB CONTROL CENTRE AUDIT
+==============================
+
+Checks:
+- Control Centre menu: present.
+- Control Centre handler: present.
+- Control Centre page: present.
+- Job budgets table: present.
+- Variations table: present.
+- Invoice claims table: present.
+- Staff schedule table: present.
+- Timesheet Approval section: present.
+- AI Job Review section: present.
+- timesheet_entries table definition found.
+- job_budgets table definition found.
+- job_variations table definition found.
+- invoice_claims table definition found.
+- staff_schedule table definition found.
+- No use_container_width warnings.
+- Python compile check passed.
+
+Warnings / Limits:
+- No static warnings found.
+
+Limit:
+- I cannot live-test your deployed Supabase/Streamlit app from here. After upload, open Control Centre and test each section once.
