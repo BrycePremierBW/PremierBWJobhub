@@ -1693,6 +1693,31 @@ def user_access_page():
 
     st.divider()
 
+    st.markdown("### Restore Master Builders/Clients & Employees")
+    st.caption("Use this if builders, clients, employee names, or employee logins are missing.")
+
+    rc1, rc2 = st.columns(2)
+    rc1.metric("Builders/clients currently in database", builders_clients_count())
+    rc2.metric("Employees currently in database", employees_count())
+
+    restore_master_confirm = st.text_input(
+        "To restore the saved master builders/clients and employees, type: RESTORE MASTER DATA",
+        key="restore_master_data_confirm"
+    )
+
+    if st.button("Restore Builders/Clients & Employees", key="restore_builders_clients_employees_btn"):
+        if restore_master_confirm.strip().upper() != "RESTORE MASTER DATA":
+            st.error("Type RESTORE MASTER DATA exactly before restoring.")
+        else:
+            restored_builders, restored_employees = restore_builders_clients_and_employees()
+            st.success(
+                f"Restored/updated {restored_builders} builders/clients and {restored_employees} employees. "
+                "Missing employee login accounts were recreated where needed."
+            )
+            refresh()
+
+    st.divider()
+
     st.markdown("### Clean Up Duplicate User Accounts")
     st.caption("Use this if the same employee/user login appears more than once.")
 
@@ -2678,6 +2703,60 @@ def product_count():
     except Exception:
         pass
     return 0
+
+
+def restore_builders_clients_and_employees():
+    builders = [('Builder', 'Ausmar Homes Pty Ltd', 'Compliance Team', '07 5319 1500', 'compliance@ausmargroup.com.au', '8 Flinders Lane, Maroochydore QLD 4558', '1083000', '55 087 236 208', '30 Days', 'Annual Period Trade Contract'), ('Developer / Builder', 'OneLife Property Group', 'Bryce Curran', '0421 069 817', 'brycecurran@hotmail.com', 'Sunshine Coast', '', '', '30 Days', 'Multi-residential complexes'), ('Builder', 'Thompson Homes', '', '', '', '', '', '', '30 Days', 'Existing JobHub builder'), ('Client / Developer', 'Palm Lakes', '', '', '', 'Pelican Waters', '', '', '30 Days', 'Palm Lakes Pelican Waters'), ('Interior Designer', 'Box Clever Interiors', 'Design Team', '07 5309 5640', 'info@boxcleverinteriors.com.au', 'PO Box 208, Moffat Beach QLD 4551', '', '08 007 428 613', '', 'Bannister project designer'), ('Interior Designer', 'Inka Interiors', 'Sheena Hanks', '0438 308 672', 'info@inkainteriors.com.au', 'Basement Level, 811 Stanley St, Woolloongabba', '', '', '', 'Cunningham project designer'), ('Painting Contractor', 'Emerald Painting Company Pty Ltd', 'Anthony Des Johnston', '0410 949 719', 'des@emeraldpainting.com.au', '20 Warenna Crescent, Glenvale QLD 4350', '', '85 169 333 957', '', 'Industry contact'), ('Supplier', 'Dulux Australia', '', '07 5443 7255', '', 'Cnr Amaroo St & Maroochydore Rd, Maroochydore QLD 4558', '', '67 000 049 427', '', 'Supplier'), ('Builder', 'Greenrock Building', '', '', '', '', '', '', '30 Days', 'Client history'), ('Builder', 'Rejuvenate Group', '', '', '', '', '', '', '30 Days', 'School works'), ('Builder', 'Adlar Homes', '', '', '', 'Maroochydore', '', '', '30 Days', 'Client history'), ('Builder', 'Darren Hunt Homes', '', '', '', '', '', '', '30 Days', 'Custom homes'), ('Builder', 'Watherston Building', '', '', '', '', '', '', '30 Days', 'Custom homes'), ('Commercial Client', 'Stockland Aura', '', '', '', 'Aura', '', '', '', 'Commercial developments'), ('Commercial Builder', 'FDC Constructions', 'Simon Hawkins / Adam Pickering', '', '', '', '', '', '', 'Outreach'), ('Commercial Client', 'Comiskey Group', 'Paul / David / Rob & team', '', '', 'Sunshine Coast', '', '', '', 'Hospitality venue'), ('Education Client', 'Nambour State College', '', '', '', 'Nambour', '', '', '', 'School works'), ('Education Client', 'Currimundi State School', '', '', '', 'Currimundi', '', '', '', 'School works'), ('Education Client', 'Currimundi Special School', '', '', '', 'Currimindi', '', '', '', 'School works'), ('Education Client', 'Gympie South State School', '', '', '', 'Gympie', '', '', '', 'School works'), ('Education Client', 'Good Shepherd Lutheran School', '', '', '', '', '', '', '', 'School works')]
+
+    employees = [('Bryce', '', '', 60.0, 66.0, 'Active', ''), ('Brodrick', '', '', 45.0, 49.5, 'Active', ''), ('Sol', '', '', 50.0, 55.0, 'Active', ''), ('Critter', '', '', 40.0, 44.0, 'Active', ''), ('Greg', '', '', 46.0, 50.6, 'Active', ''), ('Chris Nagy', '', '', 50.0, 55.0, 'Active', ''), ('Isaac', '', '', 46.0, 50.6, 'Active', ''), ('Rob Pullin', '', '', 45.0, 49.5, 'Active', ''), ('Ian', '', '', 46.0, 50.6, 'Active', ''), ('Tim', '', '', 45.0, 49.5, 'Active', ''), ('Anth', '', '', 35.0, 38.5, 'Active', ''), ('River', '', '', 32.5, 35.75, 'Active', ''), ('Dipper', '', '', 45.0, 49.5, 'Active', ''), ('Vlad 1', '', '', 45.0, 49.5, 'Active', ''), ('Vlad 2', '', '', 45.0, 49.5, 'Active', ''), ('Ryan', '', '', 45.0, 49.5, 'Active', '')]
+
+    restored_builders = 0
+    restored_employees = 0
+
+    for row in builders:
+        execute("""
+            INSERT OR REPLACE INTO builders_clients
+            (type, name, contact_name, phone, email, address, qbcc, abn, terms, notes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, row)
+        restored_builders += 1
+
+    for row in employees:
+        execute("""
+            INSERT OR REPLACE INTO employees
+            (name, role, phone, base_hourly_rate, rate_plus_10, status, notes)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, row)
+        restored_employees += 1
+
+    # Recreate employee login accounts where missing, without duplicating existing logins.
+    try:
+        seed_app_users()
+    except Exception:
+        pass
+
+    return restored_builders, restored_employees
+
+
+def builders_clients_count():
+    try:
+        df = df_query("SELECT COUNT(*) AS 'count' FROM builders_clients")
+        if not df.empty:
+            return int(df.iloc[0]["count"])
+    except Exception:
+        pass
+    return 0
+
+
+def employees_count():
+    try:
+        df = df_query("SELECT COUNT(*) AS 'count' FROM employees")
+        if not df.empty:
+            return int(df.iloc[0]["count"])
+    except Exception:
+        pass
+    return 0
+
 
 
 
