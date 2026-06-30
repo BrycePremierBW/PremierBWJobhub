@@ -1,4 +1,3 @@
-
 import sqlite3
 import os
 import tempfile
@@ -9,8 +8,9 @@ import hashlib
 import re
 import json
 from pathlib import Path
-from datetime import date, datetime, timedelta, timedelta
+from datetime import date, datetime, timedelta
 from io import BytesIO
+
 import pandas as pd
 from PIL import Image
 import requests
@@ -18,7 +18,11 @@ import psycopg2
 from psycopg2.pool import ThreadedConnectionPool
 from pypdf import PdfReader
 import streamlit as st
-import os
+
+
+# =============================
+# APP PATHS / PERSISTENT STORAGE
+# =============================
 
 DATA_DIR = os.getenv("DATA_DIR", "/var/data")
 
@@ -32,10 +36,15 @@ os.makedirs(JOB_FILES_DIR, exist_ok=True)
 os.makedirs(PHOTOS_DIR, exist_ok=True)
 os.makedirs(EXPORTS_DIR, exist_ok=True)
 
-conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-cur = conn.cursor()
 
-DB_PATH = Path(__file__).with_name("pb_jobhub.db")
+def get_job_folder(job_number):
+    folder = os.path.join(JOB_FILES_DIR, str(job_number))
+    os.makedirs(folder, exist_ok=True)
+    return folder
+
+
+st.set_page_config(page_title="Premier Brushworks JobHub", layout="wide")
+
 
 def get_database_url():
     # Streamlit Cloud: add DATABASE_URL under App > Settings > Secrets.
@@ -51,14 +60,6 @@ def get_database_url():
 
 DATABASE_URL = get_database_url()
 USE_POSTGRES = bool(DATABASE_URL)
-
-def get_job_folder(job_number):
-    folder = os.path.join(JOB_FILES_DIR, str(job_number))
-    os.makedirs(folder, exist_ok=True)
-    return folder
-    
-st.set_page_config(page_title="Premier Brushworks JobHub", layout="wide")
-
 
 @st.cache_resource
 def get_postgres_pool():
