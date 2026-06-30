@@ -86,7 +86,6 @@ if os.path.exists(test_file_path):
     st.sidebar.success(f"Persistent test file exists with {len(lines)} saved test line(s).")
 else:
     st.sidebar.warning("No persistent test file found yet.")
-Add this after this line:
 
 USE_POSTGRES = bool(DATABASE_URL)
 
