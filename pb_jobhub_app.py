@@ -4676,10 +4676,49 @@ def ai_secret(name, default=""):
 
 
 def ai_provider():
-    provider = str(ai_secret("AI_PROVIDER", "ollama")).strip().lower()
+    """
+    AI provider rules:
+    - AI_PROVIDER=openai: use OpenAI online/cloud.
+    - AI_PROVIDER=ollama: use local Ollama only.
+    - AI_PROVIDER=auto or blank:
+        * if OPENAI_API_KEY exists, use OpenAI
+        * if hosted on Render and no OpenAI key, switch AI off
+        * if running locally and no OpenAI key, use Ollama
+    - AI_PROVIDER=none/off/disabled: switch AI off
+    """
+    provider = str(ai_secret("AI_PROVIDER", "auto")).strip().lower()
+
+    if provider in ["none", "off", "disabled", "disable", "false", "0", "no", "no_ai", "no-ai"]:
+        return "none"
+
     if provider not in ["ollama", "openai", "auto"]:
-        provider = "ollama"
-    return provider
+        provider = "auto"
+
+    has_openai_key = bool(str(jobhub_ai_api_key() or "").strip())
+    is_render = bool(os.getenv("RENDER") or os.getenv("RENDER_SERVICE_ID"))
+
+    if provider == "openai":
+        return "openai"
+
+    if provider == "ollama":
+        return "ollama"
+
+    # auto mode
+    if has_openai_key:
+        return "openai"
+
+    if is_render:
+        return "none"
+
+    return "ollama"
+
+
+def ai_disabled_message():
+    return (
+        "AI is switched off on this hosted Render app because no OpenAI API key is configured. "
+        "Add AI_PROVIDER=openai and OPENAI_API_KEY in Render Environment to use online AI. "
+        "For free Ollama AI, run JobHub locally on the same computer as Ollama."
+    )
 
 
 def ollama_base_url():
@@ -4713,18 +4752,28 @@ def ollama_status():
 
 def ai_backend_ready():
     provider = ai_provider()
+
+    if provider == "none":
+        return False, ai_disabled_message()
+
     if provider == "openai":
         if openai_enabled():
-            return True, f"Using OpenAI model {jobhub_ai_model()}."
+            return True, f"Using OpenAI online model {jobhub_ai_model()}."
         return False, "AI_PROVIDER is openai but OPENAI_API_KEY is missing."
 
-    if provider == "auto" and openai_enabled():
-        return True, f"Using OpenAI model {jobhub_ai_model()}."
+    if provider == "ollama":
+        return ollama_status()
 
-    return ollama_status()
+    return False, ai_disabled_message()
 
 
 def ollama_generate(prompt, system="", context="", model=None, timeout=None):
+    if ai_provider() == "none":
+        return None, ai_disabled_message()
+
+    if ai_provider() == "openai":
+        return None, "Ollama is not used in OpenAI mode. Use the JobHub AI Assistant or App Builder AI with OpenAI."
+
     model = model or ollama_model()
     timeout = timeout or ollama_timeout()
 
@@ -4807,7 +4856,10 @@ def jobhub_ai_answer(question, context_text):
     )
 
     provider = ai_provider()
-    if provider == "openai" or (provider == "auto" and openai_enabled()):
+    if provider == "none":
+        return None, ai_disabled_message()
+
+    if provider == "openai":
         return openai_responses_answer(question, context_text, include_web=False, require_web=False, system_text=system)
 
     return ollama_generate(question, system=system, context=context_text)
@@ -4854,7 +4906,10 @@ SAVED APP BUILDER LEARNINGS:
 """
 
     provider = ai_provider()
-    if provider == "openai" or (provider == "auto" and openai_enabled()):
+    if provider == "none":
+        return None, ai_disabled_message()
+
+    if provider == "openai":
         return openai_responses_answer(
             question,
             context,
@@ -4960,13 +5015,13 @@ def summarise_url_into_learning(topic, url):
 
 def free_local_ai_setup_page():
     st.header("Free Local AI Setup")
-    st.caption("Use Ollama for free local AI and save learnings into JobHub.")
+    st.caption("Use OpenAI online on Render, or Ollama for free local AI when running JobHub on your own computer.")
 
     status_ok, status_message = ai_backend_ready()
 
     c1, c2 = st.columns(2)
     c1.metric("AI Provider", ai_provider())
-    c2.metric("Ollama Model", ollama_model())
+    c2.metric("OpenAI Model", jobhub_ai_model() if ai_provider() == "openai" else ollama_model())
 
     if status_ok:
         st.success(status_message)
@@ -7488,7 +7543,8 @@ elif menu == "Material Costs":
                     refresh()
 
     df = df_query("""
-        SELECT j.job_no AS 'Job No',
+        SELECT m.id AS 'ID',
+               j.job_no AS 'Job No',
                j.job_name AS 'Job Name',
                p.product_code AS 'Product Code',
                p.product_name AS 'Product Name',
@@ -7505,6 +7561,95 @@ elif menu == "Material Costs":
         ORDER BY m.id DESC
     """)
     st.dataframe(df, width="stretch", hide_index=True)
+
+    st.markdown("### Delete Material Cost Entries")
+    st.caption("Use this for wrong, duplicate or accidental material cost entries. This deletes saved material cost rows only; it does not delete the product from the product list.")
+
+    if df.empty:
+        st.info("No material cost entries to delete.")
+    else:
+        material_options = {
+            f"ID {row['ID']} | {row['Job No']} - {row['Job Name']} | {row['Product Code']} | {row['Product Name']} | Qty {row['Qty Required']} | ${float(row['Total Cost'] or 0):,.2f}": int(row["ID"])
+            for _, row in df.iterrows()
+        }
+
+        selected_material_labels = st.multiselect(
+            "Select material cost entries to delete",
+            list(material_options.keys()),
+            key="delete_material_entries_select"
+        )
+        selected_material_ids = [material_options[label] for label in selected_material_labels]
+
+        delete_materials_confirm = st.text_input(
+            "To delete selected material cost entries, type: DELETE MATERIALS",
+            key="delete_material_entries_confirm"
+        )
+
+        if st.button("Delete Selected Material Cost Entries", key="delete_material_entries_button"):
+            if not selected_material_ids:
+                st.error("Select at least one material cost entry first.")
+            elif delete_materials_confirm.strip().upper() != "DELETE MATERIALS":
+                st.error("Type DELETE MATERIALS exactly before deleting material entries.")
+            else:
+                for material_id in selected_material_ids:
+                    execute("DELETE FROM material_entries WHERE id = ?", (int(material_id),))
+                st.success(f"Deleted {len(selected_material_ids)} material cost entr{'y' if len(selected_material_ids) == 1 else 'ies'}.")
+                refresh()
+
+    st.divider()
+
+    imported_df = df_query("""
+        SELECT im.id AS 'ID',
+               j.job_no AS 'Job No',
+               j.job_name AS 'Job Name',
+               im.product AS 'Product',
+               im.colour AS 'Colour',
+               im.qty_required AS 'Qty Required',
+               im.qty_loaded AS 'Qty Loaded',
+               im.source_file AS 'Source File',
+               im.imported_at AS 'Imported At',
+               im.notes AS 'Notes'
+        FROM imported_material_entries im
+        JOIN jobs j ON j.id = im.job_id
+        ORDER BY im.id DESC
+    """)
+
+    st.markdown("### Imported PDF Checklist Material Lines")
+    if imported_df.empty:
+        st.info("No imported PDF material lines saved.")
+    else:
+        st.dataframe(imported_df, width="stretch", hide_index=True)
+
+        st.markdown("### Delete Imported PDF Material Lines")
+        st.caption("Use this for wrongly imported PDF checklist material lines.")
+
+        imported_options = {
+            f"ID {row['ID']} | {row['Job No']} - {row['Job Name']} | {row['Product']} | Colour {row['Colour']} | Qty {row['Qty Required']}": int(row["ID"])
+            for _, row in imported_df.iterrows()
+        }
+
+        selected_imported_labels = st.multiselect(
+            "Select imported PDF material lines to delete",
+            list(imported_options.keys()),
+            key="delete_imported_material_entries_select"
+        )
+        selected_imported_ids = [imported_options[label] for label in selected_imported_labels]
+
+        delete_imported_confirm = st.text_input(
+            "To delete selected imported PDF material lines, type: DELETE IMPORTED MATERIALS",
+            key="delete_imported_material_entries_confirm"
+        )
+
+        if st.button("Delete Selected Imported PDF Material Lines", key="delete_imported_material_entries_button"):
+            if not selected_imported_ids:
+                st.error("Select at least one imported PDF material line first.")
+            elif delete_imported_confirm.strip().upper() != "DELETE IMPORTED MATERIALS":
+                st.error("Type DELETE IMPORTED MATERIALS exactly before deleting imported material lines.")
+            else:
+                for imported_id in selected_imported_ids:
+                    execute("DELETE FROM imported_material_entries WHERE id = ?", (int(imported_id),))
+                st.success(f"Deleted {len(selected_imported_ids)} imported PDF material line{'s' if len(selected_imported_ids) != 1 else ''}.")
+                refresh()
 
 
 # =============================
