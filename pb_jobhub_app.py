@@ -1680,16 +1680,27 @@ def user_access_page():
         st.error("Only admin users can access this page.")
         return
 
-    st.markdown("### Restore Master Product List")
-    st.caption("Use this if the product list has disappeared from Supabase.")
+    st.markdown("### Restore / Update Haymes & Taubmans Product Lists")
+    st.caption("One button to restore/update both saved paint product lists. Existing matching product codes are updated instead of duplicated.")
 
-    current_product_count = product_count()
-    st.metric("Products currently in database", current_product_count)
+    pc1, pc2, pc3 = st.columns(3)
+    pc1.metric("Haymes products", haymes_product_count())
+    pc2.metric("Taubmans products", taubmans_product_count())
+    pc3.metric("Combined saved paint products", combined_paint_product_count())
 
-    if st.button("Restore Product List", key="restore_product_list_btn"):
-        restored_count = restore_product_list()
-        st.success(f"Restored/updated {restored_count} products.")
-        refresh()
+    paint_confirm = st.text_input(
+        "To restore/update Haymes and Taubmans products, type: RESTORE PAINT LISTS",
+        key="restore_combined_paint_lists_confirm"
+    )
+
+    if st.button("Restore / Update Haymes & Taubmans Product Lists", key="restore_haymes_taubmans_products_btn"):
+        if paint_confirm.strip().upper() != "RESTORE PAINT LISTS":
+            st.error("Type RESTORE PAINT LISTS exactly before restoring.")
+        else:
+            restored = restore_haymes_and_taubmans_product_lists()
+            st.success(f"Restored/updated {restored} Haymes and Taubmans products.")
+            refresh()
+
 
     st.divider()
 
@@ -2698,6 +2709,83 @@ def restore_product_list():
 def product_count():
     try:
         df = df_query("SELECT COUNT(*) AS 'count' FROM products")
+        if not df.empty:
+            return int(df.iloc[0]["count"])
+    except Exception:
+        pass
+    return 0
+
+
+def restore_taubmans_product_list():
+    products = [('T ALL WEATHER L/S W15L 18', '187200/15L', '30001918', '15L', 145.0), ('T ALL WEATHER L/S A15L 18', '187204/15L', '30001923', '15L', 150.0), ('T ALL WEATHER L/S N15L 18', '187205/15L', '30001928', '15L', 150.0), ('T ALL WEATHER L/S D15L 18', '187209/15L', '30001942', '15L', 150.0), ('T ALL WEATHER L/S W10L 18', '187200/10L', '30001917', '10L', 120.0), ('T ALL WEATHER L/S A10L 18', '187204/10L', '30001922', '10L', 122.5), ('T ALL WEATHER L/S N10L 18', '187205/10L', '30001927', '10L', 122.5), ('T ALL WEATHER L/S D10L 18', '187209/10L', '30001941', '10L', 122.5), ('T ALL WEATHER L/S W4L 18', '187200/4L', '30001921', '4L', 57.5), ('T ALL WEATHER L/S A4L 18', '187204/4L', '30001926', '4L', 60.0), ('T ALL WEATHER L/S N4L 18', '187205/4L', '30001931', '4L', 60.0), ('T ALL WEATHER L/S D4L 18', '187209/4L', '30001944', '4L', 60.0), ('T ALL WEATHER MATT W15L 18', '187100/15L', '30001906', '15L', 145.0), ('T ALL WEATHER MATT A15L 18', '187104/15L', '30001910', '15L', 150.0), ('T ALL WEATHER MATT N15L 18', '187105/15L', '30001914', '15L', 150.0), ('T ALL WEATHER S/G W15L 18', '187400/15L', '30001950', '15L', 145.0), ('T ALL WEATHER S/G D15L 19', '187409/15L', '30001963', '15L', 150.0), ('T ALL WEATHER S/G A10L 19', '187404/10L', '30001954', '10L', 122.5), ('T ENDURE INT L/S W15L 18', '124200/15L', '30001368', '15L', 145.0), ('T ENDURE INT L/S W10L 18', '124200/10L', '30001367', '10L', 120.0), ('T ENDURE INT L/S W4L 18', '124200/4L', '30001371', '4L', 57.5), ('T ENDURE INT MATT W15L 18', '124100/15L', '30001356', '15L', 160.0), ('T ENDURE INT MATT W10L 18', '124100/10L', '30001355', '10L', 135.0), ('T ENDURE INT MATT W4L 18', '124100/4L', '30001359', '4L', 60.0), ('T PURE PERF L/S W15L 21', '279250/15L', '30008591', '15L', 145.0), ('T PURE PERF MATT W15L 21', '279150/15L', '30008588', '15L', 145.0), ('T PURE PERF CEILING W15L 21', '279050/15L', '30008581', '15L', 120.0), ('T Ceiling Premium W15L 22', '128000/15L', '30010919', '15L', 120.0), ('T PURE PERF WB ENAMEL GLOSS W10L 21', '279950/10L', '30008738', '10L', 122.0), ('T PURE PERF WB ENAMEL S/G W10L 21', '279850/10L', '30008596', '10L', 122.0), ('T PURE PERF WB ENAMEL GLOSS W4L 21', '279950/4L', '30008739', '4L', 65.0), ('T PURE PERF WB ENAMEL S/G W4L 21', '279850/4L', '30008737', '4L', 65.0), ('T WB ENAMEL GLOSS W10L 19', '121610/10L', '30001326', '10L', 125.0), ('T WB ENAMEL S/G W10L 19', '121410/10L', '30001294', '10L', 125.0), ('T WB ENAMEL GLOSS W4L 19', '121610/4L', '30001329', '4L', 65.0), ('T WB ENAMEL S/G W4L 19', '121410/4L', '30001297', '4L', 65.0), ('T ULTIMATE ENAMEL S/G W10L 19', '132810/10L', '30001427', '10L', 170.0), ('T ULTIMATE ENAMEL GLOSS W10L 19', '132910/10L', '30001441', '10L', 170.0), ('T ULTIMATE ENAMEL S/G W4L 19', '132810/4L', '30001429', '4L', 80.0), ('T ULTIMATE ENAMEL GLOSS W4L 19', '132910/4L', '30001443', '4L', 80.0), ('T TRADE EDGE UC W15L 16', '259500/15L', '30002265', '15L', 90.0), ('T ULTRA PREP W15L 09', '288500/15L', '30002664', '15L', 110.0), ('T TRADEX ULTRAPREP 15L', '274520/15L', '30002331', '15L', 105.0), ('T PURE PERF PREP W15L 21', '279550/15L', '30008595', '15L', 120.0), ('T TRADEX CEILING W15L 15', '274000/15L', '30002310', '15L', 100.0), ('T PRO INT L/S W15L 20', '278200/15L', '30002370', '15L', 120.0), ('T PRO EXT L/S W15L 20', '278710/15L', '30002387', '15L', 135.0), ('T PRO ENAMEL W/B GLOSS W10L20', '278600/10L', '30002381', '10L', 120.0), ('T PRO ENAMEL W/B S/G W10L 20', '278400/10L', '30002376', '10L', 120.0), ('T PRO CEILING W15L 20', '278000/15L', '30002364', '15L', 105.0), ('T 3IN1 W15L 15', '108100/15L', '30000957', '15L', 130.0), ('T 3IN1 W4L 15', '108100/4L', '30000960', '4L', 60.0), ('J PRO DECK OIL NAT 10L 17', '481200/10L', '30004332', '10L', 170.0), ('J PRO DECK OIL NAT 4L 17', '481200/4L', '30004334', '4L', 75.0), ('J PRO EXT CLEAR GLOSS 4L 17', '481121/4L', '30004331', '4L', 80.0), ('J PRO EXT CLEAR SATIN 4L 17', '481120/4L', '30004328', '4L', 80.0), ('T ARMAWALL A/SHIELD W15L 09', '310400/15L', '30003018', '15L', 150.0), ('T ARMAWALL PRIMER 15L 09', '315500/15L', '30003036', '15L', 135.0), ('T ARMAWALL SEALER BOND C10L', '315705/10L', '30003039', '10L', 135.0), ('T ARMAWALL SEALER BOND W10L', '315700/10L', '30003038', '10L', 135.0)]
+
+    restored = 0
+    for product_name, product_code, taubmans_sku, unit, price_ex_gst in products:
+        execute("""
+            INSERT OR REPLACE INTO products
+            (product_code, product_name, supplier, unit, price_ex_gst, notes)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (
+            product_code,
+            product_name,
+            "Taubmans",
+            unit,
+            float(price_ex_gst),
+            f"Taubmans SKU: {taubmans_sku} | Source: uploaded Premier Brushworks Taubmans price list"
+        ))
+        restored += 1
+
+    return restored
+
+
+def taubmans_product_count():
+    try:
+        df = df_query("SELECT COUNT(*) AS 'count' FROM products WHERE supplier = 'Taubmans'")
+        if not df.empty:
+            return int(df.iloc[0]["count"])
+    except Exception:
+        pass
+    return 0
+
+
+
+
+
+def restore_haymes_and_taubmans_product_lists():
+    products = [('PB-H00001', 'Coverplus Interior L/S White', 'Haymes', '', 168.0, ''), ('PB-H00002', 'Elite Ceiling Toned White, 15L', 'Haymes', '15L', 90.0, ''), ('PB-H00003', 'Elite Ceiling White, 15L', 'Haymes', '15L', 90.0, ''), ('PB-H00004', 'Elite Interior Low Sheen White', 'Haymes', '', 118.0, ''), ('PB-H00005', 'Elite Interior Matt White, 15L', 'Haymes', '15L', 125.0, ''), ('PB-H00006', 'Elite Acrylic Sealer Undercoat', 'Haymes', '', 105.36, ''), ('PB-H00007', 'Elite Quick Dry Primer Undercoat', 'Haymes', '', 123.55, ''), ('PB-H00008', 'Expressions Low Sheen DKT, 4L', 'Haymes', '4L', 74.13, ''), ('PB-H00009', 'Expressions Low Sheen EDT, 4L', 'Haymes', '4L', 74.13, ''), ('PB-H00010', 'Expressions Low Sheen UDT, 4L', 'Haymes', '4L', 74.13, ''), ('PB-H00011', 'Expressions Low Sheen White', 'Haymes', '', 107.48, ''), ('PB-H00012', 'Expressions Low Sheen White', 'Haymes', '', 145.0, ''), ('PB-H00013', 'Expressions Low Sheen White, 4L', 'Haymes', '4L', 67.26, ''), ('PB-H00014', 'Solashield Low Sheen DKT, 10L', 'Haymes', '10L', 115.0, ''), ('PB-H00015', 'Solashield Low Sheen DKT, 15L', 'Haymes', '15L', 160.0, ''), ('PB-H00016', 'Solashield Low Sheen DKT, 4L', 'Haymes', '4L', 73.55, ''), ('PB-H00017', 'Solashield Low Sheen EDT, 10L', 'Haymes', '10L', 115.0, ''), ('PB-H00018', 'Solashield Low Sheen EDT, 15L', 'Haymes', '15L', 160.0, ''), ('PB-H00019', 'Solashield Low Sheen EDT, 4L', 'Haymes', '4L', 73.55, ''), ('PB-H00020', 'Solashield Low Sheen UDT, 10L', 'Haymes', '10L', 115.0, ''), ('PB-H00021', 'Solashield Low Sheen UDT, 15L', 'Haymes', '15L', 160.0, ''), ('PB-H00022', 'Solashield Low Sheen UDT, 4L', 'Haymes', '4L', 73.55, ''), ('PB-H00023', 'Solashield Low Sheen White, 10L', 'Haymes', '10L', 107.42, ''), ('PB-H00024', 'Solashield Low Sheen White, 15L', 'Haymes', '15L', 148.0, ''), ('PB-H00025', 'Solashield Low Sheen White, 4L', 'Haymes', '4L', 67.4, ''), ('PB-H00026', 'R/Tex Roll On Coarse, 15L', 'Haymes', '15L', 175.0, ''), ('PB-H00027', 'Solashield Satin DKT, 15L', 'Haymes', '15L', 160.0, ''), ('PB-H00028', 'Solashield Satin EDT, 15L', 'Haymes', '15L', 160.0, ''), ('PB-H00029', 'Solashield Satin UDT, 15L', 'Haymes', '15L', 160.0, ''), ('PB-H00030', 'Solashield Satin White, 10L', 'Haymes', '10L', 115.0, ''), ('PB-H00031', 'Solashield Satin White, 15L', 'Haymes', '15L', 148.0, ''), ('PB-H00032', 'Ultra Premium Primer Sealer', 'Haymes', '', 167.46, ''), ('PB-H00033', 'Acrylic Sealer Undercoat', 'Haymes', '', 120.0, ''), ('PB-H00034', 'Ultratrim High Gloss White', 'Haymes', '', 130.0, ''), ('PB-H00035', 'Ultratrim Semi Gloss White', 'Haymes', '', 130.0, ''), ('PB-H00036', 'Woodcare Aqualac Floor Satin', 'Haymes', '', 250.44, ''), ('187200/15L', 'T ALL WEATHER L/S W15L 18', 'Taubmans', '15L', 145.0, 'Taubmans SKU: 30001918 | Source: uploaded Premier Brushworks Taubmans price list'), ('187204/15L', 'T ALL WEATHER L/S A15L 18', 'Taubmans', '15L', 150.0, 'Taubmans SKU: 30001923 | Source: uploaded Premier Brushworks Taubmans price list'), ('187205/15L', 'T ALL WEATHER L/S N15L 18', 'Taubmans', '15L', 150.0, 'Taubmans SKU: 30001928 | Source: uploaded Premier Brushworks Taubmans price list'), ('187209/15L', 'T ALL WEATHER L/S D15L 18', 'Taubmans', '15L', 150.0, 'Taubmans SKU: 30001942 | Source: uploaded Premier Brushworks Taubmans price list'), ('187200/10L', 'T ALL WEATHER L/S W10L 18', 'Taubmans', '10L', 120.0, 'Taubmans SKU: 30001917 | Source: uploaded Premier Brushworks Taubmans price list'), ('187204/10L', 'T ALL WEATHER L/S A10L 18', 'Taubmans', '10L', 122.5, 'Taubmans SKU: 30001922 | Source: uploaded Premier Brushworks Taubmans price list'), ('187205/10L', 'T ALL WEATHER L/S N10L 18', 'Taubmans', '10L', 122.5, 'Taubmans SKU: 30001927 | Source: uploaded Premier Brushworks Taubmans price list'), ('187209/10L', 'T ALL WEATHER L/S D10L 18', 'Taubmans', '10L', 122.5, 'Taubmans SKU: 30001941 | Source: uploaded Premier Brushworks Taubmans price list'), ('187200/4L', 'T ALL WEATHER L/S W4L 18', 'Taubmans', '4L', 57.5, 'Taubmans SKU: 30001921 | Source: uploaded Premier Brushworks Taubmans price list'), ('187204/4L', 'T ALL WEATHER L/S A4L 18', 'Taubmans', '4L', 60.0, 'Taubmans SKU: 30001926 | Source: uploaded Premier Brushworks Taubmans price list'), ('187205/4L', 'T ALL WEATHER L/S N4L 18', 'Taubmans', '4L', 60.0, 'Taubmans SKU: 30001931 | Source: uploaded Premier Brushworks Taubmans price list'), ('187209/4L', 'T ALL WEATHER L/S D4L 18', 'Taubmans', '4L', 60.0, 'Taubmans SKU: 30001944 | Source: uploaded Premier Brushworks Taubmans price list'), ('187100/15L', 'T ALL WEATHER MATT W15L 18', 'Taubmans', '15L', 145.0, 'Taubmans SKU: 30001906 | Source: uploaded Premier Brushworks Taubmans price list'), ('187104/15L', 'T ALL WEATHER MATT A15L 18', 'Taubmans', '15L', 150.0, 'Taubmans SKU: 30001910 | Source: uploaded Premier Brushworks Taubmans price list'), ('187105/15L', 'T ALL WEATHER MATT N15L 18', 'Taubmans', '15L', 150.0, 'Taubmans SKU: 30001914 | Source: uploaded Premier Brushworks Taubmans price list'), ('187400/15L', 'T ALL WEATHER S/G W15L 18', 'Taubmans', '15L', 145.0, 'Taubmans SKU: 30001950 | Source: uploaded Premier Brushworks Taubmans price list'), ('187409/15L', 'T ALL WEATHER S/G D15L 19', 'Taubmans', '15L', 150.0, 'Taubmans SKU: 30001963 | Source: uploaded Premier Brushworks Taubmans price list'), ('187404/10L', 'T ALL WEATHER S/G A10L 19', 'Taubmans', '10L', 122.5, 'Taubmans SKU: 30001954 | Source: uploaded Premier Brushworks Taubmans price list'), ('124200/15L', 'T ENDURE INT L/S W15L 18', 'Taubmans', '15L', 145.0, 'Taubmans SKU: 30001368 | Source: uploaded Premier Brushworks Taubmans price list'), ('124200/10L', 'T ENDURE INT L/S W10L 18', 'Taubmans', '10L', 120.0, 'Taubmans SKU: 30001367 | Source: uploaded Premier Brushworks Taubmans price list'), ('124200/4L', 'T ENDURE INT L/S W4L 18', 'Taubmans', '4L', 57.5, 'Taubmans SKU: 30001371 | Source: uploaded Premier Brushworks Taubmans price list'), ('124100/15L', 'T ENDURE INT MATT W15L 18', 'Taubmans', '15L', 160.0, 'Taubmans SKU: 30001356 | Source: uploaded Premier Brushworks Taubmans price list'), ('124100/10L', 'T ENDURE INT MATT W10L 18', 'Taubmans', '10L', 135.0, 'Taubmans SKU: 30001355 | Source: uploaded Premier Brushworks Taubmans price list'), ('124100/4L', 'T ENDURE INT MATT W4L 18', 'Taubmans', '4L', 60.0, 'Taubmans SKU: 30001359 | Source: uploaded Premier Brushworks Taubmans price list'), ('279250/15L', 'T PURE PERF L/S W15L 21', 'Taubmans', '15L', 145.0, 'Taubmans SKU: 30008591 | Source: uploaded Premier Brushworks Taubmans price list'), ('279150/15L', 'T PURE PERF MATT W15L 21', 'Taubmans', '15L', 145.0, 'Taubmans SKU: 30008588 | Source: uploaded Premier Brushworks Taubmans price list'), ('279050/15L', 'T PURE PERF CEILING W15L 21', 'Taubmans', '15L', 120.0, 'Taubmans SKU: 30008581 | Source: uploaded Premier Brushworks Taubmans price list'), ('128000/15L', 'T Ceiling Premium W15L 22', 'Taubmans', '15L', 120.0, 'Taubmans SKU: 30010919 | Source: uploaded Premier Brushworks Taubmans price list'), ('279950/10L', 'T PURE PERF WB ENAMEL GLOSS W10L 21', 'Taubmans', '10L', 122.0, 'Taubmans SKU: 30008738 | Source: uploaded Premier Brushworks Taubmans price list'), ('279850/10L', 'T PURE PERF WB ENAMEL S/G W10L 21', 'Taubmans', '10L', 122.0, 'Taubmans SKU: 30008596 | Source: uploaded Premier Brushworks Taubmans price list'), ('279950/4L', 'T PURE PERF WB ENAMEL GLOSS W4L 21', 'Taubmans', '4L', 65.0, 'Taubmans SKU: 30008739 | Source: uploaded Premier Brushworks Taubmans price list'), ('279850/4L', 'T PURE PERF WB ENAMEL S/G W4L 21', 'Taubmans', '4L', 65.0, 'Taubmans SKU: 30008737 | Source: uploaded Premier Brushworks Taubmans price list'), ('121610/10L', 'T WB ENAMEL GLOSS W10L 19', 'Taubmans', '10L', 125.0, 'Taubmans SKU: 30001326 | Source: uploaded Premier Brushworks Taubmans price list'), ('121410/10L', 'T WB ENAMEL S/G W10L 19', 'Taubmans', '10L', 125.0, 'Taubmans SKU: 30001294 | Source: uploaded Premier Brushworks Taubmans price list'), ('121610/4L', 'T WB ENAMEL GLOSS W4L 19', 'Taubmans', '4L', 65.0, 'Taubmans SKU: 30001329 | Source: uploaded Premier Brushworks Taubmans price list'), ('121410/4L', 'T WB ENAMEL S/G W4L 19', 'Taubmans', '4L', 65.0, 'Taubmans SKU: 30001297 | Source: uploaded Premier Brushworks Taubmans price list'), ('132810/10L', 'T ULTIMATE ENAMEL S/G W10L 19', 'Taubmans', '10L', 170.0, 'Taubmans SKU: 30001427 | Source: uploaded Premier Brushworks Taubmans price list'), ('132910/10L', 'T ULTIMATE ENAMEL GLOSS W10L 19', 'Taubmans', '10L', 170.0, 'Taubmans SKU: 30001441 | Source: uploaded Premier Brushworks Taubmans price list'), ('132810/4L', 'T ULTIMATE ENAMEL S/G W4L 19', 'Taubmans', '4L', 80.0, 'Taubmans SKU: 30001429 | Source: uploaded Premier Brushworks Taubmans price list'), ('132910/4L', 'T ULTIMATE ENAMEL GLOSS W4L 19', 'Taubmans', '4L', 80.0, 'Taubmans SKU: 30001443 | Source: uploaded Premier Brushworks Taubmans price list'), ('259500/15L', 'T TRADE EDGE UC W15L 16', 'Taubmans', '15L', 90.0, 'Taubmans SKU: 30002265 | Source: uploaded Premier Brushworks Taubmans price list'), ('288500/15L', 'T ULTRA PREP W15L 09', 'Taubmans', '15L', 110.0, 'Taubmans SKU: 30002664 | Source: uploaded Premier Brushworks Taubmans price list'), ('274520/15L', 'T TRADEX ULTRAPREP 15L', 'Taubmans', '15L', 105.0, 'Taubmans SKU: 30002331 | Source: uploaded Premier Brushworks Taubmans price list'), ('279550/15L', 'T PURE PERF PREP W15L 21', 'Taubmans', '15L', 120.0, 'Taubmans SKU: 30008595 | Source: uploaded Premier Brushworks Taubmans price list'), ('274000/15L', 'T TRADEX CEILING W15L 15', 'Taubmans', '15L', 100.0, 'Taubmans SKU: 30002310 | Source: uploaded Premier Brushworks Taubmans price list'), ('278200/15L', 'T PRO INT L/S W15L 20', 'Taubmans', '15L', 120.0, 'Taubmans SKU: 30002370 | Source: uploaded Premier Brushworks Taubmans price list'), ('278710/15L', 'T PRO EXT L/S W15L 20', 'Taubmans', '15L', 135.0, 'Taubmans SKU: 30002387 | Source: uploaded Premier Brushworks Taubmans price list'), ('278600/10L', 'T PRO ENAMEL W/B GLOSS W10L20', 'Taubmans', '10L', 120.0, 'Taubmans SKU: 30002381 | Source: uploaded Premier Brushworks Taubmans price list'), ('278400/10L', 'T PRO ENAMEL W/B S/G W10L 20', 'Taubmans', '10L', 120.0, 'Taubmans SKU: 30002376 | Source: uploaded Premier Brushworks Taubmans price list'), ('278000/15L', 'T PRO CEILING W15L 20', 'Taubmans', '15L', 105.0, 'Taubmans SKU: 30002364 | Source: uploaded Premier Brushworks Taubmans price list'), ('108100/15L', 'T 3IN1 W15L 15', 'Taubmans', '15L', 130.0, 'Taubmans SKU: 30000957 | Source: uploaded Premier Brushworks Taubmans price list'), ('108100/4L', 'T 3IN1 W4L 15', 'Taubmans', '4L', 60.0, 'Taubmans SKU: 30000960 | Source: uploaded Premier Brushworks Taubmans price list'), ('481200/10L', 'J PRO DECK OIL NAT 10L 17', 'Taubmans', '10L', 170.0, 'Taubmans SKU: 30004332 | Source: uploaded Premier Brushworks Taubmans price list'), ('481200/4L', 'J PRO DECK OIL NAT 4L 17', 'Taubmans', '4L', 75.0, 'Taubmans SKU: 30004334 | Source: uploaded Premier Brushworks Taubmans price list'), ('481121/4L', 'J PRO EXT CLEAR GLOSS 4L 17', 'Taubmans', '4L', 80.0, 'Taubmans SKU: 30004331 | Source: uploaded Premier Brushworks Taubmans price list'), ('481120/4L', 'J PRO EXT CLEAR SATIN 4L 17', 'Taubmans', '4L', 80.0, 'Taubmans SKU: 30004328 | Source: uploaded Premier Brushworks Taubmans price list'), ('310400/15L', 'T ARMAWALL A/SHIELD W15L 09', 'Taubmans', '15L', 150.0, 'Taubmans SKU: 30003018 | Source: uploaded Premier Brushworks Taubmans price list'), ('315500/15L', 'T ARMAWALL PRIMER 15L 09', 'Taubmans', '15L', 135.0, 'Taubmans SKU: 30003036 | Source: uploaded Premier Brushworks Taubmans price list'), ('315705/10L', 'T ARMAWALL SEALER BOND C10L', 'Taubmans', '10L', 135.0, 'Taubmans SKU: 30003039 | Source: uploaded Premier Brushworks Taubmans price list'), ('315700/10L', 'T ARMAWALL SEALER BOND W10L', 'Taubmans', '10L', 135.0, 'Taubmans SKU: 30003038 | Source: uploaded Premier Brushworks Taubmans price list')]
+
+    restored = 0
+    for product_code, product_name, supplier, unit, price_ex_gst, notes in products:
+        execute("""
+            INSERT OR REPLACE INTO products
+            (product_code, product_name, supplier, unit, price_ex_gst, notes)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (
+            product_code,
+            product_name,
+            supplier,
+            unit,
+            float(price_ex_gst or 0),
+            notes
+        ))
+        restored += 1
+
+    return restored
+
+
+def haymes_product_count():
+    try:
+        df = df_query("SELECT COUNT(*) AS 'count' FROM products WHERE supplier = 'Haymes'")
+        if not df.empty:
+            return int(df.iloc[0]["count"])
+    except Exception:
+        pass
+    return 0
+
+
+def combined_paint_product_count():
+    try:
+        df = df_query("SELECT COUNT(*) AS 'count' FROM products WHERE supplier IN ('Haymes', 'Taubmans')")
         if not df.empty:
             return int(df.iloc[0]["count"])
     except Exception:
