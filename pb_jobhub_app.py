@@ -87,7 +87,7 @@ if os.path.exists(test_file_path):
 else:
     st.sidebar.warning("No persistent test file found yet.")
 
-USE_POSTGRES = bool(DATABASE_URL)
+
 
 
 @st.cache_resource
