@@ -59,10 +59,33 @@ def get_database_url():
 
 
 DATABASE_URL = get_database_url()
-Thought for 11s
+USE_POSTGRES = bool(DATABASE_URL)
 
-Yes. The easiest way is to add a temporary test panel in the app so you can see whether it is saving to /var/data.
 
+# =============================
+# TEMP STORAGE TEST - REMOVE LATER
+# =============================
+
+st.sidebar.markdown("### Storage Check")
+st.sidebar.write("DATA_DIR:", DATA_DIR)
+st.sidebar.write("DB_PATH:", DB_PATH)
+st.sidebar.write("Using Postgres:", USE_POSTGRES)
+st.sidebar.write("DATA_DIR exists:", os.path.exists(DATA_DIR))
+st.sidebar.write("JOB_FILES_DIR exists:", os.path.exists(JOB_FILES_DIR))
+
+test_file_path = os.path.join(DATA_DIR, "persistent_test.txt")
+
+if st.sidebar.button("Test Persistent Disk"):
+    with open(test_file_path, "a") as f:
+        f.write(f"Test saved at {datetime.now()}\n")
+    st.sidebar.success("Test file saved.")
+
+if os.path.exists(test_file_path):
+    with open(test_file_path, "r") as f:
+        lines = f.readlines()
+    st.sidebar.success(f"Persistent test file exists with {len(lines)} saved test line(s).")
+else:
+    st.sidebar.warning("No persistent test file found yet.")
 Add this after this line:
 
 USE_POSTGRES = bool(DATABASE_URL)
