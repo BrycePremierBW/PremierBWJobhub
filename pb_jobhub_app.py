@@ -52,7 +52,11 @@ def get_database_url():
 DATABASE_URL = get_database_url()
 USE_POSTGRES = bool(DATABASE_URL)
 
-
+def get_job_folder(job_number):
+    folder = os.path.join(JOB_FILES_DIR, str(job_number))
+    os.makedirs(folder, exist_ok=True)
+    return folder
+    
 st.set_page_config(page_title="Premier Brushworks JobHub", layout="wide")
 
 
