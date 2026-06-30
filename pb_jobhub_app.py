@@ -278,8 +278,10 @@ class PostgresConnectionAdapter:
 def connect():
     if USE_POSTGRES:
         pool = get_postgres_pool()
-        return PostgresConnectionAdapter(pool.getconn(), pool)
-    return sqlite3.connect(DB_PATH)
+        raw_conn = pool.getconn()
+        return PostgresConnectionAdapter(raw_conn, pool)
+
+    return sqlite3.connect(DB_PATH, check_same_thread=False)
 
 
 def init_db():
