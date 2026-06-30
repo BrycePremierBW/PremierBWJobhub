@@ -18,6 +18,19 @@ import psycopg2
 from psycopg2.pool import ThreadedConnectionPool
 from pypdf import PdfReader
 import streamlit as st
+import os
+
+DATA_DIR = os.getenv("DATA_DIR", "/var/data")
+
+DB_PATH = os.path.join(DATA_DIR, "jobhub.db")
+JOB_FILES_DIR = os.path.join(DATA_DIR, "job_files")
+PHOTOS_DIR = os.path.join(DATA_DIR, "photos")
+EXPORTS_DIR = os.path.join(DATA_DIR, "exports")
+
+os.makedirs(DATA_DIR, exist_ok=True)
+os.makedirs(JOB_FILES_DIR, exist_ok=True)
+os.makedirs(PHOTOS_DIR, exist_ok=True)
+os.makedirs(EXPORTS_DIR, exist_ok=True)
 
 DB_PATH = Path(__file__).with_name("pb_jobhub.db")
 
