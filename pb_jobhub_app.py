@@ -32,6 +32,9 @@ os.makedirs(JOB_FILES_DIR, exist_ok=True)
 os.makedirs(PHOTOS_DIR, exist_ok=True)
 os.makedirs(EXPORTS_DIR, exist_ok=True)
 
+conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+cur = conn.cursor()
+
 DB_PATH = Path(__file__).with_name("pb_jobhub.db")
 
 def get_database_url():
