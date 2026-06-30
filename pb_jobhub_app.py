@@ -2129,14 +2129,28 @@ def clear_all_jobs_and_linked_data():
 # =============================
 # JOB PHOTO HELPERS
 # =============================
-def resize_photo_for_database(uploaded_file, max_size=(1400, 1400), quality=75):
-    """
-    Converts uploaded image to compressed JPEG base64 for storage in the database.
-    This keeps phone uploads smaller for Supabase/Streamlit Cloud.
-    """
+def safe_file_name(name):
+    name = str(name or "photo").strip()
+    name = re.sub(r"[^a-zA-Z0-9._-]", "_", name)
+    return name[:120]
+
+
+def get_job_no_for_id(job_id):
+    df = df_query("SELECT job_no FROM jobs WHERE id = ?", (job_id,))
+    if df.empty:
+        return f"job_{job_id}"
+    return str(df.iloc[0]["job_no"] or f"job_{job_id}")
+
+
+def save_photo_to_job_folder(job_id, uploaded_file, max_size=(1600, 1600), quality=80):
+    job_no = get_job_no_for_id(job_id)
+
+    job_folder = get_job_folder(job_no)
+    photos_folder = os.path.join(job_folder, "photos")
+    os.makedirs(photos_folder, exist_ok=True)
+
     image = Image.open(uploaded_file)
 
-    # Convert HEIC is not supported by Pillow by default; JPG/PNG/WebP are best.
     if image.mode not in ["RGB", "L"]:
         image = image.convert("RGB")
     elif image.mode == "L":
@@ -2144,17 +2158,34 @@ def resize_photo_for_database(uploaded_file, max_size=(1400, 1400), quality=75):
 
     image.thumbnail(max_size)
 
-    output = BytesIO()
-    image.save(output, format="JPEG", quality=quality, optimize=True)
-    data = output.getvalue()
+    original_name = safe_file_name(uploaded_file.name)
+    base_name = os.path.splitext(original_name)[0]
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
 
-    encoded = base64.b64encode(data).decode("utf-8")
-    return encoded, "image/jpeg"
+    file_name = f"{timestamp}_{base_name}.jpg"
+    file_path = os.path.join(photos_folder, file_name)
+
+    image.save(file_path, format="JPEG", quality=quality, optimize=True)
+
+    return file_path, "image/jpeg"
 
 
 def photo_data_to_bytes(photo_data):
+    """
+    Supports both:
+    - old photos saved as base64 in database
+    - new photos saved as files with FILEPATH:/var/data/...
+    """
     if not photo_data:
         return b""
+
+    photo_data = str(photo_data)
+
+    if photo_data.startswith("FILEPATH:"):
+        file_path = photo_data.replace("FILEPATH:", "", 1)
+        with open(file_path, "rb") as f:
+            return f.read()
+
     return base64.b64decode(photo_data.encode("utf-8"))
 
 
@@ -2167,7 +2198,7 @@ def save_job_photo(job_id, uploaded_file, category, caption, notes):
     except Exception:
         uploaded_by = ""
 
-    photo_data, photo_type = resize_photo_for_database(uploaded_file)
+    file_path, photo_type = save_photo_to_job_folder(job_id, uploaded_file)
 
     execute("""
         INSERT INTO job_photos
@@ -2177,7 +2208,7 @@ def save_job_photo(job_id, uploaded_file, category, caption, notes):
         job_id,
         uploaded_file.name,
         photo_type,
-        photo_data,
+        f"FILEPATH:{file_path}",
         category,
         caption,
         uploaded_by,
@@ -2187,6 +2218,18 @@ def save_job_photo(job_id, uploaded_file, category, caption, notes):
 
 
 def delete_job_photo(photo_id):
+    try:
+        photo_df = df_query("SELECT photo_data FROM job_photos WHERE id = ?", (photo_id,))
+        if not photo_df.empty:
+            photo_data = str(photo_df.iloc[0]["photo_data"] or "")
+            if photo_data.startswith("FILEPATH:"):
+                file_path = photo_data.replace("FILEPATH:", "", 1)
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+    except Exception:
+        pass
+
+    execute("DELETE FROM job_photos WHERE id = ?", (photo_id,))
     execute("DELETE FROM job_photos WHERE id = ?", (photo_id,))
 
 
