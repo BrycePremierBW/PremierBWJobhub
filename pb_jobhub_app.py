@@ -1618,7 +1618,7 @@ def generate_paint_order_pdf(job_id):
 def linked_job_counts(job_id):
     counts = {}
 
-    for table in [
+        for table in [
         "material_entries",
         "wage_entries",
         "timesheet_entries",
@@ -1626,6 +1626,7 @@ def linked_job_counts(job_id):
         "equipment_checklist_records",
         "imported_material_entries",
         "job_photos",
+        "job_documents",
     ]:
         try:
             df = df_query(f"SELECT COUNT(*) AS c FROM {table} WHERE job_id = ?", (job_id,))
@@ -1640,13 +1641,14 @@ def permanently_delete_job_and_linked_data(job_id):
     conn = connect()
     cur = conn.cursor()
 
-    for table in [
+       for table in [
         "material_entries",
         "wage_entries",
         "equipment_entries",
         "equipment_checklist_records",
         "imported_material_entries",
         "job_photos",
+        "job_documents",
     ]:
         try:
             cur.execute(f"DELETE FROM {table} WHERE job_id = ?", (job_id,))
