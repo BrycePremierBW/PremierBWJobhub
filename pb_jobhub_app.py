@@ -1983,10 +1983,10 @@ def employee_portal():
                 FROM jobs j
                 LEFT JOIN builders_clients bc ON bc.id = j.builder_client_id
                 WHERE j.id = ?
-            ", (selected_job_id,))
+            """, (selected_job_id,))
             st.dataframe(job_df, width="stretch", hide_index=True)
 
-   with tab_hours:
+    with tab_hours:
         timesheets_page(employee_restricted=True)
 
     with tab_equipment:
@@ -1994,7 +1994,7 @@ def employee_portal():
         if not job_options:
             st.info("No jobs available.")
         else:
-            selected_job = st.selectbox("Select Job", list(job_options.keys()), key="employee_equipmen""t_job")
+            selected_job = st.selectbox("Select Job", list(job_options.keys()), key="employee_equipment_job")
             selected_job_id = job_options[selected_job]
 
             equipment_df = df_query("""
@@ -2653,7 +2653,6 @@ def delete_job_photo(photo_id):
     except Exception:
         pass
 
-    execute("DELETE FROM job_photos WHERE id = ?", (photo_id,))
     execute("DELETE FROM job_photos WHERE id = ?", (photo_id,))
 
 
