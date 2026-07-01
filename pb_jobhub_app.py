@@ -8662,7 +8662,7 @@ elif menu == "Reports / Export":
                 WHERE j.id = ?
             """, (selected_job_id,))
 
-                        material_details = df_query("""
+            material_details = df_query("""
                 SELECT j.job_no AS 'Job No',
                        j.job_name AS 'Job Name',
                        COALESCE(NULLIF(m.custom_product_code, ''), p.product_code, '') AS 'Product Code',
