@@ -43,6 +43,12 @@ PAINT_ORDER_TEMPLATE_PDF = os.path.join(
     TEMPLATE_DIR,
     "PB Paint and Materials Order Form fillable.pdf"
 )
+
+VARIATION_TEMPLATE_PDF = os.path.join(
+    TEMPLATE_DIR,
+    "PB Variation Form fillable.pdf"
+)
+
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(JOB_FILES_DIR, exist_ok=True)
 os.makedirs(PHOTOS_DIR, exist_ok=True)
