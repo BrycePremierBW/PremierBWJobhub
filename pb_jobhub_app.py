@@ -6711,7 +6711,6 @@ def render_job_linked_info(job_id, expanded=True):
         st.markdown("### Job Details")
         st.dataframe(job_details, width="stretch", hide_index=True)
 
-        st.markdown("### Generate Job PDFs")
 
         st.markdown("### Staff Schedule")
         if schedule_df.empty:
