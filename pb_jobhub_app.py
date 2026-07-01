@@ -6780,7 +6780,7 @@ def render_job_linked_info(job_id, expanded=True):
             st.info("No equipment checklist detail saved for this job.")
         else:
             st.dataframe(equipment_detail, width="stretch", hide_index=True)
-       with tab_control:
+    with tab_control:
         st.markdown("### Variations")
 
         if variations_df.empty:
