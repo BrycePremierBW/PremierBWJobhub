@@ -6475,11 +6475,12 @@ def render_job_linked_info(job_id, expanded=True):
         st.warning("Selected job could not be found.")
         return
 
-    job_no = str(job_details.iloc[0]["Job No"])
+       job_no = str(job_details.iloc[0]["Job No"])
     job_name = str(job_details.iloc[0]["Job Name"])
     st.markdown(f"## {job_no} - {job_name}")
 
     material_details = safe_df_query("""
+    
         SELECT m.id AS "ID",
                COALESCE(NULLIF(m.custom_product_code, ''), p.product_code, '') AS "Product Code",
                COALESCE(NULLIF(m.custom_product_name, ''), p.product_name, '') AS "Product Name",
