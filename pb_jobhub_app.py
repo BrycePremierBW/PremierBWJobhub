@@ -6478,7 +6478,6 @@ def render_job_linked_info(job_id, expanded=True):
     job_no = str(job_details.iloc[0]["Job No"])
     job_name = str(job_details.iloc[0]["Job Name"])
     st.markdown(f"## {job_no} - {job_name}")
-
     material_details = safe_df_query("""
     
         SELECT m.id AS "ID",
