@@ -1630,10 +1630,25 @@ def generate_paint_order_pdf(job_id):
     return output_path
 
 def linked_job_counts(job_id):
+    counts = {}
+
+    for table in [
+        "material_entries",
+        "wage_entries",
+        "timesheet_entries",
+        "equipment_entries",
+        "equipment_checklist_records",
+        "imported_material_entries",
+        "job_photos",
+        "job_documents",
+    ]:
+        try:
+            df = df_query(f"SELECT COUNT(*) AS c FROM {table} WHERE job_id = ?", (job_id,))
+            counts[table] = int(df.iloc[0]["c"])
+        except Exception:
+            counts[table] = 0
 
     return counts
-
-
 def permanently_delete_job_and_linked_data(job_id):
     conn = connect()
     cur = conn.cursor()
@@ -1665,9 +1680,7 @@ def permanently_delete_job_and_linked_data(job_id):
 
     conn.commit()
     conn.close()
-
-
-
+    
 # =============================
 # LOGIN / ACCESS CONTROL
 # =============================
@@ -2344,7 +2357,7 @@ def clear_all_jobs_and_linked_data():
     cur = conn.cursor()
 
     # Delete all job-linked records first
-       for table in [
+    for table in [
         "material_entries",
         "wage_entries",
         "timesheet_entries",
