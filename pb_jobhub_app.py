@@ -16,7 +16,8 @@ from PIL import Image
 import requests
 import psycopg2
 from psycopg2.pool import ThreadedConnectionPool
-from pypdf import PdfReader
+from pypdf import PdfReader, PdfWriter
+from pypdf.generic import BooleanObject, NameObject, DictionaryObject
 import streamlit as st
 
 
@@ -31,6 +32,17 @@ JOB_FILES_DIR = os.path.join(DATA_DIR, "job_files")
 PHOTOS_DIR = os.path.join(DATA_DIR, "photos")
 EXPORTS_DIR = os.path.join(DATA_DIR, "exports")
 
+TEMPLATE_DIR = os.path.join(os.path.dirname(__file__), "templates")
+
+EQUIPMENT_TEMPLATE_PDF = os.path.join(
+    TEMPLATE_DIR,
+    "PB Master Checklist FILLABLE INITIAL.pdf"
+)
+
+PAINT_ORDER_TEMPLATE_PDF = os.path.join(
+    TEMPLATE_DIR,
+    "PB Paint and Materials Order Form fillable.pdf"
+)
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(JOB_FILES_DIR, exist_ok=True)
 os.makedirs(PHOTOS_DIR, exist_ok=True)
@@ -553,7 +565,20 @@ def init_db():
         FOREIGN KEY(job_id) REFERENCES jobs(id)
     )
     """)
-
+   
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS job_documents (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_id INTEGER NOT NULL,
+        document_type TEXT,
+        file_name TEXT,
+        file_path TEXT,
+        created_at TEXT,
+        notes TEXT,
+        FOREIGN KEY(job_id) REFERENCES jobs(id)
+   
+    )
+    """)
     cur.execute("""
     CREATE TABLE IF NOT EXISTS app_users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1365,7 +1390,230 @@ def import_master_checklist_to_job(job_id, job_info, equipment_df, materials_df,
 
     return imported_equipment_count, imported_material_count
 
+# =============================
+# PDF GENERATION HELPERS
+# =============================
 
+def safe_file_name(name):
+    name = str(name or "file").strip()
+    name = re.sub(r"[^a-zA-Z0-9._-]", "_", name)
+    return name[:120]
+
+
+def get_job_details_for_pdf(job_id):
+    df = df_query("""
+        SELECT j.id,
+               j.job_no,
+               j.job_name,
+               j.site_address,
+               j.leading_hand,
+               COALESCE(bc.name, '') AS builder_client
+        FROM jobs j
+        LEFT JOIN builders_clients bc ON bc.id = j.builder_client_id
+        WHERE j.id = ?
+    """, (job_id,))
+
+    if df.empty:
+        return None
+
+    return df.iloc[0].to_dict()
+
+
+def fill_pdf_template(template_path, output_path, field_values):
+    reader = PdfReader(template_path)
+    writer = PdfWriter()
+
+    for page in reader.pages:
+        writer.add_page(page)
+
+    if "/AcroForm" in reader.trailer["/Root"]:
+        writer._root_object.update({
+            NameObject("/AcroForm"): reader.trailer["/Root"]["/AcroForm"]
+        })
+
+    try:
+        writer.set_need_appearances_writer(True)
+    except Exception:
+        try:
+            if "/AcroForm" not in writer._root_object:
+                writer._root_object[NameObject("/AcroForm")] = DictionaryObject()
+            writer._root_object["/AcroForm"].update({
+                NameObject("/NeedAppearances"): BooleanObject(True)
+            })
+        except Exception:
+            pass
+
+    for page in writer.pages:
+        writer.update_page_form_field_values(page, field_values)
+
+    with open(output_path, "wb") as f:
+        writer.write(f)
+
+    return output_path
+
+
+def attach_document_to_job(job_id, document_type, file_path, notes="Generated from JobHub"):
+    execute("""
+        INSERT INTO job_documents
+        (job_id, document_type, file_name, file_path, created_at, notes)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (
+        job_id,
+        document_type,
+        os.path.basename(file_path),
+        file_path,
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        notes,
+    ))
+
+
+def generate_equipment_checklist_pdf(job_id):
+    job = get_job_details_for_pdf(job_id)
+
+    if not job:
+        raise ValueError("Job not found.")
+
+    job_no = str(job.get("job_no") or f"job_{job_id}")
+    job_folder = get_job_folder(job_no)
+
+    output_path = os.path.join(
+        job_folder,
+        f"{safe_file_name(job_no)}_equipment_checklist_fillable.pdf"
+    )
+
+    fields = {
+        "p1_job_0": job.get("job_no", ""),
+        "p1_job_1": job.get("job_name", ""),
+        "p1_job_2": job.get("site_address", ""),
+        "p1_job_3": job.get("builder_client", ""),
+        "p1_team_0": job.get("leading_hand", ""),
+        "p1_team_1": "",
+        "p1_team_extra": "",
+    }
+
+    try:
+        equipment_df = df_query("""
+            SELECT i.item_name,
+                   COALESCE(r.qty_required, 0) AS qty_required,
+                   COALESCE(r.qty_taken, 0) AS qty_taken,
+                   COALESCE(r.qty_returned, 0) AS qty_returned,
+                   COALESCE(r.condition_in, '') AS condition_in,
+                   COALESCE(r.notes, '') AS notes
+            FROM equipment_checklist_items i
+            LEFT JOIN equipment_checklist_records r
+                ON r.checklist_item_id = i.id
+               AND r.job_id = ?
+        """, (job_id,))
+
+        record_map = {
+            str(row["item_name"]).strip().lower(): row
+            for _, row in equipment_df.iterrows()
+        }
+
+        for prefix, (_, item_names) in PDF_CHECKLIST_ITEMS.items():
+            for idx, item_name in enumerate(item_names):
+                row = record_map.get(item_name.strip().lower())
+                if row is None:
+                    continue
+
+                qty_required = float(row["qty_required"] or 0)
+                qty_taken = float(row["qty_taken"] or 0)
+                qty_returned = float(row["qty_returned"] or 0)
+
+                fields[f"{prefix}_{idx}_req"] = "" if qty_required == 0 else str(qty_required)
+                fields[f"{prefix}_{idx}_loaded"] = "" if qty_taken == 0 else str(qty_taken)
+                fields[f"{prefix}_{idx}_returned"] = "" if qty_returned == 0 else str(qty_returned)
+                fields[f"{prefix}_{idx}_missing"] = str(row["condition_in"] or row["notes"] or "")
+
+    except Exception:
+        pass
+
+    fill_pdf_template(EQUIPMENT_TEMPLATE_PDF, output_path, fields)
+    attach_document_to_job(job_id, "Equipment Checklist", output_path)
+
+    return output_path
+
+
+def generate_paint_order_pdf(job_id):
+    job = get_job_details_for_pdf(job_id)
+
+    if not job:
+        raise ValueError("Job not found.")
+
+    job_no = str(job.get("job_no") or f"job_{job_id}")
+    job_folder = get_job_folder(job_no)
+
+    output_path = os.path.join(
+        job_folder,
+        f"{safe_file_name(job_no)}_paint_materials_order_fillable.pdf"
+    )
+
+    fields = {
+        "Project": f"{job.get('job_no', '')} - {job.get('job_name', '')}".strip(" -"),
+        "Builder__Client": job.get("builder_client", ""),
+        "Site_Address": job.get("site_address", ""),
+        "Required_Delivery_Date": "",
+        "Ordered_By": "",
+    }
+
+    material_rows = []
+
+    try:
+        imported_df = df_query("""
+            SELECT product,
+                   colour,
+                   qty_required,
+                   qty_loaded
+            FROM imported_material_entries
+            WHERE job_id = ?
+            ORDER BY id
+            LIMIT 10
+        """, (job_id,))
+
+        for _, row in imported_df.iterrows():
+            material_rows.append({
+                "product": row["product"],
+                "colour": row["colour"],
+                "qty_required": row["qty_required"],
+                "qty_received": row["qty_loaded"],
+            })
+    except Exception:
+        pass
+
+    if not material_rows:
+        try:
+            entries_df = df_query("""
+                SELECT p.product_name AS product,
+                       '' AS colour,
+                       m.qty_required,
+                       m.qty_received
+                FROM material_entries m
+                LEFT JOIN products p ON p.id = m.product_id
+                WHERE m.job_id = ?
+                ORDER BY m.id
+                LIMIT 10
+            """, (job_id,))
+
+            for _, row in entries_df.iterrows():
+                material_rows.append({
+                    "product": row["product"],
+                    "colour": row["colour"],
+                    "qty_required": row["qty_required"],
+                    "qty_received": row["qty_received"],
+                })
+        except Exception:
+            pass
+
+    for idx, row in enumerate(material_rows[:10]):
+        fields[f"product_{idx}"] = str(row.get("product", "") or "")
+        fields[f"colour_{idx}"] = str(row.get("colour", "") or "")
+        fields[f"qtyreq_{idx}"] = str(row.get("qty_required", "") or "")
+        fields[f"qtyrec_{idx}"] = str(row.get("qty_received", "") or "")
+
+    fill_pdf_template(PAINT_ORDER_TEMPLATE_PDF, output_path, fields)
+    attach_document_to_job(job_id, "Paint & Materials Order Form", output_path)
+
+    return output_path
 
 def linked_job_counts(job_id):
     counts = {}
@@ -6463,6 +6711,8 @@ def render_job_linked_info(job_id, expanded=True):
         st.markdown("### Job Details")
         st.dataframe(job_details, width="stretch", hide_index=True)
 
+        st.markdown("### Generate Job PDFs")
+
         st.markdown("### Staff Schedule")
         if schedule_df.empty:
             st.info("No staff schedule entries saved for this job.")
@@ -6531,20 +6781,100 @@ def render_job_linked_info(job_id, expanded=True):
             st.info("No equipment checklist detail saved for this job.")
         else:
             st.dataframe(equipment_detail, width="stretch", hide_index=True)
-
     with tab_control:
         st.markdown("### Variations")
+
         if variations_df.empty:
             st.info("No variations saved for this job.")
         else:
             st.dataframe(variations_df, width="stretch", hide_index=True)
 
         st.markdown("### Claims / Invoices")
+
         if claims_df.empty:
             st.info("No claims or invoices saved for this job.")
         else:
             st.dataframe(claims_df, width="stretch", hide_index=True)
 
+        st.divider()
+
+        st.markdown("### Generate Job PDFs")
+
+        pdf_col1, pdf_col2 = st.columns(2)
+
+        with pdf_col1:
+            if st.button("Generate Paint & Materials Order PDF", key=f"generate_paint_order_{job_id}"):
+                try:
+                    pdf_path = generate_paint_order_pdf(job_id)
+                    st.success("Paint & Materials Order PDF generated and attached to this job.")
+
+                    with open(pdf_path, "rb") as f:
+                        st.download_button(
+                            "Download Paint & Materials Order PDF",
+                            data=f,
+                            file_name=os.path.basename(pdf_path),
+                            mime="application/pdf",
+                            key=f"download_paint_order_{job_id}",
+                        )
+
+                except Exception as e:
+                    st.error(f"Could not generate paint order PDF: {e}")
+
+        with pdf_col2:
+            if st.button("Generate Equipment Checklist PDF", key=f"generate_equipment_pdf_{job_id}"):
+                try:
+                    pdf_path = generate_equipment_checklist_pdf(job_id)
+                    st.success("Equipment Checklist PDF generated and attached to this job.")
+
+                    with open(pdf_path, "rb") as f:
+                        st.download_button(
+                            "Download Equipment Checklist PDF",
+                            data=f,
+                            file_name=os.path.basename(pdf_path),
+                            mime="application/pdf",
+                            key=f"download_equipment_pdf_{job_id}",
+                        )
+
+                except Exception as e:
+                    st.error(f"Could not generate equipment checklist PDF: {e}")
+
+        st.divider()
+
+        st.markdown("### Job Documents")
+
+        documents_df = df_query("""
+            SELECT id,
+                   document_type AS 'Document Type',
+                   file_name AS 'File Name',
+                   file_path,
+                   created_at AS 'Created At',
+                   notes AS 'Notes'
+            FROM job_documents
+            WHERE job_id = ?
+            ORDER BY id DESC
+        """, (job_id,))
+
+        if documents_df.empty:
+            st.info("No documents attached to this job yet.")
+        else:
+            for _, doc in documents_df.iterrows():
+                st.write(f"**{doc['Document Type']}** - {doc['File Name']}")
+                st.caption(f"Created: {doc['Created At']}")
+
+                file_path = str(doc["file_path"])
+
+                if os.path.exists(file_path):
+                    with open(file_path, "rb") as f:
+                        st.download_button(
+                            label=f"Download {doc['File Name']}",
+                            data=f,
+                            file_name=doc["File Name"],
+                            mime="application/pdf",
+                            key=f"download_job_doc_{doc['id']}",
+                        )
+                else:
+                    st.warning("File path not found on disk.")
+    
     with tab_photos:
         st.markdown("### Photo Register")
         if photos_meta.empty:
