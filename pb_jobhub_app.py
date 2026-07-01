@@ -113,7 +113,7 @@ def get_postgres_pool():
 
     return ThreadedConnectionPool(
         minconn=1,
-        maxconn=5,
+        maxconn=20,
         dsn=DATABASE_URL,
         sslmode="require",
     )
