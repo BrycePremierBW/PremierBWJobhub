@@ -1983,53 +1983,18 @@ def employee_portal():
                 FROM jobs j
                 LEFT JOIN builders_clients bc ON bc.id = j.builder_client_id
                 WHERE j.id = ?
-            """, (selected_job_id,))
+            ", (selected_job_id,))
             st.dataframe(job_df, width="stretch", hide_index=True)
 
-    with tab_hours:
+   with tab_hours:
         timesheets_page(employee_restricted=True)
-        st.info("Timesheets are now linked directly to specific jobs.")
-
-        st.subheader("Submit Timesheet")
-        if not job_options:
-            st.info("No jobs available.")
-        else:
-            with st.form("employee_wage_submit"):
-                selected_job = st.selectbox("Job", list(job_options.keys()), key="employee_hours_job")
-                work_date = st.text_input("Date", value=str(date.today()))
-                hours = st.number_input("Hours", min_value=0.0, step=0.5)
-                notes = st.text_area("Notes")
-                submitted = st.form_submit_button("Save My Hours")
-
-                if submitted:
-                    execute("""
-                        INSERT INTO wage_entries
-                        (job_id, employee_id, work_date, hours, notes)
-                        VALUES (?, ?, ?, ?, ?)
-                    """, (job_options[selected_job], employee_id, work_date, hours, notes))
-                    st.success("Hours saved.")
-
-            st.markdown("### My Recent Hours")
-            my_hours = df_query("""
-                SELECT j.job_no AS 'Job No',
-                       j.job_name AS 'Job Name',
-                       w.work_date AS 'Date',
-                       w.hours AS 'Hours',
-                       w.notes AS 'Notes'
-                FROM wage_entries w
-                JOIN jobs j ON j.id = w.job_id
-                WHERE w.employee_id = ?
-                ORDER BY w.id DESC
-                LIMIT 50
-            """, (employee_id,))
-            st.dataframe(my_hours, width="stretch", hide_index=True)
 
     with tab_equipment:
         st.subheader("View Job Equipment Master List")
         if not job_options:
             st.info("No jobs available.")
         else:
-            selected_job = st.selectbox("Select Job", list(job_options.keys()), key="employee_equipment_job")
+            selected_job = st.selectbox("Select Job", list(job_options.keys()), key="employee_equipmen""t_job")
             selected_job_id = job_options[selected_job]
 
             equipment_df = df_query("""
