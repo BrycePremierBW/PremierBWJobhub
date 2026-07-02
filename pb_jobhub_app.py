@@ -5,6 +5,7 @@ from urllib.parse import urlparse
 import shutil
 import base64
 import hashlib
+import html
 import re
 import json
 from pathlib import Path
@@ -64,6 +65,361 @@ def get_job_folder(job_number):
 st.set_page_config(page_title="Premier Brushworks JobHub", layout="wide")
 
 
+# =============================
+# PREMIER BRUSHWORKS VISUAL THEME
+# =============================
+
+PB_MENU_ICONS = {
+    "Dashboard": "🏠",
+    "Control Centre": "🎯",
+    "Jobs": "🧾",
+    "Job Folders": "📁",
+    "Estimating": "💰",
+    "Site Operations": "🛠️",
+    "Reports": "📊",
+    "Management": "⚙️",
+    "AI Assistant": "🤖",
+    "Employee Portal": "👷",
+}
+
+
+def pb_html(value):
+    return html.escape(str(value or ""))
+
+
+def pb_money(value):
+    try:
+        return f"${float(value or 0):,.0f}"
+    except Exception:
+        return "$0"
+
+
+def apply_pb_branding():
+    st.markdown("""
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700;800&display=swap');
+
+    :root {
+        --pb-bg: #f7f3ee;
+        --pb-card: #ffffff;
+        --pb-charcoal: #1f1f1f;
+        --pb-muted: #6f6a63;
+        --pb-border: #e8ded3;
+        --pb-accent: #d8c8b8;
+        --pb-accent-dark: #7a6856;
+        --pb-success: #1f7a4d;
+        --pb-warning: #b7791f;
+        --pb-danger: #b42318;
+        --pb-info: #2f5f8f;
+    }
+
+    html, body, [class*="css"] {
+        font-family: 'Poppins', sans-serif;
+    }
+
+    .stApp {
+        background:
+            radial-gradient(circle at top left, rgba(216, 200, 184, 0.36), rgba(247, 243, 238, 0) 34rem),
+            var(--pb-bg);
+    }
+
+    section[data-testid="stSidebar"] {
+        background: linear-gradient(180deg, #171717 0%, #29231f 100%);
+        border-right: 1px solid rgba(255,255,255,0.08);
+    }
+
+    section[data-testid="stSidebar"] * {
+        color: #f6efe7;
+    }
+
+    section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p,
+    section[data-testid="stSidebar"] label,
+    section[data-testid="stSidebar"] span {
+        color: #f6efe7;
+    }
+
+    h1, h2, h3, h4 {
+        color: var(--pb-charcoal);
+        letter-spacing: -0.02em;
+    }
+
+    div[data-testid="stMetric"] {
+        background: var(--pb-card);
+        border: 1px solid var(--pb-border);
+        border-radius: 18px;
+        padding: 16px 18px;
+        box-shadow: 0 10px 28px rgba(31,31,31,0.06);
+    }
+
+    div[data-testid="stMetric"] label {
+        color: var(--pb-muted) !important;
+        font-weight: 600;
+    }
+
+    .pb-sidebar-logo {
+        background: rgba(255,255,255,0.08);
+        border: 1px solid rgba(255,255,255,0.12);
+        border-radius: 22px;
+        padding: 18px 16px;
+        margin: 0 0 18px 0;
+        text-align: left;
+    }
+
+    .pb-logo-mark {
+        width: 48px;
+        height: 48px;
+        border-radius: 15px;
+        background: #f6efe7;
+        color: #1f1f1f;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: 800;
+        font-size: 20px;
+        margin-bottom: 10px;
+    }
+
+    .pb-sidebar-title {
+        font-size: 17px;
+        font-weight: 700;
+        line-height: 1.15;
+        color: #ffffff;
+    }
+
+    .pb-sidebar-subtitle {
+        font-size: 12px;
+        color: #d8c8b8;
+        margin-top: 4px;
+    }
+
+    .pb-page-hero {
+        background: linear-gradient(135deg, #1f1f1f 0%, #463a30 62%, #d8c8b8 140%);
+        color: white;
+        border-radius: 26px;
+        padding: 26px 30px;
+        margin: 8px 0 22px 0;
+        box-shadow: 0 16px 34px rgba(31,31,31,0.16);
+    }
+
+    .pb-page-eyebrow {
+        color: #d8c8b8;
+        text-transform: uppercase;
+        letter-spacing: 0.16em;
+        font-size: 12px;
+        font-weight: 700;
+        margin-bottom: 8px;
+    }
+
+    .pb-page-title {
+        font-size: 34px;
+        font-weight: 800;
+        line-height: 1.1;
+        margin-bottom: 8px;
+        color: #ffffff;
+    }
+
+    .pb-page-subtitle {
+        color: #f4ebe1;
+        font-size: 15px;
+        max-width: 920px;
+    }
+
+    .pb-card {
+        background: var(--pb-card);
+        border: 1px solid var(--pb-border);
+        border-radius: 20px;
+        padding: 18px 18px;
+        box-shadow: 0 10px 26px rgba(31,31,31,0.06);
+        min-height: 120px;
+        margin-bottom: 12px;
+    }
+
+    .pb-card-label {
+        color: var(--pb-muted);
+        font-size: 12px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        margin-bottom: 8px;
+    }
+
+    .pb-card-value {
+        color: var(--pb-charcoal);
+        font-size: 31px;
+        font-weight: 800;
+        line-height: 1;
+        margin-bottom: 8px;
+    }
+
+    .pb-card-subtitle {
+        color: var(--pb-muted);
+        font-size: 13px;
+        line-height: 1.35;
+    }
+
+    .pb-card.green { border-left: 7px solid var(--pb-success); }
+    .pb-card.orange { border-left: 7px solid var(--pb-warning); }
+    .pb-card.red { border-left: 7px solid var(--pb-danger); }
+    .pb-card.blue { border-left: 7px solid var(--pb-info); }
+    .pb-card.taupe { border-left: 7px solid var(--pb-accent-dark); }
+
+    .pb-job-header {
+        background: linear-gradient(135deg, #ffffff 0%, #fffaf4 100%);
+        border: 1px solid var(--pb-border);
+        border-radius: 24px;
+        padding: 22px 24px;
+        box-shadow: 0 12px 28px rgba(31,31,31,0.07);
+        margin: 10px 0 20px 0;
+    }
+
+    .pb-job-no {
+        color: var(--pb-accent-dark);
+        font-size: 13px;
+        font-weight: 800;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        margin-bottom: 4px;
+    }
+
+    .pb-job-title {
+        color: var(--pb-charcoal);
+        font-size: 30px;
+        font-weight: 800;
+        line-height: 1.12;
+        margin-bottom: 10px;
+    }
+
+    .pb-job-meta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 10px;
+    }
+
+    .pb-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        border-radius: 999px;
+        border: 1px solid var(--pb-border);
+        background: #f7f3ee;
+        padding: 7px 11px;
+        color: var(--pb-muted);
+        font-size: 12px;
+        font-weight: 600;
+    }
+
+    .pb-status {
+        display: inline-flex;
+        border-radius: 999px;
+        padding: 7px 12px;
+        font-size: 12px;
+        font-weight: 800;
+        margin-left: 4px;
+    }
+
+    .pb-status.green { background: rgba(31,122,77,0.12); color: var(--pb-success); }
+    .pb-status.orange { background: rgba(183,121,31,0.14); color: var(--pb-warning); }
+    .pb-status.red { background: rgba(180,35,24,0.12); color: var(--pb-danger); }
+    .pb-status.grey { background: rgba(111,106,99,0.14); color: var(--pb-muted); }
+    .pb-status.taupe { background: rgba(122,104,86,0.12); color: var(--pb-accent-dark); }
+
+    .stButton > button, .stDownloadButton > button {
+        border-radius: 999px !important;
+        border: 1px solid var(--pb-accent) !important;
+        background: #ffffff !important;
+        color: #1f1f1f !important;
+        font-weight: 700 !important;
+        padding: 0.55rem 1rem !important;
+        box-shadow: 0 6px 14px rgba(31,31,31,0.05);
+    }
+
+    .stButton > button:hover, .stDownloadButton > button:hover {
+        border-color: var(--pb-accent-dark) !important;
+        color: #000000 !important;
+        transform: translateY(-1px);
+    }
+
+    .stDataFrame, div[data-testid="stDataFrame"] {
+        border-radius: 18px;
+        overflow: hidden;
+    }
+
+    div[data-testid="stTabs"] button {
+        font-weight: 700;
+    }
+
+    @media (max-width: 760px) {
+        .pb-page-title { font-size: 26px; }
+        .pb-job-title { font-size: 24px; }
+        .pb-card { min-height: auto; }
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+
+def pb_sidebar_header():
+    st.sidebar.markdown("""
+    <div class="pb-sidebar-logo">
+        <div class="pb-logo-mark">PB</div>
+        <div class="pb-sidebar-title">Premier Brushworks<br>JobHub</div>
+        <div class="pb-sidebar-subtitle">Commercial painting operations</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+
+def pb_page_header(title, subtitle="", eyebrow="Premier Brushworks"):
+    st.markdown(f"""
+    <div class="pb-page-hero">
+        <div class="pb-page-eyebrow">{pb_html(eyebrow)}</div>
+        <div class="pb-page-title">{pb_html(title)}</div>
+        <div class="pb-page-subtitle">{pb_html(subtitle)}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+
+def pb_metric_card(label, value, subtitle="", tone="taupe"):
+    st.markdown(f"""
+    <div class="pb-card {pb_html(tone)}">
+        <div class="pb-card-label">{pb_html(label)}</div>
+        <div class="pb-card-value">{pb_html(value)}</div>
+        <div class="pb-card-subtitle">{pb_html(subtitle)}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+
+def pb_status_tone(status):
+    status_text = str(status or "").strip().lower()
+    if status_text in ["active", "booked", "approved", "paid", "complete", "completed"]:
+        return "green"
+    if status_text in ["quoted", "not started", "on hold", "draft", "sent", "invoiced"]:
+        return "orange"
+    if status_text in ["archived", "closed", "cancelled", "rejected"]:
+        return "grey"
+    return "taupe"
+
+
+def pb_job_header(row):
+    status = row.get("Status", "") if hasattr(row, "get") else ""
+    tone = pb_status_tone(status)
+    st.markdown(f"""
+    <div class="pb-job-header">
+        <div class="pb-job-no">Job Folder</div>
+        <div class="pb-job-title">{pb_html(row.get('Job No', ''))} - {pb_html(row.get('Job Name', ''))}</div>
+        <span class="pb-status {pb_html(tone)}">{pb_html(status or 'No Status')}</span>
+        <div class="pb-job-meta">
+            <span class="pb-chip">🏗️ {pb_html(row.get('Builder / Client', 'No builder/client'))}</span>
+            <span class="pb-chip">📍 {pb_html(row.get('Site Address', 'No address'))}</span>
+            <span class="pb-chip">👷 {pb_html(row.get('Leading Hand', 'No leading hand'))}</span>
+            <span class="pb-chip">📅 {pb_html(row.get('Start Date', ''))} → {pb_html(row.get('End Date', ''))}</span>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+
+apply_pb_branding()
+
+
 def get_database_url():
     # Streamlit Cloud: add DATABASE_URL under App > Settings > Secrets.
     try:
@@ -81,31 +437,32 @@ USE_POSTGRES = bool(DATABASE_URL)
 
 
 # =============================
-# TEMP STORAGE TEST - REMOVE LATER
+# OPTIONAL STORAGE DIAGNOSTICS
 # =============================
 
-st.sidebar.markdown("### Storage Check")
-st.sidebar.write("DATA_DIR:", DATA_DIR)
-st.sidebar.write("DB_PATH:", DB_PATH)
-st.sidebar.write("Using Postgres:", USE_POSTGRES)
-st.sidebar.write("DATA_DIR exists:", os.path.exists(DATA_DIR))
-st.sidebar.write("JOB_FILES_DIR exists:", os.path.exists(JOB_FILES_DIR))
+# Keep the live sidebar clean. Set SHOW_STORAGE_CHECK=true in Render Environment
+# only when troubleshooting persistent disk/storage.
+if str(os.getenv("SHOW_STORAGE_CHECK", "")).strip().lower() in ["1", "true", "yes", "on"]:
+    with st.sidebar.expander("Storage Check", expanded=False):
+        st.write("DATA_DIR:", DATA_DIR)
+        st.write("DB_PATH:", DB_PATH)
+        st.write("Using Postgres:", USE_POSTGRES)
+        st.write("DATA_DIR exists:", os.path.exists(DATA_DIR))
+        st.write("JOB_FILES_DIR exists:", os.path.exists(JOB_FILES_DIR))
 
-test_file_path = os.path.join(DATA_DIR, "persistent_test.txt")
+        test_file_path = os.path.join(DATA_DIR, "persistent_test.txt")
 
-if st.sidebar.button("Test Persistent Disk"):
-    with open(test_file_path, "a") as f:
-        f.write(f"Test saved at {datetime.now()}\n")
-    st.sidebar.success("Test file saved.")
+        if st.button("Test Persistent Disk", key="storage_check_test_button"):
+            with open(test_file_path, "a") as f:
+                f.write(f"Test saved at {datetime.now()}\n")
+            st.success("Test file saved.")
 
-if os.path.exists(test_file_path):
-    with open(test_file_path, "r") as f:
-        lines = f.readlines()
-    st.sidebar.success(f"Persistent test file exists with {len(lines)} saved test line(s).")
-else:
-    st.sidebar.warning("No persistent test file found yet.")
-
-
+        if os.path.exists(test_file_path):
+            with open(test_file_path, "r") as f:
+                lines = f.readlines()
+            st.success(f"Persistent test file exists with {len(lines)} saved test line(s).")
+        else:
+            st.warning("No persistent test file found yet.")
 
 
 @st.cache_resource
@@ -1955,8 +2312,11 @@ def employee_portal():
     employee_id = user.get("employee_id")
     employee_name = user.get("employee_name") or user.get("username")
 
-    st.header("Employee Portal")
-    st.caption("Restricted staff access for job details, equipment and your own hours.")
+    pb_page_header(
+        "Employee Portal",
+        "Restricted staff access for job details, equipment, forms, photos and timesheets. Financial information is hidden from employee logins.",
+        "Site Mode"
+    )
 
     if not employee_id:
         st.warning("This login is not linked to an employee record. Ask admin to link it in User Access.")
@@ -6853,7 +7213,7 @@ def render_job_linked_info(job_id, expanded=True):
 
     job_no = str(job_details.iloc[0]["Job No"])
     job_name = str(job_details.iloc[0]["Job Name"])
-    st.markdown(f"## {job_no} - {job_name}")
+    pb_job_header(job_details.iloc[0])
     material_details = safe_df_query("""
     
         SELECT m.id AS "ID",
@@ -7491,8 +7851,12 @@ seed_data()
 seed_app_users()
 require_login()
 
-st.title("Premier Brushworks JobHub")
-st.caption("Local job system for jobs, builders, clients, employees, materials, wages and equipment.")
+pb_page_header(
+    "JobHub",
+    "A central job management system for Premier Brushworks operations, site teams, estimating and reporting.",
+    "Internal System"
+)
+pb_sidebar_header()
 logout_button()
 
 role = current_role()
@@ -7618,7 +7982,12 @@ elif requested_menu in hidden_route_options:
 if st.session_state.get("main_menu") not in main_menu_options:
     st.session_state["main_menu"] = main_menu_options[0]
 
-main_menu_choice = st.sidebar.radio("Menu", main_menu_options, key="main_menu")
+main_menu_choice = st.sidebar.radio(
+    "Menu",
+    main_menu_options,
+    key="main_menu",
+    format_func=lambda item: f"{PB_MENU_ICONS.get(item, '•')} {item}",
+)
 
 if main_menu_choice == "Management":
     st.sidebar.markdown("### Management")
@@ -7700,13 +8069,78 @@ elif menu == "Job Folders":
 
 
 elif menu == "Dashboard":
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Jobs", int(df_query("SELECT COUNT(*) AS c FROM jobs").iloc[0]["c"]))
-    c2.metric("Builders / Clients", int(df_query("SELECT COUNT(*) AS c FROM builders_clients").iloc[0]["c"]))
-    c3.metric("Employees", int(df_query("SELECT COUNT(*) AS c FROM employees").iloc[0]["c"]))
-    c4.metric("Products", int(df_query("SELECT COUNT(*) AS c FROM products").iloc[0]["c"]))
+    pb_page_header(
+        "Dashboard",
+        "Quick view of active jobs, pending site actions, job risk and operational priorities.",
+        "Today at a glance"
+    )
 
-    st.subheader("Open Jobs")
+    jobs_count = int(df_query("SELECT COUNT(*) AS c FROM jobs").iloc[0]["c"])
+    active_jobs_count = int(df_query("""
+        SELECT COUNT(*) AS c
+        FROM jobs
+        WHERE COALESCE(status, '') NOT IN ('Completed', 'Paid', 'Archived')
+    """).iloc[0]["c"])
+    builder_count = int(df_query("SELECT COUNT(*) AS c FROM builders_clients").iloc[0]["c"])
+    employee_count = int(df_query("SELECT COUNT(*) AS c FROM employees WHERE COALESCE(status, '') = 'Active'").iloc[0]["c"])
+
+    try:
+        pending_timesheets = int(df_query("""
+            SELECT COUNT(*) AS c
+            FROM timesheet_entries
+            WHERE COALESCE(status, 'Submitted') = 'Submitted'
+        """).iloc[0]["c"])
+    except Exception:
+        pending_timesheets = 0
+
+    try:
+        open_variations = int(df_query("""
+            SELECT COUNT(*) AS c
+            FROM job_variations
+            WHERE COALESCE(status, 'Draft') NOT IN ('Approved', 'Rejected', 'Invoiced')
+        """).iloc[0]["c"])
+    except Exception:
+        open_variations = 0
+
+    try:
+        overdue_claims_df = df_query("""
+            SELECT COUNT(*) AS c,
+                   COALESCE(SUM(COALESCE(amount_ex_gst, 0)), 0) AS total
+            FROM invoice_claims
+            WHERE COALESCE(status, '') <> 'Paid'
+              AND due_date IS NOT NULL
+              AND due_date <> ''
+              AND due_date < ?
+        """, (str(date.today()),))
+        overdue_claims = int(overdue_claims_df.iloc[0]["c"]) if not overdue_claims_df.empty else 0
+        overdue_value = float(overdue_claims_df.iloc[0]["total"] or 0) if not overdue_claims_df.empty else 0
+    except Exception:
+        overdue_claims = 0
+        overdue_value = 0
+
+    m1, m2, m3, m4 = st.columns(4)
+    with m1:
+        pb_metric_card("Active Jobs", active_jobs_count, f"{jobs_count} total jobs", "green")
+    with m2:
+        pb_metric_card("Active Staff", employee_count, "Available employee records", "blue")
+    with m3:
+        pb_metric_card("Timesheets Pending", pending_timesheets, "Submitted and awaiting review", "orange" if pending_timesheets else "green")
+    with m4:
+        pb_metric_card("Overdue Claims", overdue_claims, pb_money(overdue_value), "red" if overdue_claims else "green")
+
+    m5, m6, m7, m8 = st.columns(4)
+    with m5:
+        pb_metric_card("Builders / Clients", builder_count, "Saved contact records", "taupe")
+    with m6:
+        pb_metric_card("Open Variations", open_variations, "Draft, submitted or sent", "orange" if open_variations else "green")
+    with m7:
+        products_count = int(df_query("SELECT COUNT(*) AS c FROM products").iloc[0]["c"])
+        pb_metric_card("Products", products_count, "Saved product list", "blue")
+    with m8:
+        photos_count = int(df_query("SELECT COUNT(*) AS c FROM job_photos").iloc[0]["c"])
+        pb_metric_card("Photos", photos_count, "Stored against job folders", "taupe")
+
+    st.markdown("### Open Jobs")
     active = df_query("""
         SELECT j.job_no AS 'Job No',
                j.job_name AS 'Job Name',
@@ -7714,13 +8148,34 @@ elif menu == "Dashboard":
                j.site_address AS 'Site Address',
                j.status AS 'Status',
                j.leading_hand AS 'Leading Hand',
-               j.start_date AS 'Start Date'
+               j.start_date AS 'Start Date',
+               j.end_date AS 'End Date'
         FROM jobs j
         LEFT JOIN builders_clients bc ON bc.id = j.builder_client_id
         WHERE j.status NOT IN ('Completed', 'Paid', 'Archived')
         ORDER BY j.job_no
     """)
-    st.dataframe(active, width="stretch", hide_index=True)
+
+    if active.empty:
+        st.info("No open jobs found. Add a job from the Jobs page to start using JobHub.")
+    else:
+        st.dataframe(active, width="stretch", hide_index=True)
+
+    st.markdown("### Quick Actions")
+    qa1, qa2, qa3, qa4 = st.columns(4)
+    if qa1.button("Open Job Folders", key="dash_open_job_folders"):
+        st.session_state["main_menu"] = "Job Folders"
+        st.rerun()
+    if qa2.button("Review Timesheets", key="dash_review_timesheets"):
+        st.session_state["main_menu"] = "Site Operations"
+        st.session_state["site_operations_menu"] = "Timesheets"
+        st.rerun()
+    if qa3.button("Open Control Centre", key="dash_open_control"):
+        st.session_state["main_menu"] = "Control Centre"
+        st.rerun()
+    if qa4.button("Run Reports", key="dash_open_reports"):
+        st.session_state["main_menu"] = "Reports"
+        st.rerun()
 
 
 # =============================
