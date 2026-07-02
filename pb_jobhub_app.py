@@ -2117,11 +2117,257 @@ def download_mime_for_file(file_name):
     return "application/octet-stream"
 
 
+
+
+# =============================
+# PDF IMPORT BUTTONS / DOCUMENT CENTRE
+# =============================
+
+PDF_IMPORT_GROUPS = {
+    "Job Setup / Tender": [
+        "Architectural Plans",
+        "Specifications",
+        "Colour Schedule",
+        "Scope of Works",
+        "Quote / Estimate",
+        "Purchase Order",
+        "Contract / Work Order",
+    ],
+    "Site Operations": [
+        "Paint & Materials Order",
+        "Equipment Checklist",
+        "Timesheet / Day Labour",
+        "Wage / Payroll Support",
+        "Staff Schedule / Roster",
+        "Safety / SWMS",
+    ],
+    "Claims / Completion": [
+        "Progress Claim / Invoice",
+        "Variation",
+        "Completion / Sign-off",
+        "Defects / QA",
+        "Builder Correspondence",
+        "Other PDF",
+    ],
+}
+
+PDF_IMPORT_NOTES = {
+    "Architectural Plans": "Plans used for estimating, take-off, progress model and site reference.",
+    "Specifications": "Specification document used for scope, products, systems and inclusions/exclusions.",
+    "Colour Schedule": "Colour/finish schedule used for site setup, ordering and quality checks.",
+    "Scope of Works": "Scope document used for quote, site team instructions and variations.",
+    "Quote / Estimate": "Quote, estimate or working document linked to this job.",
+    "Purchase Order": "Builder/client purchase order or approval document.",
+    "Contract / Work Order": "Contract, work order or acceptance document.",
+    "Paint & Materials Order": "Paint/material order PDF linked to this job.",
+    "Equipment Checklist": "Equipment/checklist PDF linked to this job.",
+    "Timesheet / Day Labour": "Timesheet or day labour PDF linked to this job.",
+    "Wage / Payroll Support": "Wage or payroll support PDF linked to this job.",
+    "Staff Schedule / Roster": "Roster or staff schedule PDF linked to this job.",
+    "Safety / SWMS": "Safety, SWMS or WHS PDF linked to this job.",
+    "Progress Claim / Invoice": "Progress claim, invoice or billing PDF linked to this job.",
+    "Variation": "Variation PDF linked to this job.",
+    "Completion / Sign-off": "Completion, handover or sign-off PDF linked to this job.",
+    "Defects / QA": "Defects, QA, ITP or touch-up PDF linked to this job.",
+    "Builder Correspondence": "Builder/client correspondence saved as a PDF.",
+    "Other PDF": "Other PDF linked to this job.",
+}
+
+
+def pdf_import_categories_for_context(context="all"):
+    """Return sensible PDF import categories for a page/context."""
+    context = str(context or "all").lower()
+    if context in ["takeoff", "estimating", "plans"]:
+        return [
+            "Architectural Plans", "Specifications", "Colour Schedule", "Scope of Works",
+            "Quote / Estimate", "Purchase Order", "Contract / Work Order",
+        ]
+    if context in ["progress", "billing", "claims"]:
+        return [
+            "Progress Claim / Invoice", "Variation", "Purchase Order", "Completion / Sign-off",
+            "Defects / QA", "Builder Correspondence", "Architectural Plans",
+        ]
+    if context in ["site", "operations"]:
+        return [
+            "Paint & Materials Order", "Equipment Checklist", "Timesheet / Day Labour",
+            "Staff Schedule / Roster", "Safety / SWMS", "Variation", "Completion / Sign-off",
+        ]
+    if context in ["timesheets"]:
+        return ["Timesheet / Day Labour", "Staff Schedule / Roster", "Safety / SWMS", "Other PDF"]
+    if context in ["wages"]:
+        return ["Wage / Payroll Support", "Timesheet / Day Labour", "Staff Schedule / Roster", "Other PDF"]
+    if context in ["equipment"]:
+        return ["Equipment Checklist", "Safety / SWMS", "Paint & Materials Order", "Other PDF"]
+    if context in ["materials"]:
+        return ["Paint & Materials Order", "Purchase Order", "Colour Schedule", "Specifications", "Other PDF"]
+    if context in ["variations"]:
+        return ["Variation", "Builder Correspondence", "Scope of Works", "Photos / Evidence PDF", "Other PDF"]
+    if context in ["completion"]:
+        return ["Completion / Sign-off", "Defects / QA", "Progress Claim / Invoice", "Other PDF"]
+    # Default = everything sensible, grouped in a stable order.
+    categories = []
+    for group_items in PDF_IMPORT_GROUPS.values():
+        categories.extend(group_items)
+    return categories
+
+
+def render_quick_pdf_import_buttons(job_id, categories=None, title="Quick PDF Import Buttons", key_prefix="quick_pdf_import", expanded=False):
+    """Render multiple small PDF-only uploaders and save PDFs straight into the selected job folder."""
+    if not job_id:
+        st.info("Select a job before importing PDFs.")
+        return
+
+    categories = categories or pdf_import_categories_for_context("all")
+    # De-duplicate while keeping order.
+    seen = set()
+    categories = [c for c in categories if not (c in seen or seen.add(c))]
+
+    with st.expander(title, expanded=expanded):
+        st.caption("Use these buttons when you only need to attach a PDF to the job. Files save into the selected Job Folder and appear in Plans / Docs and reports.")
+        note_default = "Imported using JobHub PDF import buttons."
+        import_notes = st.text_input(
+            "Optional import notes",
+            value="",
+            placeholder=note_default,
+            key=f"{key_prefix}_notes_{job_id}",
+        )
+        cols_per_row = 3
+        for start in range(0, len(categories), cols_per_row):
+            row_categories = categories[start:start + cols_per_row]
+            cols = st.columns(cols_per_row)
+            for idx, category in enumerate(row_categories):
+                with cols[idx]:
+                    st.markdown(f"**{category}**")
+                    st.caption(PDF_IMPORT_NOTES.get(category, "PDF linked to this job."))
+                    uploader_key = f"{key_prefix}_{safe_file_name(category).lower()}_{job_id}_{start}_{idx}"
+                    uploaded_pdfs = st.file_uploader(
+                        f"Import {category} PDF",
+                        type=["pdf"],
+                        accept_multiple_files=True,
+                        key=uploader_key,
+                    )
+                    if uploaded_pdfs:
+                        if st.button(f"Save {category} PDF(s)", key=f"{uploader_key}_save", use_container_width=True):
+                            saved = 0
+                            for uploaded_pdf in uploaded_pdfs:
+                                try:
+                                    notes = import_notes.strip() or PDF_IMPORT_NOTES.get(category, note_default)
+                                    save_uploaded_job_document(job_id, uploaded_pdf, category, notes=notes)
+                                    saved += 1
+                                except Exception as e:
+                                    st.error(f"Could not save {uploaded_pdf.name}: {e}")
+                            if saved:
+                                st.success(f"Saved {saved} {category} PDF{'s' if saved != 1 else ''} to this job.")
+                                refresh()
+
+
+def render_context_pdf_import_for_selected_job(context="all", title="Import PDFs", key_prefix="context_pdf_import"):
+    """Page-level helper: choose a job then show PDF import buttons for the relevant context."""
+    job_options = get_job_options()
+    if not job_options:
+        st.info("Create a job first, then import PDFs.")
+        return None
+    selected_job = st.selectbox("Select Job for PDF Import", list(job_options.keys()), key=f"{key_prefix}_job_select")
+    job_id = int(job_options[selected_job])
+    render_quick_pdf_import_buttons(
+        job_id,
+        categories=pdf_import_categories_for_context(context),
+        title=title,
+        key_prefix=f"{key_prefix}_{context}",
+        expanded=True,
+    )
+    return job_id
+
+
+def pdf_import_centre_page(default_job_id=None):
+    pb_page_header(
+        "PDF Import Centre",
+        "One place to import plans, specs, scopes, forms, claims, timesheets, schedules and completion PDFs into the correct job folder.",
+        "Document Control"
+    )
+
+    job_options = get_job_options()
+    if not job_options:
+        st.info("Create a job first, then import PDFs.")
+        return
+
+    labels = list(job_options.keys())
+    index = 0
+    if default_job_id:
+        for i, label in enumerate(labels):
+            if int(job_options[label]) == int(default_job_id):
+                index = i
+                break
+    selected_job = st.selectbox("Select Job", labels, index=index, key=f"pdf_import_centre_job_{default_job_id or 'main'}")
+    job_id = int(job_options[selected_job])
+
+    st.markdown("### Import PDF by area")
+    tab_setup, tab_site, tab_claims, tab_all = st.tabs([
+        "Job Setup / Tender",
+        "Site Operations",
+        "Claims / Completion",
+        "All PDF Buttons",
+    ])
+    with tab_setup:
+        render_quick_pdf_import_buttons(
+            job_id,
+            categories=PDF_IMPORT_GROUPS["Job Setup / Tender"],
+            title="Import setup, tender and estimating PDFs",
+            key_prefix=f"pdf_centre_setup_{job_id}",
+            expanded=True,
+        )
+    with tab_site:
+        render_quick_pdf_import_buttons(
+            job_id,
+            categories=PDF_IMPORT_GROUPS["Site Operations"],
+            title="Import site operation PDFs",
+            key_prefix=f"pdf_centre_site_{job_id}",
+            expanded=True,
+        )
+    with tab_claims:
+        render_quick_pdf_import_buttons(
+            job_id,
+            categories=PDF_IMPORT_GROUPS["Claims / Completion"],
+            title="Import claims, variations and completion PDFs",
+            key_prefix=f"pdf_centre_claims_{job_id}",
+            expanded=True,
+        )
+    with tab_all:
+        render_quick_pdf_import_buttons(
+            job_id,
+            categories=pdf_import_categories_for_context("all"),
+            title="All sensible PDF import buttons",
+            key_prefix=f"pdf_centre_all_{job_id}",
+            expanded=True,
+        )
+
+    st.divider()
+    st.markdown("### PDFs already attached to this job")
+    attached = df_query("""
+        SELECT document_type AS 'Type', file_name AS 'File Name', created_at AS 'Uploaded', notes AS 'Notes'
+        FROM job_documents
+        WHERE job_id = ?
+          AND LOWER(COALESCE(file_name, '')) LIKE '%.pdf'
+        ORDER BY id DESC
+    """, (job_id,))
+    if attached.empty:
+        st.info("No PDFs have been attached to this job yet.")
+    else:
+        st.dataframe(attached, width="stretch", hide_index=True)
+
 def render_job_documents_panel(job_id, allow_upload=True, allow_delete=True, key_prefix="job_docs"):
     st.markdown("### Plans / Specs / Job Documents")
 
     if allow_upload:
-        with st.expander("Upload plans, specs, colour schedules or scope documents", expanded=True):
+        render_quick_pdf_import_buttons(
+            job_id,
+            categories=pdf_import_categories_for_context("all"),
+            title="PDF Import Buttons",
+            key_prefix=f"{key_prefix}_quick_pdf",
+            expanded=False,
+        )
+
+        with st.expander("General upload - PDF, Word, Excel, CSV or images", expanded=True):
             doc_type = st.selectbox(
                 "Document Type",
                 [
@@ -3859,6 +4105,14 @@ def timesheets_page(employee_restricted=False):
     user = get_current_user() or {}
     current_employee_id = user.get("employee_id")
 
+    if not employee_restricted:
+        render_context_pdf_import_for_selected_job(
+            context="timesheets",
+            title="Import timesheet, day labour or roster PDFs",
+            key_prefix="timesheets_pdf_import",
+        )
+        st.divider()
+
     if employee_restricted:
         if not current_employee_id:
             st.warning("Your login is not linked to an employee record. Ask admin to link your user to your employee profile.")
@@ -3994,6 +4248,13 @@ def recalc_estimate_totals(estimate_id):
 def estimate_working_sheet_page():
     st.header("Estimate Working Sheet")
     st.caption("Build a working estimate and link it directly to the job it relates to.")
+
+    render_context_pdf_import_for_selected_job(
+        context="estimating",
+        title="Import quote, plans, specs, scope or PO PDFs",
+        key_prefix="estimate_pdf_import",
+    )
+    st.divider()
 
     job_options = get_job_options()
     if not job_options:
@@ -7250,6 +7511,12 @@ def pb_control_variations():
         st.info("Create a job first.")
         return
 
+    render_context_pdf_import_for_selected_job(
+        context="variations",
+        title="Import variation, correspondence or scope PDFs",
+        key_prefix="variations_pdf_import",
+    )
+
     with st.expander("Add Variation", expanded=True):
         selected_job = st.selectbox("Job", list(job_options.keys()), key="variation_job")
         job_id = job_options[selected_job]
@@ -7299,6 +7566,12 @@ def pb_control_invoice_claims():
     if not job_options:
         st.info("Create a job first.")
         return
+
+    render_context_pdf_import_for_selected_job(
+        context="claims",
+        title="Import progress claim, invoice, PO or sign-off PDFs",
+        key_prefix="claims_pdf_import",
+    )
 
     with st.expander("Add Invoice / Claim", expanded=True):
         selected_job = st.selectbox("Job", list(job_options.keys()), key="claim_job")
@@ -7351,6 +7624,12 @@ def pb_control_staff_schedule():
     if not job_options or not employee_options:
         st.info("Create jobs and active employees first.")
         return
+
+    render_context_pdf_import_for_selected_job(
+        context="site",
+        title="Import roster, SWMS, day labour or site PDF",
+        key_prefix="schedule_pdf_import",
+    )
 
     with st.expander("Add Staff Schedule Entry", expanded=True):
         with st.form("staff_schedule_form"):
@@ -9245,6 +9524,13 @@ def progress_billing_model_page(default_job_id=None):
                 break
     selected_job = st.selectbox("Select Job", labels, index=index, key=f"progress_job_select_{default_job_id or 'main'}")
     job_id = int(job_options[selected_job])
+    render_quick_pdf_import_buttons(
+        job_id,
+        categories=pdf_import_categories_for_context("progress"),
+        title="Import progress, claim, variation or sign-off PDFs",
+        key_prefix=f"progress_pdf_import_{job_id}",
+        expanded=False,
+    )
     packages = progress_package_options(job_id)
     if not packages:
         st.info("No painting take-off package has been created for this job yet. Upload plans and generate the take-off first.")
@@ -10365,6 +10651,7 @@ elif role == "manager":
         "Job Costs / Forecasting": "Job Costs / Forecasting",
     }
     site_operations_menu_map = {
+        "PDF Import Centre": "PDF Import Centre",
         "Material Costs": "Material Costs",
         "Wages": "Wages",
         "Timesheets": "Timesheets",
@@ -10400,6 +10687,7 @@ else:
         "Job Costs / Forecasting": "Job Costs / Forecasting",
     }
     site_operations_menu_map = {
+        "PDF Import Centre": "PDF Import Centre",
         "Material Costs": "Material Costs",
         "Wages": "Wages",
         "Timesheets": "Timesheets",
@@ -10551,6 +10839,9 @@ elif menu == "Job Lookup / Links":
 
 elif menu == "Job Folders":
     job_folders_page()
+
+elif menu == "PDF Import Centre":
+    pdf_import_centre_page()
 
 
 elif menu == "Dashboard":
@@ -10713,7 +11004,7 @@ elif menu == "Dashboard":
         st.dataframe(active, width="stretch", hide_index=True)
 
     st.markdown("### Quick Actions")
-    qa1, qa2, qa3, qa4 = st.columns(4)
+    qa1, qa2, qa3, qa4, qa5 = st.columns(5)
     if qa1.button("Open Job Folders", key="dash_open_job_folders"):
         st.session_state["go_to_menu"] = "Job Folders"
         st.rerun()
@@ -10725,6 +11016,9 @@ elif menu == "Dashboard":
         st.rerun()
     if qa4.button("Run Reports", key="dash_open_reports"):
         st.session_state["go_to_menu"] = "Reports"
+        st.rerun()
+    if qa5.button("Import PDFs", key="dash_open_pdf_import"):
+        st.session_state["go_to_menu"] = "PDF Import Centre"
         st.rerun()
 
 
@@ -11499,6 +11793,13 @@ elif menu == "Material Costs":
     st.header("Material Costs")
     st.caption("Use saved products from the database, or add one-off materials that are not added to the master product list.")
 
+    render_context_pdf_import_for_selected_job(
+        context="materials",
+        title="Import paint/material order, PO, colour schedule or spec PDFs",
+        key_prefix="materials_pdf_import",
+    )
+    st.divider()
+
     job_options = get_job_options()
     product_code_options = get_product_options()
     product_name_options = get_product_name_options()
@@ -11786,6 +12087,13 @@ elif menu == "Material Costs":
 elif menu == "Wages":
     st.header("Wages")
 
+    render_context_pdf_import_for_selected_job(
+        context="wages",
+        title="Import wage, payroll support or day labour PDFs",
+        key_prefix="wages_pdf_import",
+    )
+    st.divider()
+
     job_options = get_job_options()
     employee_options = get_employee_options(active_only=True)
 
@@ -11910,6 +12218,13 @@ elif menu == "Timesheets":
 
 elif menu == "Equipment":
     st.header("Equipment")
+
+    render_context_pdf_import_for_selected_job(
+        context="equipment",
+        title="Import equipment checklist, safety or material order PDFs",
+        key_prefix="equipment_pdf_import",
+    )
+    st.divider()
 
     job_options = get_job_options()
 
