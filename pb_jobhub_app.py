@@ -7419,6 +7419,68 @@ def job_lookup_links_page():
 
 
 # =============================
+# JOB FOLDERS - MAIN JOB FILE VIEW
+# =============================
+def job_folders_page():
+    st.header("Job Folders")
+    st.caption("Open one job and access the full linked job file from one place: summary, plans/specs, colours/materials, timesheets, equipment, photos, documents, variations, forms and financials.")
+
+    include_archived = st.checkbox("Include archived jobs", value=True, key="job_folder_include_archived")
+    jobs_df = job_lookup_dataframe(include_archived=include_archived)
+
+    if jobs_df.empty:
+        st.info("No jobs found. Create a job first from Jobs > Add Job.")
+        return
+
+    quick_search = st.text_input(
+        "Search job number, job name, builder/client, address, status or leading hand",
+        key="job_folder_quick_search",
+        placeholder="Start typing to filter jobs...",
+    )
+
+    filtered_jobs = jobs_df.copy()
+    if quick_search.strip():
+        haystack = (
+            filtered_jobs["Job No"].astype(str) + " " +
+            filtered_jobs["Job Name"].astype(str) + " " +
+            filtered_jobs["Builder / Client"].astype(str) + " " +
+            filtered_jobs["Site Address"].astype(str) + " " +
+            filtered_jobs["Status"].astype(str) + " " +
+            filtered_jobs["Leading Hand"].astype(str)
+        ).str.lower()
+        filtered_jobs = filtered_jobs[haystack.str.contains(quick_search.strip().lower(), na=False)]
+
+    selected_job_id = select_job_from_dataframe(
+        filtered_jobs,
+        "Open Job Folder",
+        key="job_folder_selected_job",
+        default_job_id=st.session_state.get("linked_view_selected_job_id"),
+    )
+
+    if not selected_job_id:
+        return
+
+    st.session_state["linked_view_selected_job_id"] = int(selected_job_id)
+
+    folder_action_cols = st.columns(4)
+    if folder_action_cols[0].button("Go to Job Register", key="folder_go_job_register"):
+        st.session_state["go_to_menu"] = "Jobs"
+        st.rerun()
+    if folder_action_cols[1].button("Go to Materials", key="folder_go_materials"):
+        st.session_state["go_to_menu"] = "Material Costs"
+        st.rerun()
+    if folder_action_cols[2].button("Go to Timesheets", key="folder_go_timesheets"):
+        st.session_state["go_to_menu"] = "Timesheets"
+        st.rerun()
+    if folder_action_cols[3].button("Go to Photos", key="folder_go_photos"):
+        st.session_state["go_to_menu"] = "Job Photos"
+        st.rerun()
+
+    st.divider()
+    render_job_linked_info(selected_job_id)
+
+
+# =============================
 # START APP
 # =============================
 init_db()
@@ -7438,21 +7500,20 @@ role = current_role()
 if role == "employee":
     main_menu_options = ["Employee Portal"]
     management_menu_map = {}
+    estimating_menu_map = {}
+    site_operations_menu_map = {}
+    ai_menu_map = {}
 elif role == "manager":
     main_menu_options = [
         "Dashboard",
         "Control Centre",
         "Jobs",
-        "Estimate Working Sheet",
-        "Job Costs / Forecasting",
-        "JobHub AI Assistant",
-        "App Builder AI",
-        "Material Costs",
-        "Wages",
-        "Timesheets",
-        "Job Photos",
-        "Reports / Export",
+        "Job Folders",
+        "Estimating",
+        "Site Operations",
+        "Reports",
         "Management",
+        "AI Assistant",
     ]
     management_menu_map = {
         "Builders & Clients": "Builders & Clients",
@@ -7460,21 +7521,31 @@ elif role == "manager":
         "Products": "Products",
         "Equipment": "Equipment",
     }
+    estimating_menu_map = {
+        "Estimate Working Sheet": "Estimate Working Sheet",
+        "Job Costs / Forecasting": "Job Costs / Forecasting",
+    }
+    site_operations_menu_map = {
+        "Material Costs": "Material Costs",
+        "Wages": "Wages",
+        "Timesheets": "Timesheets",
+        "Job Photos": "Job Photos",
+    }
+    ai_menu_map = {
+        "JobHub AI Assistant": "JobHub AI Assistant",
+        "App Builder AI": "App Builder AI",
+    }
 else:
     main_menu_options = [
         "Dashboard",
         "Control Centre",
         "Jobs",
-        "Estimate Working Sheet",
-        "Job Costs / Forecasting",
-        "JobHub AI Assistant",
-        "App Builder AI",
-        "Material Costs",
-        "Wages",
-        "Timesheets",
-        "Job Photos",
-        "Reports / Export",
+        "Job Folders",
+        "Estimating",
+        "Site Operations",
+        "Reports",
         "Management",
+        "AI Assistant",
     ]
     management_menu_map = {
         "User Accounts": "User Access",
@@ -7483,8 +7554,31 @@ else:
         "Products": "Products",
         "Equipment": "Equipment",
     }
+    estimating_menu_map = {
+        "Estimate Working Sheet": "Estimate Working Sheet",
+        "Job Costs / Forecasting": "Job Costs / Forecasting",
+    }
+    site_operations_menu_map = {
+        "Material Costs": "Material Costs",
+        "Wages": "Wages",
+        "Timesheets": "Timesheets",
+        "Job Photos": "Job Photos",
+    }
+    ai_menu_map = {
+        "JobHub AI Assistant": "JobHub AI Assistant",
+        "App Builder AI": "App Builder AI",
+    }
 
-hidden_route_options = list(management_menu_map.values()) + ["Job Lookup / Links"]
+reports_menu_map = {"Reports / Export": "Reports / Export"}
+
+hidden_route_options = (
+    list(management_menu_map.values()) +
+    list(estimating_menu_map.values()) +
+    list(site_operations_menu_map.values()) +
+    list(ai_menu_map.values()) +
+    list(reports_menu_map.values()) +
+    ["Job Lookup / Links"]
+)
 allowed_menu = main_menu_options + hidden_route_options
 
 requested_menu = st.session_state.pop("go_to_menu", None)
@@ -7494,12 +7588,32 @@ elif requested_menu in hidden_route_options:
     if requested_menu == "Job Lookup / Links":
         st.session_state["main_menu"] = "Control Centre"
         st.session_state["control_centre_section"] = "Job Lookup / Links"
-    else:
+    elif requested_menu in management_menu_map.values():
         st.session_state["main_menu"] = "Management"
         for label, target in management_menu_map.items():
             if target == requested_menu:
                 st.session_state["management_menu"] = label
                 break
+    elif requested_menu in estimating_menu_map.values():
+        st.session_state["main_menu"] = "Estimating"
+        for label, target in estimating_menu_map.items():
+            if target == requested_menu:
+                st.session_state["estimating_menu"] = label
+                break
+    elif requested_menu in site_operations_menu_map.values():
+        st.session_state["main_menu"] = "Site Operations"
+        for label, target in site_operations_menu_map.items():
+            if target == requested_menu:
+                st.session_state["site_operations_menu"] = label
+                break
+    elif requested_menu in ai_menu_map.values():
+        st.session_state["main_menu"] = "AI Assistant"
+        for label, target in ai_menu_map.items():
+            if target == requested_menu:
+                st.session_state["ai_menu"] = label
+                break
+    elif requested_menu == "Reports / Export":
+        st.session_state["main_menu"] = "Reports"
 
 if st.session_state.get("main_menu") not in main_menu_options:
     st.session_state["main_menu"] = main_menu_options[0]
@@ -7517,6 +7631,41 @@ if main_menu_choice == "Management":
         key="management_menu",
     )
     menu = management_menu_map.get(selected_management_label, selected_management_label)
+elif main_menu_choice == "Estimating":
+    st.sidebar.markdown("### Estimating")
+    estimating_labels = list(estimating_menu_map.keys())
+    if st.session_state.get("estimating_menu") not in estimating_labels:
+        st.session_state["estimating_menu"] = estimating_labels[0] if estimating_labels else ""
+    selected_estimating_label = st.sidebar.selectbox(
+        "Estimating Section",
+        estimating_labels,
+        key="estimating_menu",
+    )
+    menu = estimating_menu_map.get(selected_estimating_label, selected_estimating_label)
+elif main_menu_choice == "Site Operations":
+    st.sidebar.markdown("### Site Operations")
+    site_labels = list(site_operations_menu_map.keys())
+    if st.session_state.get("site_operations_menu") not in site_labels:
+        st.session_state["site_operations_menu"] = site_labels[0] if site_labels else ""
+    selected_site_label = st.sidebar.selectbox(
+        "Site Section",
+        site_labels,
+        key="site_operations_menu",
+    )
+    menu = site_operations_menu_map.get(selected_site_label, selected_site_label)
+elif main_menu_choice == "AI Assistant":
+    st.sidebar.markdown("### AI Assistant")
+    ai_labels = list(ai_menu_map.keys())
+    if st.session_state.get("ai_menu") not in ai_labels:
+        st.session_state["ai_menu"] = ai_labels[0] if ai_labels else ""
+    selected_ai_label = st.sidebar.selectbox(
+        "AI Section",
+        ai_labels,
+        key="ai_menu",
+    )
+    menu = ai_menu_map.get(selected_ai_label, selected_ai_label)
+elif main_menu_choice == "Reports":
+    menu = "Reports / Export"
 else:
     menu = main_menu_choice
 
@@ -7544,6 +7693,10 @@ elif menu == "Control Centre":
 
 elif menu == "Job Lookup / Links":
     job_lookup_links_page()
+
+
+elif menu == "Job Folders":
+    job_folders_page()
 
 
 elif menu == "Dashboard":
