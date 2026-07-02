@@ -142,28 +142,42 @@ def normalise_seed_rows(rows, expected_columns):
 
 
 def get_app_setting(key, default=""):
+    conn = None
     try:
         conn = connect()
         cur = conn.cursor()
         cur.execute("SELECT setting_value FROM app_settings WHERE setting_key = ?", (key,))
         row = cur.fetchone()
-        conn.close()
         if row:
             return row[0]
     except Exception:
         return default
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
     return default
 
 
 def set_app_setting(key, value):
     conn = connect()
-    cur = conn.cursor()
-    cur.execute("""
-        INSERT OR REPLACE INTO app_settings (setting_key, setting_value)
-        VALUES (?, ?)
-    """, (key, value))
-    conn.commit()
-    conn.close()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT OR REPLACE INTO app_settings (setting_key, setting_value)
+            VALUES (?, ?)
+        """, (key, value))
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
 
 
 def starter_data_already_seeded():
@@ -1986,6 +2000,90 @@ def employee_portal():
             """, (selected_job_id,))
             st.dataframe(job_df, width="stretch", hide_index=True)
 
+            st.markdown("### Job Schedule")
+            employee_schedule_df = df_query("""
+                SELECT s.schedule_date AS 'Date',
+                       s.start_time AS 'Start',
+                       s.finish_time AS 'Finish',
+                       e.name AS 'Employee',
+                       s.site_role AS 'Role',
+                       s.notes AS 'Notes'
+                FROM staff_schedule s
+                LEFT JOIN employees e ON e.id = s.employee_id
+                WHERE s.job_id = ?
+                ORDER BY s.schedule_date, s.start_time
+            """, (selected_job_id,))
+            if employee_schedule_df.empty:
+                st.info("No staff schedule has been saved for this job yet.")
+            else:
+                st.dataframe(employee_schedule_df, width="stretch", hide_index=True)
+
+            st.markdown("### Colours / Materials Schedule")
+            employee_materials_df = df_query("""
+                SELECT COALESCE(NULLIF(m.custom_product_name, ''), p.product_name, '') AS 'Product / Material',
+                       COALESCE(NULLIF(m.custom_colour, ''), '') AS 'Colour / Finish',
+                       COALESCE(NULLIF(m.custom_unit, ''), p.unit, '') AS 'Unit',
+                       m.qty_required AS 'Qty Required',
+                       m.qty_received AS 'Qty Received',
+                       COALESCE(NULLIF(m.supplier, ''), NULLIF(m.custom_supplier, ''), p.supplier, '') AS 'Supplier',
+                       m.date_ordered AS 'Date Ordered',
+                       m.notes AS 'Notes'
+                FROM material_entries m
+                LEFT JOIN products p ON p.id = m.product_id
+                WHERE m.job_id = ?
+                ORDER BY m.id
+            """, (selected_job_id,))
+            employee_imported_materials_df = df_query("""
+                SELECT product AS 'Product / Material',
+                       colour AS 'Colour / Finish',
+                       qty_required AS 'Qty Required',
+                       qty_loaded AS 'Qty Loaded',
+                       source_file AS 'Source File',
+                       notes AS 'Notes'
+                FROM imported_material_entries
+                WHERE job_id = ?
+                ORDER BY id
+            """, (selected_job_id,))
+            if employee_materials_df.empty and employee_imported_materials_df.empty:
+                st.info("No colours or material schedule lines are saved for this job yet.")
+            else:
+                if not employee_materials_df.empty:
+                    st.dataframe(employee_materials_df, width="stretch", hide_index=True)
+                if not employee_imported_materials_df.empty:
+                    st.markdown("#### Imported PDF material lines")
+                    st.dataframe(employee_imported_materials_df, width="stretch", hide_index=True)
+
+            st.markdown("### Job Documents / Plans / Specs")
+            employee_documents_df = df_query("""
+                SELECT id,
+                       document_type AS 'Document Type',
+                       file_name AS 'File Name',
+                       file_path,
+                       created_at AS 'Created At',
+                       notes AS 'Notes'
+                FROM job_documents
+                WHERE job_id = ?
+                ORDER BY id DESC
+            """, (selected_job_id,))
+            if employee_documents_df.empty:
+                st.info("No job documents, plans or specs have been attached to this job yet.")
+            else:
+                for _, doc in employee_documents_df.iterrows():
+                    st.write(f"**{doc['Document Type']}** - {doc['File Name']}")
+                    st.caption(f"Created: {doc['Created At']}")
+                    file_path = str(doc["file_path"])
+                    if os.path.exists(file_path):
+                        with open(file_path, "rb") as f:
+                            st.download_button(
+                                label=f"Download {doc['File Name']}",
+                                data=f,
+                                file_name=doc["File Name"],
+                                mime="application/pdf",
+                                key=f"employee_download_job_doc_{doc['id']}",
+                            )
+                    else:
+                        st.warning("File path not found on disk.")
+
     with tab_hours:
         timesheets_page(employee_restricted=True)
 
@@ -2034,6 +2132,118 @@ def employee_portal():
                 key="employee_generate_forms_job"
             )
             selected_job_id = job_options[selected_job]
+
+            st.markdown("### Add Material Request to Job Register")
+            st.caption("Employees can request materials without seeing pricing. Saved products apply their stored cost to the job material register automatically.")
+
+            employee_product_code_options = get_product_options()
+            employee_product_name_options = get_product_name_options()
+            material_request_type_options = ["Saved Product", "One-off / Not Listed"] if employee_product_code_options else ["One-off / Not Listed"]
+            material_request_type = st.radio(
+                "Material request type",
+                material_request_type_options,
+                horizontal=True,
+                key=f"employee_material_request_type_{selected_job_id}",
+            )
+
+            employee_product_id = None
+            request_product_name = ""
+            request_supplier = ""
+            request_unit = ""
+            request_colour = ""
+
+            if material_request_type == "Saved Product":
+                product_search_type = st.radio(
+                    "Select product by",
+                    ["Product Code", "Product Name"],
+                    horizontal=True,
+                    key=f"employee_material_product_search_{selected_job_id}",
+                )
+                if product_search_type == "Product Code":
+                    selected_product = st.selectbox(
+                        "Product Code",
+                        list(employee_product_code_options.keys()),
+                        key=f"employee_material_product_code_{selected_job_id}",
+                    )
+                    employee_product_id = employee_product_code_options[selected_product]
+                else:
+                    selected_product = st.selectbox(
+                        "Product Name",
+                        list(employee_product_name_options.keys()),
+                        key=f"employee_material_product_name_{selected_job_id}",
+                    )
+                    employee_product_id = employee_product_name_options[selected_product]
+                selected_product_df = df_query("""
+                    SELECT product_name, supplier, unit
+                    FROM products
+                    WHERE id = ?
+                """, (employee_product_id,))
+                if not selected_product_df.empty:
+                    request_product_name = str(selected_product_df.iloc[0]["product_name"] or "")
+                    request_supplier = str(selected_product_df.iloc[0]["supplier"] or "")
+                    request_unit = str(selected_product_df.iloc[0]["unit"] or "")
+                    st.info(f"Selected: {request_product_name}")
+                request_colour = st.text_input("Colour / Finish", key=f"employee_saved_product_colour_{selected_job_id}")
+            else:
+                c_req1, c_req2 = st.columns(2)
+                request_product_name = c_req1.text_input("Product / Material Name", key=f"employee_custom_product_name_{selected_job_id}")
+                request_colour = c_req2.text_input("Colour / Finish", key=f"employee_custom_colour_{selected_job_id}")
+                c_req3, c_req4 = st.columns(2)
+                request_supplier = c_req3.text_input("Supplier", key=f"employee_custom_supplier_{selected_job_id}")
+                request_unit = c_req4.text_input("Unit", value="each", key=f"employee_custom_unit_{selected_job_id}")
+
+            with st.form(f"employee_material_request_form_{selected_job_id}"):
+                c_qty1, c_qty2, c_qty3 = st.columns(3)
+                qty_required = c_qty1.number_input("Qty Required", min_value=0.0, step=1.0, key=f"employee_material_qty_required_{selected_job_id}")
+                qty_received = c_qty2.number_input("Qty Received / Loaded", min_value=0.0, step=1.0, key=f"employee_material_qty_received_{selected_job_id}")
+                date_ordered = c_qty3.text_input("Date", value=str(date.today()), key=f"employee_material_date_{selected_job_id}")
+                material_notes = st.text_area("Notes", key=f"employee_material_notes_{selected_job_id}")
+                save_material_request = st.form_submit_button("Save Material Request to Job Register")
+
+                if save_material_request:
+                    if material_request_type == "Saved Product" and not employee_product_id:
+                        st.error("Select a saved product first.")
+                    elif not str(request_product_name or "").strip() and material_request_type == "One-off / Not Listed":
+                        st.error("Enter a product/material name.")
+                    else:
+                        execute("""
+                            INSERT INTO material_entries
+                            (
+                                job_id,
+                                product_id,
+                                qty_required,
+                                qty_received,
+                                date_ordered,
+                                supplier,
+                                notes,
+                                custom_product_code,
+                                custom_product_name,
+                                custom_supplier,
+                                custom_unit,
+                                custom_unit_price,
+                                custom_colour
+                            )
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (
+                            selected_job_id,
+                            employee_product_id,
+                            qty_required,
+                            qty_received,
+                            date_ordered,
+                            request_supplier,
+                            f"Employee material request by {employee_name}. {material_notes}",
+                            "CUSTOM" if material_request_type == "One-off / Not Listed" else "",
+                            request_product_name if material_request_type == "One-off / Not Listed" else "",
+                            request_supplier if material_request_type == "One-off / Not Listed" else "",
+                            request_unit if material_request_type == "One-off / Not Listed" else "",
+                            0 if material_request_type == "One-off / Not Listed" else None,
+                            request_colour,
+                        ))
+                        st.success("Material request saved to this job.")
+                        st.info("The Paint & Materials Order Form can now be generated with this material included.")
+                        refresh()
+
+            st.divider()
 
             st.markdown("### Paint & Materials Order Form")
             st.caption("Generates a fillable paint/materials order PDF and attaches it to the selected job.")
@@ -6429,7 +6639,7 @@ def pb_control_ai_job_review(df):
 
 def control_centre_page():
     st.header("Premier Brushworks Control Centre")
-    st.caption("Daily dashboard, job health, budget lock-in, variations, claims, scheduling, timesheet approval and AI job review.")
+    st.caption("Daily dashboard, job lookup, job health, budget lock-in, variations, claims, scheduling, timesheet approval and AI job review.")
 
     df = pb_job_cost_frame()
     if df.empty:
@@ -6446,6 +6656,7 @@ def control_centre_page():
             "Invoice / Claim Tracker",
             "Staff Scheduling Board",
             "Timesheet Approval",
+            "Job Lookup / Links",
             "AI Job Review",
             "Export Control Centre"
         ],
@@ -6467,6 +6678,8 @@ def control_centre_page():
         pb_control_staff_schedule()
     elif section == "Timesheet Approval":
         pb_control_timesheet_approval()
+    elif section == "Job Lookup / Links":
+        job_lookup_links_page()
     elif section == "AI Job Review":
         pb_control_ai_job_review(df)
     else:
@@ -6534,7 +6747,10 @@ def go_to_linked_job_view(job_id=None, builder_id=None, mode=None):
         st.session_state["linked_view_selected_builder_id"] = int(builder_id)
     if mode:
         st.session_state["linked_view_mode"] = mode
-    st.session_state["go_to_menu"] = "Job Lookup / Links"
+
+    # Job lookup now lives inside the Control Centre.
+    st.session_state["go_to_menu"] = "Control Centre"
+    st.session_state["control_centre_section"] = "Job Lookup / Links"
     st.rerun()
 
 
@@ -6976,7 +7192,7 @@ def render_job_linked_info(job_id, expanded=True):
 
         st.markdown("### Generate Job PDFs")
 
-        pdf_col1, pdf_col2 = st.columns(2)
+        pdf_col1, pdf_col2, pdf_col3 = st.columns(3)
 
         with pdf_col1:
             if st.button("Generate Paint & Materials Order PDF", key=f"generate_paint_order_{job_id}"):
@@ -7013,6 +7229,47 @@ def render_job_linked_info(job_id, expanded=True):
 
                 except Exception as e:
                     st.error(f"Could not generate equipment checklist PDF: {e}")
+
+        with pdf_col3:
+            st.caption("Variation form")
+            variation_result_key = f"linked_variation_result_{job_id}"
+            with st.form(f"linked_variation_form_generator_{job_id}"):
+                variation_description = st.text_area("Variation Description", key=f"linked_variation_description_{job_id}")
+                variation_reason = st.text_area("Reason / Details", key=f"linked_variation_reason_{job_id}")
+                variation_notes = st.text_area("Notes", key=f"linked_variation_notes_{job_id}")
+                generate_variation = st.form_submit_button("Generate Variation Form")
+
+                if generate_variation:
+                    try:
+                        requested_by = current_username()
+                        pdf_path, variation_no = generate_variation_form_pdf(
+                            job_id,
+                            requested_by=requested_by,
+                            description=variation_description,
+                            reason=variation_reason,
+                            notes=variation_notes,
+                        )
+                        st.session_state[variation_result_key] = {
+                            "pdf_path": pdf_path,
+                            "variation_no": variation_no,
+                        }
+                    except Exception as e:
+                        st.error(f"Could not generate variation form PDF: {e}")
+
+            if variation_result_key in st.session_state:
+                variation_result = st.session_state[variation_result_key]
+                pdf_path = variation_result["pdf_path"]
+                variation_no = variation_result["variation_no"]
+                st.success(f"Variation Form {variation_no} generated and attached to this job.")
+
+                with open(pdf_path, "rb") as f:
+                    st.download_button(
+                        "Download Variation Form PDF",
+                        data=f,
+                        file_name=os.path.basename(pdf_path),
+                        mime="application/pdf",
+                        key=f"download_variation_pdf_{job_id}_{variation_no}",
+                    )
 
         st.divider()
 
@@ -7179,57 +7436,89 @@ logout_button()
 role = current_role()
 
 if role == "employee":
-    allowed_menu = ["Employee Portal"]
+    main_menu_options = ["Employee Portal"]
+    management_menu_map = {}
 elif role == "manager":
-    allowed_menu = [
+    main_menu_options = [
         "Dashboard",
         "Control Centre",
         "Jobs",
-        "Job Lookup / Links",
         "Estimate Working Sheet",
         "Job Costs / Forecasting",
         "JobHub AI Assistant",
         "App Builder AI",
-        "Builders & Clients",
-        "Employees",
-        "Products",
         "Material Costs",
         "Wages",
         "Timesheets",
-        "Equipment",
         "Job Photos",
         "Reports / Export",
+        "Management",
     ]
+    management_menu_map = {
+        "Builders & Clients": "Builders & Clients",
+        "Employees": "Employees",
+        "Products": "Products",
+        "Equipment": "Equipment",
+    }
 else:
-    allowed_menu = [
+    main_menu_options = [
         "Dashboard",
         "Control Centre",
         "Jobs",
-        "Job Lookup / Links",
         "Estimate Working Sheet",
         "Job Costs / Forecasting",
         "JobHub AI Assistant",
         "App Builder AI",
-        "Builders & Clients",
-        "Employees",
-        "Products",
         "Material Costs",
         "Wages",
         "Timesheets",
-        "Equipment",
         "Job Photos",
         "Reports / Export",
-        "User Access",
+        "Management",
     ]
+    management_menu_map = {
+        "User Accounts": "User Access",
+        "Builders & Clients": "Builders & Clients",
+        "Employees": "Employees",
+        "Products": "Products",
+        "Equipment": "Equipment",
+    }
+
+hidden_route_options = list(management_menu_map.values()) + ["Job Lookup / Links"]
+allowed_menu = main_menu_options + hidden_route_options
 
 requested_menu = st.session_state.pop("go_to_menu", None)
-if requested_menu in allowed_menu:
+if requested_menu in main_menu_options:
     st.session_state["main_menu"] = requested_menu
+elif requested_menu in hidden_route_options:
+    if requested_menu == "Job Lookup / Links":
+        st.session_state["main_menu"] = "Control Centre"
+        st.session_state["control_centre_section"] = "Job Lookup / Links"
+    else:
+        st.session_state["main_menu"] = "Management"
+        for label, target in management_menu_map.items():
+            if target == requested_menu:
+                st.session_state["management_menu"] = label
+                break
 
-if st.session_state.get("main_menu") not in allowed_menu:
-    st.session_state["main_menu"] = allowed_menu[0]
+if st.session_state.get("main_menu") not in main_menu_options:
+    st.session_state["main_menu"] = main_menu_options[0]
 
-menu = st.sidebar.radio("Menu", allowed_menu, key="main_menu")
+main_menu_choice = st.sidebar.radio("Menu", main_menu_options, key="main_menu")
+
+if main_menu_choice == "Management":
+    st.sidebar.markdown("### Management")
+    management_labels = list(management_menu_map.keys())
+    if st.session_state.get("management_menu") not in management_labels:
+        st.session_state["management_menu"] = management_labels[0] if management_labels else ""
+    selected_management_label = st.sidebar.selectbox(
+        "Management Section",
+        management_labels,
+        key="management_menu",
+    )
+    menu = management_menu_map.get(selected_management_label, selected_management_label)
+else:
+    menu = main_menu_choice
 
 
 # =============================
