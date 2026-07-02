@@ -8227,6 +8227,133 @@ def add_takeoff_line(package_id, area_type, location_area, substrate, labour_cat
     recalc_takeoff_package(package_id)
 
 
+def _csv_takeoff_value(row, *names, default=""):
+    for name in names:
+        if name in row.index:
+            val = row.get(name)
+            if pd.notna(val) and str(val).strip() != "":
+                return val
+    return default
+
+
+def _csv_takeoff_float(row, *names, default=0.0):
+    val = _csv_takeoff_value(row, *names, default=default)
+    try:
+        if isinstance(val, str):
+            val = val.replace("$", "").replace(",", "").strip()
+        return float(val or 0)
+    except Exception:
+        return float(default or 0)
+
+
+def labour_category_from_import(text):
+    t = str(text or "").lower()
+    if "ceil" in t:
+        return "Ceilings"
+    if any(x in t for x in ["wood", "door", "frame", "jamb", "skirting", "stair", "handrail", "gloss", "garage door"]):
+        return "Woodwork"
+    if any(x in t for x in ["feature", "dark", "multiple"]):
+        return "Features"
+    if any(x in t for x in ["external", "exterior", "cladding", "render", "soffit", "eave", "downpipe", "fence"]):
+        return "Exterior"
+    if "allowance" in t or "completion" in t or "touch" in t:
+        return "Features"
+    return "Walls"
+
+
+def area_type_from_import(row):
+    text = " ".join([
+        str(_csv_takeoff_value(row, "area_type", "Area Type", default="")),
+        str(_csv_takeoff_value(row, "group", "Group", default="")),
+        str(_csv_takeoff_value(row, "area", "Area", "location_area", "Location / Area", default="")),
+        str(_csv_takeoff_value(row, "category", "Category", default="")),
+        str(_csv_takeoff_value(row, "substrate", "Substrate", default="")),
+    ]).lower()
+    if any(x in text for x in ["external", "exterior", "cladding", "render", "soffit", "eave", "downpipe", "fence", "garage door"]):
+        return "External"
+    return "Internal"
+
+
+def import_takeoff_csv_to_package(job_id, csv_file, source_name="CSV Import", notes=""):
+    """Import a JobHub painting take-off/progress CSV into real take-off lines.
+
+    Supports the King Street import pack columns plus normal JobHub-style columns.
+    Once imported, the progress/billing model is generated immediately so the 3D model is visible.
+    """
+    data = csv_file.getvalue()
+    df = pd.read_csv(BytesIO(data))
+    if df.empty:
+        raise ValueError("The CSV has no rows to import.")
+
+    package_id = create_takeoff_package(
+        job_id,
+        method="CSV Import",
+        source_documents=getattr(csv_file, "name", source_name),
+        assumptions="Imported from structured take-off/progress CSV.",
+        notes=notes,
+    )
+
+    imported = 0
+    for _, row in df.iterrows():
+        group = str(_csv_takeoff_value(row, "group", "Group", "area_type", "Area Type", default=""))
+        unit = str(_csv_takeoff_value(row, "unit", "Unit", default="")).strip()
+        level = str(_csv_takeoff_value(row, "level", "Level", default="")).strip()
+        area = str(_csv_takeoff_value(row, "area", "Area", "location_area", "Location / Area", default="Section")).strip()
+        substrate = str(_csv_takeoff_value(row, "substrate", "Substrate", default="Painting substrate")).strip()
+        category_raw = str(_csv_takeoff_value(row, "category", "Category", "labour_category", "Labour Category", default="")).strip()
+        labour_category = labour_category_from_import(" ".join([category_raw, substrate, area, group]))
+        area_type = area_type_from_import(row)
+        m2 = _csv_takeoff_float(row, "m2", "M2", "Total m2", "total_m2", "Area m2", default=0.0)
+        coats = _csv_takeoff_float(row, "coats", "Coats", default=2.0)
+        lineal_metres = _csv_takeoff_float(row, "lm", "LM", "lineal_metres", "Lineal Metres", default=0.0)
+        doors = _csv_takeoff_float(row, "doors", "Doors", default=0.0)
+        frames = _csv_takeoff_float(row, "frames", "Frames", "windows", "Windows", default=0.0)
+        element_count = doors if doors > 0 and "door" in substrate.lower() and not any(x in substrate.lower() for x in ["frame", "jamb"]) else frames
+        paint_type = str(_csv_takeoff_value(row, "paint_type", "Paint Type", "finish_type", "Finish Type", default="")).strip()
+        if not paint_type:
+            paint_type = "Gloss / Enamel" if labour_category == "Woodwork" else "Standard Paint"
+        labour_hours = _csv_takeoff_float(row, "labour_hours", "Labour Hours", default=0.0)
+        productivity = round((m2 * coats) / labour_hours, 2) if labour_hours > 0 else 8.0
+        paint_litres = _csv_takeoff_float(row, "paint_litres", "Paint Litres", default=0.0)
+        if paint_litres <= 0:
+            paint_litres = takeoff_line_paint_litres(substrate, labour_category, m2, coats, paint_type, element_count, lineal_metres)
+        location_parts = [x for x in [unit, level, area] if x]
+        location_area = " - ".join(location_parts) if location_parts else area
+        status = str(_csv_takeoff_value(row, "status", "Status", default="")).strip()
+        note = str(_csv_takeoff_value(row, "notes", "Notes", default="")).strip()
+        source_section = str(_csv_takeoff_value(row, "section_id", "Section ID", default="")).strip()
+        flags = ", ".join([x for x in [category_raw, status, source_section] if x])
+
+        execute("""
+            INSERT INTO painting_takeoff_lines
+            (package_id, area_type, location_area, substrate, labour_category, m2, coats,
+             productivity_m2_per_hour, labour_hours, finish_type, element_count, lineal_metres, paint_litres, flags, notes, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            package_id,
+            area_type,
+            location_area,
+            substrate,
+            labour_category,
+            float(m2 or 0),
+            float(coats or 0),
+            float(productivity or 0),
+            float(labour_hours or 0),
+            paint_type,
+            float(element_count or 0),
+            float(lineal_metres or 0),
+            float(paint_litres or 0),
+            flags,
+            note,
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        ))
+        imported += 1
+
+    recalc_takeoff_package(package_id)
+    ensure_progress_sections_for_package(package_id, reset_values=True)
+    return package_id, imported
+
+
 def delete_takeoff_line_safely(line_id):
     """Delete a take-off line and any progress-model sections that were generated from it.
 
@@ -9748,6 +9875,28 @@ def painting_takeoff_generator_page(default_job_id=None):
         placeholder="Example: include internal walls, ceilings, timberwork, grooved doors, external render, eaves/soffits, dark colours, high ceilings. Note door/window/frame counts and skirting lm where known for gloss allowance.",
         key=f"takeoff_extra_notes_{job_id}",
     )
+
+
+    with st.expander("Import structured take-off CSV / progress model data", expanded=False):
+        st.caption("Use this for JobHub import tables, including the King Street Progress Model Import Table CSV. It creates real take-off lines and prepares the Progress / Billing + 3D model straight away.")
+        csv_import_file = st.file_uploader(
+            "Upload take-off CSV",
+            type=["csv"],
+            key=f"takeoff_csv_import_file_{job_id}",
+        )
+        import_notes = st.text_area(
+            "CSV import notes",
+            value="Structured take-off import. Review all measurements before issuing claims.",
+            key=f"takeoff_csv_import_notes_{job_id}",
+        )
+        if st.button("Import CSV and Create Progress Model", key=f"takeoff_csv_import_button_{job_id}", disabled=csv_import_file is None):
+            try:
+                package_id, imported_count = import_takeoff_csv_to_package(job_id, csv_import_file, notes=import_notes)
+                st.session_state[f"selected_takeoff_package_{job_id}"] = package_id
+                st.success(f"Imported {imported_count} take-off line(s) and prepared the progress/3D model. Open Progress / Billing to view it.")
+                refresh()
+            except Exception as e:
+                st.error(f"Could not import CSV: {e}")
 
     c_manual, c_ai = st.columns(2)
     with c_manual:
