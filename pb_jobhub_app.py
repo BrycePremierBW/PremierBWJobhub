@@ -9226,8 +9226,9 @@ def go_to_linked_job_view(job_id=None, builder_id=None, mode=None):
         st.session_state["linked_view_mode"] = mode
 
     # Job lookup now lives inside the Control Centre.
+    # Use pending navigation keys so Streamlit widget state is changed before widgets are instantiated on rerun.
     st.session_state["go_to_menu"] = "Control Centre"
-    st.session_state["control_centre_section"] = "Job Lookup / Links"
+    st.session_state["go_to_control_centre_section"] = "Job Lookup / Links"
     st.rerun()
 
 
@@ -10084,9 +10085,17 @@ hidden_route_options = (
 )
 allowed_menu = main_menu_options + hidden_route_options
 
+# Navigation from buttons must be stored in pending keys and applied before sidebar widgets are created.
+# This prevents Streamlit errors such as modifying st.session_state.main_menu after the main_menu widget exists.
+requested_control_section = st.session_state.pop("go_to_control_centre_section", None)
 requested_menu = st.session_state.pop("go_to_menu", None)
+
+if requested_control_section:
+    requested_menu = "Control Centre"
 if requested_menu in main_menu_options:
     st.session_state["main_menu"] = requested_menu
+    if requested_menu == "Control Centre" and requested_control_section:
+        st.session_state["control_centre_section"] = requested_control_section
 elif requested_menu in hidden_route_options:
     if requested_menu == "Job Lookup / Links":
         st.session_state["main_menu"] = "Control Centre"
@@ -10278,7 +10287,7 @@ elif menu == "Dashboard":
     with m1:
         pb_metric_card("Active Jobs", active_jobs_count, f"{jobs_count} total jobs", "green")
         if st.button("Open jobs", key="dash_card_open_jobs", use_container_width=True):
-            st.session_state["main_menu"] = "Job Folders"
+            st.session_state["go_to_menu"] = "Job Folders"
             st.rerun()
     with m2:
         pb_metric_card("Active Staff", employee_count, "Available employee records", "blue")
@@ -10293,8 +10302,8 @@ elif menu == "Dashboard":
     with m4:
         pb_metric_card("Overdue Claims", overdue_claims, pb_money(overdue_value), "red" if overdue_claims else "green")
         if st.button("Open claims", key="dash_card_open_claims", use_container_width=True):
-            st.session_state["main_menu"] = "Control Centre"
-            st.session_state["control_centre_section"] = "Invoice / Claim Tracker"
+            st.session_state["go_to_menu"] = "Control Centre"
+            st.session_state["go_to_control_centre_section"] = "Invoice / Claim Tracker"
             st.rerun()
 
     m5, m6, m7, m8 = st.columns(4)
@@ -10306,8 +10315,8 @@ elif menu == "Dashboard":
     with m6:
         pb_metric_card("Open Variations", open_variations, "Draft, submitted or sent", "orange" if open_variations else "green")
         if st.button("Open variations", key="dash_card_open_variations", use_container_width=True):
-            st.session_state["main_menu"] = "Control Centre"
-            st.session_state["control_centre_section"] = "Variations Register"
+            st.session_state["go_to_menu"] = "Control Centre"
+            st.session_state["go_to_control_centre_section"] = "Variations Register"
             st.rerun()
     with m7:
         products_count = int(df_query("SELECT COUNT(*) AS c FROM products").iloc[0]["c"])
@@ -10336,13 +10345,13 @@ elif menu == "Dashboard":
     with m11:
         pb_metric_card("Staff Schedule", schedule_count, "Saved schedule entries", "orange" if schedule_count else "taupe")
         if st.button("Open scheduling", key="dash_card_open_scheduling", use_container_width=True):
-            st.session_state["main_menu"] = "Control Centre"
-            st.session_state["control_centre_section"] = "Staff Scheduling Board"
+            st.session_state["go_to_menu"] = "Control Centre"
+            st.session_state["go_to_control_centre_section"] = "Staff Scheduling Board"
             st.rerun()
     with m12:
         pb_metric_card("Plans / Docs", documents_count, "Uploaded job documents", "taupe")
         if st.button("Open documents", key="dash_card_open_documents", use_container_width=True):
-            st.session_state["main_menu"] = "Job Folders"
+            st.session_state["go_to_menu"] = "Job Folders"
             st.rerun()
 
     st.markdown("### Open Jobs")
@@ -10369,17 +10378,16 @@ elif menu == "Dashboard":
     st.markdown("### Quick Actions")
     qa1, qa2, qa3, qa4 = st.columns(4)
     if qa1.button("Open Job Folders", key="dash_open_job_folders"):
-        st.session_state["main_menu"] = "Job Folders"
+        st.session_state["go_to_menu"] = "Job Folders"
         st.rerun()
     if qa2.button("Review Timesheets", key="dash_review_timesheets"):
-        st.session_state["main_menu"] = "Site Operations"
-        st.session_state["site_operations_menu"] = "Timesheets"
+        st.session_state["go_to_menu"] = "Timesheets"
         st.rerun()
     if qa3.button("Open Control Centre", key="dash_open_control"):
-        st.session_state["main_menu"] = "Control Centre"
+        st.session_state["go_to_menu"] = "Control Centre"
         st.rerun()
     if qa4.button("Run Reports", key="dash_open_reports"):
-        st.session_state["main_menu"] = "Reports"
+        st.session_state["go_to_menu"] = "Reports"
         st.rerun()
 
 
