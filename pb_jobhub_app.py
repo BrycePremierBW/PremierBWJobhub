@@ -20,6 +20,7 @@ from psycopg2.pool import ThreadedConnectionPool
 from pypdf import PdfReader, PdfWriter
 from pypdf.generic import BooleanObject, NameObject, DictionaryObject
 import streamlit as st
+import streamlit.components.v1 as components
 
 
 # =============================
@@ -5294,12 +5295,26 @@ def job_costs_forecasting_page():
 
 
 def jobhub_ai_api_key():
+    """Return a cleaned OpenAI API key from secrets/environment.
+
+    Render copy/paste can accidentally save a trailing newline or the word
+    "Bearer". OpenAI rejects those values in the Authorization header, so we
+    clean them here before any request is made.
+    """
+    raw_key = ""
     try:
         if "OPENAI_API_KEY" in st.secrets:
-            return st.secrets["OPENAI_API_KEY"]
+            raw_key = st.secrets["OPENAI_API_KEY"]
     except Exception:
-        pass
-    return os.environ.get("OPENAI_API_KEY", "")
+        raw_key = ""
+    if not raw_key:
+        raw_key = os.environ.get("OPENAI_API_KEY", "")
+
+    key = str(raw_key or "").strip()
+    if key.lower().startswith("bearer "):
+        key = key[7:].strip()
+    key = key.replace("\n", "").replace("\r", "").replace("\t", "").strip()
+    return key
 
 
 def jobhub_ai_model():
@@ -5460,7 +5475,9 @@ def jobhub_ai_assistant_page():
     if st.checkbox("Show data being sent to AI", value=False, key="ai_show_context"):
         st.text_area("Context Preview", value=context_text, height=300)
 
-    if st.button("Ask JobHub AI", key="ask_jobhub_ai"):
+    st.caption("AI only runs when you press the button below. This may use OpenAI API credit.")
+    ai_confirm = confirm_ai_api_spend("Confirm: use OpenAI API credit for this question", key="ask_jobhub_ai_confirm")
+    if st.button("Ask JobHub AI (uses API credit)", key="ask_jobhub_ai", disabled=not ai_confirm):
         if not question.strip():
             st.error("Enter a question first.")
         else:
@@ -6292,6 +6309,17 @@ def ai_backend_ready():
         return ollama_status()
 
     return False, ai_disabled_message()
+
+
+def ai_cost_control_notice(context_key="global"):
+    st.info(
+        "AI Cost Control is on: manual JobHub features are free to use. OpenAI is only used when you press an AI button, "
+        "tick the confirmation box, and there is no automatic re-run."
+    )
+
+
+def confirm_ai_api_spend(label="I understand this will use OpenAI API credit", key="confirm_ai_spend"):
+    return st.checkbox(label, value=False, key=key)
 
 
 def ollama_generate(prompt, system="", context="", model=None, timeout=None):
@@ -8632,6 +8660,290 @@ def render_progress_visual_cards(display_sections, selected_ids, key_prefix="pro
                 </div>
             """, unsafe_allow_html=True)
 
+
+
+def render_progress_3d_model(display_sections, selected_ids, key_prefix="progress_3d_model"):
+    """Render a browser-based 3D progress block model from the take-off/progress sections.
+
+    This is a lightweight model generated from the take-off rows. It is not a true CAD/BIM extraction,
+    but it gives a full 3D selectable visual model for progress, billable value, labour and materials.
+    """
+    if display_sections is None or display_sections.empty:
+        return
+
+    model_rows = []
+    model_df = display_sections.copy().head(240)
+    selected_set = {int(x) for x in selected_ids if str(x).isdigit() or isinstance(x, int)}
+
+    for idx, (_, row) in enumerate(model_df.iterrows()):
+        section_id = int(row.get("ID") or 0)
+        total_m2 = app_float(row.get("Total m2"))
+        completed_pct = app_float(row.get("Completed %"))
+        value = app_float(row.get("Section Value Ex GST"))
+        billable_value = app_float(row.get("Billable Value Ex GST"))
+        remaining_value = app_float(row.get("Remaining Value Ex GST"))
+        labour_hours = app_float(row.get("Total Labour Hours"))
+        paint_litres = app_float(row.get("Total Paint Litres"))
+        model_rows.append({
+            "id": section_id,
+            "index": idx,
+            "code": str(row.get("Section Code") or f"S-{section_id}"),
+            "area": str(row.get("Area") or ""),
+            "location": str(row.get("Location / Area") or ""),
+            "substrate": str(row.get("Substrate") or ""),
+            "labour": str(row.get("Labour Category") or ""),
+            "status": str(row.get("Status") or "Not Started"),
+            "m2": round(total_m2, 2),
+            "completed_pct": round(completed_pct, 2),
+            "value": round(value, 2),
+            "billable_value": round(billable_value, 2),
+            "remaining_value": round(remaining_value, 2),
+            "labour_hours": round(labour_hours, 2),
+            "paint_litres": round(paint_litres, 2),
+            "selected": section_id in selected_set,
+        })
+
+    selected_rows = [r for r in model_rows if r["selected"]]
+    source_for_summary = selected_rows if selected_rows else model_rows
+    summary = {
+        "selected_count": len(selected_rows),
+        "shown_count": len(model_rows),
+        "m2": round(sum(r["m2"] for r in source_for_summary), 2),
+        "value": round(sum(r["value"] for r in source_for_summary), 2),
+        "billable": round(sum(r["billable_value"] for r in source_for_summary), 2),
+        "labour": round(sum(r["labour_hours"] for r in source_for_summary), 2),
+        "paint": round(sum(r["paint_litres"] for r in source_for_summary), 2),
+    }
+
+    data_json = json.dumps(model_rows)
+    selected_json = json.dumps(list(selected_set))
+    summary_json = json.dumps(summary)
+
+    st.markdown("### Full 3D Progress Render")
+    st.caption(
+        "This generates a 3D block model from the painting take-off sections. Drag to orbit, scroll to zoom and click any section to view its m², value, labour and paint. Use the JobHub selectors/buttons above to permanently mark selected sections as complete."
+    )
+
+    html_doc = f"""
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  html, body {{ margin:0; padding:0; overflow:hidden; font-family: Arial, Helvetica, sans-serif; background:#f6f1ea; }}
+  #wrap {{ display:flex; height:640px; width:100%; background:linear-gradient(180deg,#f7f2ec 0%,#ede4d9 100%); border-radius:18px; overflow:hidden; border:1px solid #d6c8b8; }}
+  #viewer {{ flex:1; position:relative; min-width:0; }}
+  #side {{ width:330px; background:rgba(255,255,255,0.94); border-left:1px solid #d6c8b8; padding:14px; overflow:auto; box-sizing:border-box; }}
+  .title {{ font-weight:900; color:#111827; font-size:17px; line-height:1.2; margin-bottom:6px; }}
+  .hint {{ color:#4b5563; font-size:12px; line-height:1.35; margin-bottom:12px; }}
+  .metricGrid {{ display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:12px; }}
+  .metric {{ background:#f8fafc; border:1px solid #e5e7eb; border-radius:12px; padding:8px; }}
+  .metric .label {{ color:#6b7280; font-size:11px; }}
+  .metric .value {{ color:#111827; font-size:16px; font-weight:900; margin-top:2px; }}
+  #info {{ background:#111827; color:#fff; border-radius:14px; padding:12px; margin-top:10px; min-height:145px; box-shadow:0 10px 25px rgba(17,24,39,.20); }}
+  #info .small {{ color:#d1d5db; font-size:12px; margin-top:4px; }}
+  #legend {{ position:absolute; left:14px; bottom:14px; background:rgba(255,255,255,.92); border:1px solid #e5e7eb; border-radius:13px; padding:8px 10px; font-size:12px; color:#111827; box-shadow:0 10px 30px rgba(0,0,0,.12); }}
+  .dot {{ display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:5px; vertical-align:middle; }}
+  #topbar {{ position:absolute; left:14px; top:14px; background:rgba(17,24,39,.88); color:#fff; border-radius:14px; padding:10px 12px; font-size:12px; max-width:420px; box-shadow:0 10px 30px rgba(0,0,0,.20); }}
+  .sectionRow {{ border-bottom:1px solid #e5e7eb; padding:8px 0; cursor:pointer; }}
+  .sectionRow:hover {{ background:#f3f4f6; }}
+  .sectionCode {{ font-weight:800; color:#111827; font-size:12px; }}
+  .sectionMeta {{ color:#4b5563; font-size:11px; margin-top:2px; }}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="viewer">
+    <div id="topbar"><strong>PB 3D Progress Model</strong><br>Mouse: drag to rotate • scroll to zoom • click a substrate section to inspect.</div>
+    <div id="legend">
+      <span class="dot" style="background:#2563eb"></span>Selected&nbsp;&nbsp;
+      <span class="dot" style="background:#16a34a"></span>Complete&nbsp;&nbsp;
+      <span class="dot" style="background:#f59e0b"></span>In progress&nbsp;&nbsp;
+      <span class="dot" style="background:#d1d5db"></span>Not started
+    </div>
+  </div>
+  <div id="side">
+    <div class="title">Selected / visible projection</div>
+    <div class="hint">Blue pieces are selected in JobHub. Green pieces are completed and stay highlighted. Click any 3D piece to inspect that substrate section.</div>
+    <div class="metricGrid">
+      <div class="metric"><div class="label">Sections</div><div class="value" id="metricSections">0</div></div>
+      <div class="metric"><div class="label">m²</div><div class="value" id="metricM2">0</div></div>
+      <div class="metric"><div class="label">Value</div><div class="value" id="metricValue">$0</div></div>
+      <div class="metric"><div class="label">Billable</div><div class="value" id="metricBillable">$0</div></div>
+      <div class="metric"><div class="label">Labour</div><div class="value" id="metricLabour">0h</div></div>
+      <div class="metric"><div class="label">Paint</div><div class="value" id="metricPaint">0L</div></div>
+    </div>
+    <div id="info"><strong>Click a section</strong><div class="small">The selected section details will show here.</div></div>
+    <div class="title" style="margin-top:14px; font-size:14px;">Itemised sections</div>
+    <div id="sectionList"></div>
+  </div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/three@0.124.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.124.0/examples/js/controls/OrbitControls.js"></script>
+<script>
+const sections = {data_json};
+const selectedIds = new Set({selected_json});
+const summary = {summary_json};
+const container = document.getElementById('viewer');
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xf6f1ea);
+const camera = new THREE.PerspectiveCamera(48, container.clientWidth / container.clientHeight, 0.1, 1000);
+camera.position.set(14, 11, 18);
+const renderer = new THREE.WebGLRenderer({{ antialias:true, alpha:false }});
+renderer.setPixelRatio(window.devicePixelRatio || 1);
+renderer.setSize(container.clientWidth, container.clientHeight);
+renderer.shadowMap.enabled = true;
+container.appendChild(renderer.domElement);
+const controls = new THREE.OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.07;
+controls.target.set(0, 1.4, 0);
+const ambient = new THREE.AmbientLight(0xffffff, 0.72);
+scene.add(ambient);
+const sun = new THREE.DirectionalLight(0xffffff, 0.85);
+sun.position.set(8, 15, 10);
+sun.castShadow = true;
+scene.add(sun);
+const grid = new THREE.GridHelper(42, 42, 0xcbbba8, 0xe3d8ca);
+grid.position.y = -0.01;
+scene.add(grid);
+const floorGeo = new THREE.PlaneGeometry(44, 44);
+const floorMat = new THREE.MeshStandardMaterial({{ color:0xf1e8dd, roughness:0.85, metalness:0.0 }});
+const floor = new THREE.Mesh(floorGeo, floorMat);
+floor.rotation.x = -Math.PI/2;
+floor.receiveShadow = true;
+scene.add(floor);
+function fmtMoney(n) {{ return '$' + Number(n||0).toLocaleString(undefined, {{maximumFractionDigits:0}}); }}
+function colourFor(s) {{
+  const status = String(s.status || '').toLowerCase();
+  if (s.selected) return 0x2563eb;
+  if (status.includes('complete')) return 0x16a34a;
+  if (status.includes('progress')) return 0xf59e0b;
+  if (status.includes('hold') || status.includes('review')) return 0xfb923c;
+  return 0xd1d5db;
+}}
+function opacityFor(s) {{
+  const pct = Number(s.completed_pct || 0);
+  if (s.selected) return 0.94;
+  if (pct <= 0) return 0.58;
+  return 0.72 + Math.min(pct, 100) / 100 * 0.24;
+}}
+function dimsFor(s) {{
+  const m2 = Math.max(Number(s.m2 || 0), 1);
+  const substrate = String(s.substrate || '').toLowerCase();
+  const labour = String(s.labour || '').toLowerCase();
+  let w = Math.max(0.9, Math.min(5.6, Math.sqrt(m2) * 0.55));
+  let h = 2.7;
+  let d = 0.16;
+  if (labour.includes('ceiling') || substrate.includes('ceiling')) {{
+    w = Math.max(1.2, Math.min(6.6, Math.sqrt(m2) * 0.62));
+    d = Math.max(1.2, Math.min(6.6, Math.sqrt(m2) * 0.62));
+    h = 0.12;
+  }} else if (labour.includes('wood') || substrate.includes('door') || substrate.includes('frame') || substrate.includes('skirting') || substrate.includes('timber')) {{
+    w = Math.max(0.35, Math.min(1.4, Math.sqrt(m2) * 0.28));
+    h = substrate.includes('skirting') ? 0.18 : 2.1;
+    d = 0.18;
+  }} else if (String(s.area || '').toLowerCase().includes('external')) {{
+    h = 3.1;
+    w = Math.max(1.0, Math.min(6.0, Math.sqrt(m2) * 0.60));
+  }}
+  return {{ w, h, d }};
+}}
+const meshes = [];
+const cols = Math.ceil(Math.sqrt(Math.max(sections.length, 1)));
+const spacing = 4.2;
+sections.forEach((s, i) => {{
+  const dim = dimsFor(s);
+  const geo = new THREE.BoxGeometry(dim.w, dim.h, dim.d);
+  const mat = new THREE.MeshStandardMaterial({{ color: colourFor(s), transparent:true, opacity: opacityFor(s), roughness:0.55, metalness:0.02 }});
+  const mesh = new THREE.Mesh(geo, mat);
+  const row = Math.floor(i / cols);
+  const col = i % cols;
+  mesh.position.x = (col - cols/2) * spacing;
+  mesh.position.z = (row - Math.floor(sections.length/cols)/2) * spacing;
+  mesh.position.y = dim.h / 2;
+  if (String(s.labour || '').toLowerCase().includes('ceiling') || String(s.substrate || '').toLowerCase().includes('ceiling')) mesh.position.y = 2.75;
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  mesh.userData = s;
+  scene.add(mesh);
+  const edges = new THREE.LineSegments(new THREE.EdgesGeometry(geo), new THREE.LineBasicMaterial({{ color:0x111827, transparent:true, opacity:0.22 }}));
+  edges.position.copy(mesh.position);
+  scene.add(edges);
+  meshes.push(mesh);
+}});
+function showSection(s) {{
+  document.getElementById('info').innerHTML = `<strong>${{s.code}} — ${{s.location || 'Section'}}</strong>
+    <div class="small">${{s.area}} • ${{s.substrate}} • ${{s.labour}}</div>
+    <div style="margin-top:10px; display:grid; grid-template-columns:1fr 1fr; gap:6px; font-size:12px;">
+      <div><b>${{Number(s.m2||0).toLocaleString(undefined, {{maximumFractionDigits:1}})}}m²</b><br><span class="small">substrate</span></div>
+      <div><b>${{Number(s.completed_pct||0).toFixed(1)}}%</b><br><span class="small">complete</span></div>
+      <div><b>${{fmtMoney(s.value)}}</b><br><span class="small">section value</span></div>
+      <div><b>${{fmtMoney(s.billable_value)}}</b><br><span class="small">billable now</span></div>
+      <div><b>${{Number(s.labour_hours||0).toFixed(1)}}h</b><br><span class="small">labour</span></div>
+      <div><b>${{Number(s.paint_litres||0).toFixed(1)}}L</b><br><span class="small">paint</span></div>
+    </div>
+    <div class="small" style="margin-top:10px;">Status: ${{s.status}}</div>`;
+}}
+function updateMetrics() {{
+  const src = selectedIds.size ? sections.filter(s => selectedIds.has(s.id)) : sections;
+  document.getElementById('metricSections').innerText = selectedIds.size ? `${{selectedIds.size}} selected` : `${{sections.length}} shown`;
+  document.getElementById('metricM2').innerText = Number(src.reduce((a,b)=>a+Number(b.m2||0),0)).toLocaleString(undefined, {{maximumFractionDigits:1}});
+  document.getElementById('metricValue').innerText = fmtMoney(src.reduce((a,b)=>a+Number(b.value||0),0));
+  document.getElementById('metricBillable').innerText = fmtMoney(src.reduce((a,b)=>a+Number(b.billable_value||0),0));
+  document.getElementById('metricLabour').innerText = Number(src.reduce((a,b)=>a+Number(b.labour_hours||0),0)).toFixed(1) + 'h';
+  document.getElementById('metricPaint').innerText = Number(src.reduce((a,b)=>a+Number(b.paint_litres||0),0)).toFixed(1) + 'L';
+}}
+function buildList() {{
+  const list = document.getElementById('sectionList');
+  list.innerHTML = '';
+  sections.slice(0,140).forEach(s => {{
+    const div = document.createElement('div');
+    div.className = 'sectionRow';
+    div.innerHTML = `<div class="sectionCode">${{s.selected ? '🔵 ' : ''}}${{s.code}} — ${{s.location || 'Section'}}</div>
+      <div class="sectionMeta">${{s.substrate}} • ${{Number(s.m2||0).toFixed(1)}}m² • ${{fmtMoney(s.value)}} • ${{s.status}}</div>`;
+    div.onclick = () => showSection(s);
+    list.appendChild(div);
+  }});
+}}
+updateMetrics();
+buildList();
+const raycaster = new THREE.Raycaster();
+const mouse = new THREE.Vector2();
+let lastClicked = null;
+function onClick(event) {{
+  const rect = renderer.domElement.getBoundingClientRect();
+  mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+  mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+  raycaster.setFromCamera(mouse, camera);
+  const hits = raycaster.intersectObjects(meshes, false);
+  if (hits.length) {{
+    if (lastClicked) lastClicked.scale.set(1,1,1);
+    const mesh = hits[0].object;
+    mesh.scale.set(1.08,1.08,1.08);
+    lastClicked = mesh;
+    showSection(mesh.userData);
+  }}
+}}
+renderer.domElement.addEventListener('click', onClick);
+window.addEventListener('resize', () => {{
+  camera.aspect = container.clientWidth / container.clientHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(container.clientWidth, container.clientHeight);
+}});
+function animate() {{
+  requestAnimationFrame(animate);
+  controls.update();
+  renderer.render(scene, camera);
+}}
+animate();
+</script>
+</body>
+</html>
+"""
+    components.html(html_doc, height=660, scrolling=False)
+
+
 def render_progress_billing_model(job_id, package_id=None, key_prefix="progress_model"):
     if not package_id:
         package_id = latest_takeoff_package_for_job(job_id)
@@ -8817,6 +9129,8 @@ def render_progress_billing_model(job_id, package_id=None, key_prefix="progress_
                 update_progress_section(int(row["ID"]), completed_m2, app_float(row["Section Value Ex GST"]), status, str(row.get("Notes") or ""))
             st.success(f"{capped_group_m2:,.1f} completed m² allocated across selected sections.")
             refresh()
+
+    render_progress_3d_model(display_sections, selected_ids, key_prefix=f"{key_prefix}_3d_{job_id}_{package_id}")
 
     render_progress_visual_cards(display_sections, selected_ids, key_prefix=f"{key_prefix}_cards_{job_id}_{package_id}")
 
@@ -9087,6 +9401,7 @@ def painting_takeoff_generator_page(default_job_id=None):
         "Upload plans/specs, generate an editable painting take-off, break totals down by substrate/labour, and calculate basic paint litres required.",
         "Estimating"
     )
+    ai_cost_control_notice("painting_takeoff")
 
     job_options = get_job_options()
     if not job_options:
@@ -9127,6 +9442,7 @@ def painting_takeoff_generator_page(default_job_id=None):
 
     c_manual, c_ai = st.columns(2)
     with c_manual:
+        st.caption("Manual/basic mode does not use OpenAI API credit.")
         if st.button("Create Blank Manual Take-off", key=f"create_manual_takeoff_{job_id}"):
             package_id = create_takeoff_package(job_id, method="Manual", notes=extra_scope_notes)
             st.session_state[f"selected_takeoff_package_{job_id}"] = package_id
@@ -9135,9 +9451,30 @@ def painting_takeoff_generator_page(default_job_id=None):
 
     with c_ai:
         ai_ready, ai_msg = ai_backend_ready()
+        existing_ai_packages = df_query("""
+            SELECT id, takeoff_no, updated_at
+            FROM painting_takeoff_packages
+            WHERE job_id = ?
+              AND LOWER(COALESCE(generated_method, '')) LIKE '%ai%'
+            ORDER BY id DESC
+            LIMIT 1
+        """, (job_id,))
+        has_existing_ai = not existing_ai_packages.empty
         if not ai_ready:
             st.caption("AI draft unavailable: " + ai_msg)
-        if st.button("Generate AI Draft Take-off from Uploaded Plans", key=f"generate_ai_takeoff_{job_id}", disabled=not ai_ready):
+        elif has_existing_ai:
+            row = existing_ai_packages.iloc[0]
+            st.info(f"Existing AI take-off found: {row['takeoff_no']}. Select it below instead of re-running AI unless the plans changed.")
+
+        re_run_ai = False
+        if has_existing_ai:
+            re_run_ai = st.checkbox("Re-run AI anyway because the plans/scope changed", value=False, key=f"rerun_ai_takeoff_{job_id}")
+        else:
+            re_run_ai = True
+
+        ai_confirm = confirm_ai_api_spend("Confirm: use OpenAI API credit for this take-off", key=f"confirm_ai_takeoff_spend_{job_id}")
+        ai_button_disabled = (not ai_ready) or (not ai_confirm) or (not re_run_ai)
+        if st.button("Run AI Take-off (uses API credit)", key=f"generate_ai_takeoff_{job_id}", disabled=ai_button_disabled):
             with st.spinner("Reading uploaded plan/spec text and preparing take-off draft..."):
                 ai_data, err, warnings = generate_ai_takeoff_lines(job_id, selected_doc_ids=selected_doc_ids, extra_scope_notes=extra_scope_notes)
             for warning in warnings or []:
