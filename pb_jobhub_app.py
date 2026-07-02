@@ -180,6 +180,35 @@ def apply_pb_branding():
         color: #f6efe7;
     }
 
+    /* Keep the left sidebar dropdown/selectbox text black for readability. */
+    section[data-testid="stSidebar"] div[data-baseweb="select"],
+    section[data-testid="stSidebar"] div[data-baseweb="select"] > div,
+    section[data-testid="stSidebar"] div[data-baseweb="select"] *,
+    section[data-testid="stSidebar"] div[data-baseweb="select"] input,
+    section[data-testid="stSidebar"] div[data-baseweb="select"] span,
+    section[data-testid="stSidebar"] div[data-baseweb="select"] svg {
+        color: #111111 !important;
+        -webkit-text-fill-color: #111111 !important;
+        fill: #111111 !important;
+    }
+
+    section[data-testid="stSidebar"] [role="listbox"],
+    section[data-testid="stSidebar"] [role="listbox"] *,
+    section[data-testid="stSidebar"] [data-baseweb="popover"],
+    section[data-testid="stSidebar"] [data-baseweb="popover"] * {
+        color: #111111 !important;
+        -webkit-text-fill-color: #111111 !important;
+    }
+
+    section[data-testid="stSidebar"] .stSelectbox div[data-baseweb="select"] div {
+        background-color: #ffffff !important;
+    }
+
+    section[data-testid="stSidebar"] [data-testid="stSelectbox"] label {
+        color: #f6efe7 !important;
+        -webkit-text-fill-color: #f6efe7 !important;
+    }
+
     h1, h2, h3, h4 {
         color: var(--pb-charcoal);
         letter-spacing: -0.02em;
@@ -846,6 +875,10 @@ def init_db():
         FOREIGN KEY(employee_id) REFERENCES employees(id)
     )
     """)
+    ensure_column("wage_entries", "period_type", "TEXT")
+    ensure_column("wage_entries", "period_start", "TEXT")
+    ensure_column("wage_entries", "period_end", "TEXT")
+
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS equipment_entries (
@@ -933,6 +966,10 @@ def init_db():
         FOREIGN KEY(employee_id) REFERENCES employees(id)
     )
     """)
+    ensure_column("timesheet_entries", "period_type", "TEXT")
+    ensure_column("timesheet_entries", "period_start", "TEXT")
+    ensure_column("timesheet_entries", "period_end", "TEXT")
+
 
 
 
@@ -978,6 +1015,117 @@ def init_db():
         FOREIGN KEY(estimate_id) REFERENCES estimate_working_sheets(id)
     )
     """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS painting_takeoff_packages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_id INTEGER NOT NULL,
+        takeoff_no TEXT,
+        takeoff_date TEXT,
+        status TEXT DEFAULT 'Draft',
+        source_documents TEXT,
+        interior_total_m2 REAL DEFAULT 0,
+        exterior_total_m2 REAL DEFAULT 0,
+        wall_labour_hours REAL DEFAULT 0,
+        ceiling_labour_hours REAL DEFAULT 0,
+        woodwork_labour_hours REAL DEFAULT 0,
+        feature_labour_hours REAL DEFAULT 0,
+        exterior_labour_hours REAL DEFAULT 0,
+        total_labour_hours REAL DEFAULT 0,
+        total_paint_litres REAL DEFAULT 0,
+        standard_paint_litres REAL DEFAULT 0,
+        gloss_paint_litres REAL DEFAULT 0,
+        generated_method TEXT,
+        assumptions TEXT,
+        ai_notes TEXT,
+        created_by TEXT,
+        created_at TEXT,
+        updated_at TEXT,
+        notes TEXT,
+        FOREIGN KEY(job_id) REFERENCES jobs(id)
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS painting_takeoff_lines (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        package_id INTEGER NOT NULL,
+        area_type TEXT,
+        location_area TEXT,
+        substrate TEXT,
+        labour_category TEXT,
+        m2 REAL DEFAULT 0,
+        coats REAL DEFAULT 2,
+        productivity_m2_per_hour REAL DEFAULT 8,
+        labour_hours REAL DEFAULT 0,
+        finish_type TEXT DEFAULT 'Standard Paint',
+        element_count REAL DEFAULT 0,
+        lineal_metres REAL DEFAULT 0,
+        paint_litres REAL DEFAULT 0,
+        flags TEXT,
+        notes TEXT,
+        created_at TEXT,
+        FOREIGN KEY(package_id) REFERENCES painting_takeoff_packages(id)
+    )
+    """)
+
+    ensure_column("painting_takeoff_packages", "wall_labour_hours", "REAL DEFAULT 0")
+    ensure_column("painting_takeoff_packages", "ceiling_labour_hours", "REAL DEFAULT 0")
+    ensure_column("painting_takeoff_packages", "woodwork_labour_hours", "REAL DEFAULT 0")
+    ensure_column("painting_takeoff_packages", "feature_labour_hours", "REAL DEFAULT 0")
+    ensure_column("painting_takeoff_packages", "exterior_labour_hours", "REAL DEFAULT 0")
+    ensure_column("painting_takeoff_packages", "total_labour_hours", "REAL DEFAULT 0")
+    ensure_column("painting_takeoff_packages", "source_documents", "TEXT")
+    ensure_column("painting_takeoff_packages", "audit_score", "REAL DEFAULT 0")
+    ensure_column("painting_takeoff_packages", "audit_notes", "TEXT")
+    ensure_column("painting_takeoff_packages", "audit_at", "TEXT")
+    ensure_column("painting_takeoff_packages", "total_paint_litres", "REAL DEFAULT 0")
+    ensure_column("painting_takeoff_packages", "standard_paint_litres", "REAL DEFAULT 0")
+    ensure_column("painting_takeoff_packages", "gloss_paint_litres", "REAL DEFAULT 0")
+    ensure_column("painting_takeoff_lines", "productivity_m2_per_hour", "REAL DEFAULT 8")
+    ensure_column("painting_takeoff_lines", "labour_hours", "REAL DEFAULT 0")
+    ensure_column("painting_takeoff_lines", "finish_type", "TEXT DEFAULT 'Standard Paint'")
+    ensure_column("painting_takeoff_lines", "element_count", "REAL DEFAULT 0")
+    ensure_column("painting_takeoff_lines", "lineal_metres", "REAL DEFAULT 0")
+    ensure_column("painting_takeoff_lines", "paint_litres", "REAL DEFAULT 0")
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS painting_progress_sections (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_id INTEGER NOT NULL,
+        package_id INTEGER,
+        takeoff_line_id INTEGER,
+        section_code TEXT,
+        area_type TEXT,
+        location_area TEXT,
+        substrate TEXT,
+        labour_category TEXT,
+        total_m2 REAL DEFAULT 0,
+        allocated_value_ex_gst REAL DEFAULT 0,
+        completed_m2 REAL DEFAULT 0,
+        completed_percent REAL DEFAULT 0,
+        status TEXT DEFAULT 'Not Started',
+        notes TEXT,
+        updated_by TEXT,
+        updated_at TEXT,
+        created_at TEXT,
+        FOREIGN KEY(job_id) REFERENCES jobs(id),
+        FOREIGN KEY(package_id) REFERENCES painting_takeoff_packages(id),
+        FOREIGN KEY(takeoff_line_id) REFERENCES painting_takeoff_lines(id)
+    )
+    """)
+    ensure_column("painting_progress_sections", "allocated_value_ex_gst", "REAL DEFAULT 0")
+    ensure_column("painting_progress_sections", "completed_m2", "REAL DEFAULT 0")
+    ensure_column("painting_progress_sections", "completed_percent", "REAL DEFAULT 0")
+    ensure_column("painting_progress_sections", "status", "TEXT DEFAULT 'Not Started'")
+    ensure_column("painting_progress_sections", "updated_by", "TEXT")
+    ensure_column("painting_progress_sections", "updated_at", "TEXT")
+    ensure_column("painting_progress_sections", "created_at", "TEXT")
+
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_progress_sections_job_id ON painting_progress_sections(job_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_progress_sections_package_id ON painting_progress_sections(package_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_progress_sections_line_id ON painting_progress_sections(takeoff_line_id)")
+
 
     cur.execute("CREATE INDEX IF NOT EXISTS idx_timesheet_entries_job_id ON timesheet_entries(job_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_estimate_working_sheets_job_id ON estimate_working_sheets(job_id)")
@@ -1094,6 +1242,11 @@ def init_db():
         FOREIGN KEY(employee_id) REFERENCES employees(id)
     )
     """)
+    ensure_column("staff_schedule", "period_type", "TEXT")
+    ensure_column("staff_schedule", "period_start", "TEXT")
+    ensure_column("staff_schedule", "period_end", "TEXT")
+    ensure_column("staff_schedule", "planned_hours", "REAL")
+
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS app_code_changes (
@@ -1900,6 +2053,168 @@ def attach_document_to_job(job_id, document_type, file_path, notes="Generated fr
     ))
 
 
+def save_uploaded_job_document(job_id, uploaded_file, document_type, notes=""):
+    """Save uploaded plans/specs/docs into the selected job folder and register them in job_documents."""
+    job = get_job_details_for_pdf(job_id)
+    if not job:
+        raise ValueError("Job not found.")
+
+    job_no = str(job.get("job_no") or f"job_{job_id}")
+    job_folder = get_job_folder(job_no)
+    documents_folder = os.path.join(job_folder, "documents")
+    os.makedirs(documents_folder, exist_ok=True)
+
+    original_name = safe_file_name(uploaded_file.name)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    stored_file_name = f"{timestamp}_{original_name}"
+    file_path = os.path.join(documents_folder, stored_file_name)
+
+    with open(file_path, "wb") as f:
+        f.write(uploaded_file.getbuffer())
+
+    attach_document_to_job(
+        job_id,
+        document_type,
+        file_path,
+        notes=notes or f"Uploaded as {document_type} by {current_username()}",
+    )
+
+    return file_path
+
+
+def delete_job_document(document_id):
+    """Delete a job document record and remove the saved file if it still exists."""
+    doc_df = df_query("SELECT file_path FROM job_documents WHERE id = ?", (document_id,))
+    if not doc_df.empty:
+        file_path = str(doc_df.iloc[0]["file_path"] or "")
+        if file_path and os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+            except Exception:
+                pass
+    execute("DELETE FROM job_documents WHERE id = ?", (document_id,))
+
+
+def download_mime_for_file(file_name):
+    ext = os.path.splitext(str(file_name or ""))[1].lower()
+    if ext == ".pdf":
+        return "application/pdf"
+    if ext in [".jpg", ".jpeg"]:
+        return "image/jpeg"
+    if ext == ".png":
+        return "image/png"
+    if ext in [".xlsx", ".xlsm"]:
+        return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    if ext == ".xls":
+        return "application/vnd.ms-excel"
+    if ext == ".docx":
+        return "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    if ext == ".doc":
+        return "application/msword"
+    if ext == ".csv":
+        return "text/csv"
+    return "application/octet-stream"
+
+
+def render_job_documents_panel(job_id, allow_upload=True, allow_delete=True, key_prefix="job_docs"):
+    st.markdown("### Plans / Specs / Job Documents")
+
+    if allow_upload:
+        with st.expander("Upload plans, specs, colour schedules or scope documents", expanded=True):
+            doc_type = st.selectbox(
+                "Document Type",
+                [
+                    "Architectural Plans",
+                    "Specifications",
+                    "Colour Schedule",
+                    "Scope of Works",
+                    "Quote / Estimate",
+                    "Purchase Order",
+                    "Variation",
+                    "Completion / Sign-off",
+                    "Safety / SWMS",
+                    "Other",
+                ],
+                key=f"{key_prefix}_document_type_{job_id}",
+            )
+            doc_notes = st.text_area("Document Notes", key=f"{key_prefix}_document_notes_{job_id}")
+            uploaded_documents = st.file_uploader(
+                "Upload one or more files",
+                type=["pdf", "doc", "docx", "xls", "xlsx", "csv", "jpg", "jpeg", "png", "webp"],
+                accept_multiple_files=True,
+                key=f"{key_prefix}_file_uploader_{job_id}",
+            )
+
+            if st.button("Upload Document(s) to This Job", key=f"{key_prefix}_upload_button_{job_id}"):
+                if not uploaded_documents:
+                    st.error("Choose at least one file to upload.")
+                else:
+                    saved_count = 0
+                    for uploaded_file in uploaded_documents:
+                        try:
+                            save_uploaded_job_document(job_id, uploaded_file, doc_type, notes=doc_notes)
+                            saved_count += 1
+                        except Exception as e:
+                            st.error(f"Could not upload {uploaded_file.name}: {e}")
+                    if saved_count:
+                        st.success(f"Uploaded {saved_count} document(s) to this job folder.")
+                        refresh()
+
+    documents_df = df_query("""
+        SELECT id,
+               document_type AS 'Document Type',
+               file_name AS 'File Name',
+               file_path,
+               created_at AS 'Created At',
+               notes AS 'Notes'
+        FROM job_documents
+        WHERE job_id = ?
+        ORDER BY id DESC
+    """, (job_id,))
+
+    if documents_df.empty:
+        st.info("No plans, specs or documents have been attached to this job yet.")
+        return
+
+    st.markdown("### Attached Documents")
+    for _, doc in documents_df.iterrows():
+        doc_id = int(doc["id"])
+        file_name = str(doc["File Name"] or "")
+        file_path = str(doc["file_path"] or "")
+        document_type = str(doc["Document Type"] or "Document")
+        notes = str(doc["Notes"] or "")
+
+        with st.container(border=True):
+            st.markdown(f"**{document_type}**")
+            st.write(file_name)
+            st.caption(f"Created: {doc['Created At']}")
+            if notes:
+                st.caption(notes)
+
+            cols = st.columns([1, 1]) if allow_delete else st.columns([1])
+            if os.path.exists(file_path):
+                with open(file_path, "rb") as f:
+                    cols[0].download_button(
+                        label="Download",
+                        data=f,
+                        file_name=file_name,
+                        mime=download_mime_for_file(file_name),
+                        key=f"{key_prefix}_download_{doc_id}",
+                    )
+            else:
+                cols[0].warning("File path not found on disk.")
+
+            if allow_delete:
+                delete_confirm = st.checkbox("Delete this document", key=f"{key_prefix}_delete_confirm_{doc_id}")
+                if cols[1].button("Delete", key=f"{key_prefix}_delete_button_{doc_id}"):
+                    if not delete_confirm:
+                        st.error("Tick the delete checkbox first.")
+                    else:
+                        delete_job_document(doc_id)
+                        st.success("Document deleted.")
+                        refresh()
+
+
 def generate_equipment_checklist_pdf(job_id):
     job = get_job_details_for_pdf(job_id)
 
@@ -2404,16 +2719,19 @@ def employee_portal():
 
             st.markdown("### Job Schedule")
             employee_schedule_df = df_query("""
-                SELECT s.schedule_date AS 'Date',
+                SELECT COALESCE(NULLIF(s.period_type, ''), 'Single Day') AS 'Schedule Type',
+                       COALESCE(NULLIF(s.period_start, ''), s.schedule_date) AS 'From Date',
+                       COALESCE(NULLIF(s.period_end, ''), s.schedule_date) AS 'Week Ending / To Date',
                        s.start_time AS 'Start',
                        s.finish_time AS 'Finish',
-                       e.name AS 'Employee',
+                       COALESCE(s.planned_hours, 0) AS 'Planned Hours',
+                       e.name AS 'Staff Member',
                        s.site_role AS 'Role',
                        s.notes AS 'Notes'
                 FROM staff_schedule s
                 LEFT JOIN employees e ON e.id = s.employee_id
                 WHERE s.job_id = ?
-                ORDER BY s.schedule_date, s.start_time
+                ORDER BY COALESCE(NULLIF(s.period_start, ''), s.schedule_date), s.start_time
             """, (selected_job_id,))
             if employee_schedule_df.empty:
                 st.info("No staff schedule has been saved for this job yet.")
@@ -3397,24 +3715,55 @@ def calculate_hours_from_times(start_time, finish_time, break_minutes):
         return 0.0
 
 
-def save_timesheet_entry(job_id, employee_id, work_date, start_time, finish_time, break_minutes, total_hours, work_type, notes):
+def save_timesheet_entry(job_id, employee_id, work_date, start_time, finish_time, break_minutes, total_hours, work_type, notes, period_type="Single Day", period_start="", period_end=""):
     user = get_current_user() or {}
     submitted_by = user.get("username", "")
     submitted_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+    period_type = str(period_type or "Single Day")
+    period_start = str(period_start or work_date)
+    period_end = str(period_end or work_date)
+
+    period_note = ""
+    if period_type == "Week Ending":
+        period_note = f"Week entry from {period_start} to week ending {period_end}. "
+
     execute("""
         INSERT INTO timesheet_entries
         (job_id, employee_id, work_date, start_time, finish_time, break_minutes, total_hours,
-         work_type, submitted_by, submitted_at, status, notes)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (job_id, employee_id, work_date, start_time, finish_time, break_minutes, total_hours,
-          work_type, submitted_by, submitted_at, "Submitted", notes))
+         work_type, submitted_by, submitted_at, status, notes, period_type, period_start, period_end)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        job_id,
+        employee_id,
+        work_date,
+        start_time,
+        finish_time,
+        break_minutes,
+        total_hours,
+        work_type,
+        submitted_by,
+        submitted_at,
+        "Submitted",
+        period_note + str(notes or ""),
+        period_type,
+        period_start,
+        period_end,
+    ))
 
     execute("""
-        INSERT INTO wage_entries (job_id, employee_id, work_date, hours, notes)
-        VALUES (?, ?, ?, ?, ?)
-    """, (job_id, employee_id, work_date, total_hours,
-          f"Timesheet: {start_time}-{finish_time}, break {break_minutes} min. {notes}"))
+        INSERT INTO wage_entries (job_id, employee_id, work_date, hours, notes, period_type, period_start, period_end)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        job_id,
+        employee_id,
+        work_date,
+        total_hours,
+        f"Timesheet: {period_type}. {period_note}{notes}",
+        period_type,
+        period_start,
+        period_end,
+    ))
 
 
 def timesheet_entry_form(employee_id=None, employee_restricted=False, key_prefix="timesheet"):
@@ -3443,14 +3792,39 @@ def timesheet_entry_form(employee_id=None, employee_restricted=False, key_prefix
             selected_employee = st.selectbox("Employee", list(employee_options.keys()), key=f"{key_prefix}_employee")
             selected_employee_id = employee_options[selected_employee]
 
-        col1, col2, col3, col4 = st.columns(4)
-        work_date = col1.text_input("Date", value=str(date.today()), key=f"{key_prefix}_date")
-        start_time = col2.text_input("Start Time", value="07:00", key=f"{key_prefix}_start")
-        finish_time = col3.text_input("Finish Time", value="15:30", key=f"{key_prefix}_finish")
-        break_minutes = col4.number_input("Break Minutes", min_value=0.0, step=15.0, value=30.0, key=f"{key_prefix}_break")
+        period_type = st.radio(
+            "Entry Type",
+            ["Single Day", "Week Ending"],
+            horizontal=True,
+            key=f"{key_prefix}_period_type",
+        )
 
-        calculated_hours = calculate_hours_from_times(start_time, finish_time, break_minutes)
-        total_hours = st.number_input("Total Hours", min_value=0.0, step=0.25, value=float(calculated_hours), key=f"{key_prefix}_hours")
+        if period_type == "Single Day":
+            col1, col2, col3, col4 = st.columns(4)
+            work_day = col1.date_input("Date", value=date.today(), key=f"{key_prefix}_date")
+            start_time = col2.text_input("Start Time", value="07:00", key=f"{key_prefix}_start")
+            finish_time = col3.text_input("Finish Time", value="15:30", key=f"{key_prefix}_finish")
+            break_minutes = col4.number_input("Break Minutes", min_value=0.0, step=15.0, value=30.0, key=f"{key_prefix}_break")
+            calculated_hours = calculate_hours_from_times(start_time, finish_time, break_minutes)
+            total_hours = st.number_input("Total Hours", min_value=0.0, step=0.25, value=float(calculated_hours), key=f"{key_prefix}_hours")
+            work_date = str(work_day)
+            period_start = str(work_day)
+            period_end = str(work_day)
+        else:
+            col1, col2, col3 = st.columns(3)
+            default_week_end = date.today()
+            default_week_start = default_week_end - timedelta(days=4)
+            from_date = col1.date_input("From Date", value=default_week_start, key=f"{key_prefix}_from_date")
+            week_ending = col2.date_input("Week Ending", value=default_week_end, key=f"{key_prefix}_week_ending")
+            total_hours = col3.number_input("Total Hours for This Job / Week", min_value=0.0, step=0.25, value=38.0, key=f"{key_prefix}_week_hours")
+            start_time = ""
+            finish_time = ""
+            break_minutes = 0.0
+            work_date = str(from_date)
+            period_start = str(from_date)
+            period_end = str(week_ending)
+            st.caption("Use this when the employee was on the same job for the full week. It saves one total-hours entry instead of daily entries.")
+
         work_type = st.selectbox("Work Type", ["Painting", "Prep", "Spraying", "Touch-ups", "Travel", "Site Setup", "Other"], key=f"{key_prefix}_work_type")
         notes = st.text_area("Notes", key=f"{key_prefix}_notes")
         submitted = st.form_submit_button("Submit Timesheet")
@@ -3458,11 +3832,25 @@ def timesheet_entry_form(employee_id=None, employee_restricted=False, key_prefix
         if submitted:
             if total_hours <= 0:
                 st.error("Total hours must be greater than 0.")
+            elif period_type == "Week Ending" and period_end < period_start:
+                st.error("Week ending date must be after the from date.")
             else:
-                save_timesheet_entry(job_options[selected_job], selected_employee_id, work_date, start_time, finish_time, break_minutes, total_hours, work_type, notes)
+                save_timesheet_entry(
+                    job_options[selected_job],
+                    selected_employee_id,
+                    work_date,
+                    start_time,
+                    finish_time,
+                    break_minutes,
+                    total_hours,
+                    work_type,
+                    notes,
+                    period_type=period_type,
+                    period_start=period_start,
+                    period_end=period_end,
+                )
                 st.success("Timesheet submitted and linked to the selected job.")
                 refresh()
-
 
 def timesheets_page(employee_restricted=False):
     st.header("Timesheets")
@@ -3479,7 +3867,10 @@ def timesheets_page(employee_restricted=False):
             timesheet_entry_form(employee_id=current_employee_id, employee_restricted=True, key_prefix="employee_timesheet")
         with tab_my:
             my_df = df_query("""
-                SELECT t.work_date AS 'Date', j.job_no AS 'Job No', j.job_name AS 'Job Name',
+                SELECT COALESCE(NULLIF(t.period_type, ''), 'Single Day') AS 'Period',
+                       COALESCE(NULLIF(t.period_start, ''), t.work_date) AS 'From Date',
+                       COALESCE(NULLIF(t.period_end, ''), t.work_date) AS 'Week Ending / To Date',
+                       j.job_no AS 'Job No', j.job_name AS 'Job Name',
                        t.start_time AS 'Start', t.finish_time AS 'Finish', t.break_minutes AS 'Break Minutes',
                        t.total_hours AS 'Hours', t.work_type AS 'Work Type', t.status AS 'Status', t.notes AS 'Notes'
                 FROM timesheet_entries t
@@ -3496,7 +3887,11 @@ def timesheets_page(employee_restricted=False):
         timesheet_entry_form(key_prefix="admin_timesheet")
     with tab_review:
         df = df_query("""
-            SELECT t.id, t.work_date AS 'Date', j.job_no AS 'Job No', j.job_name AS 'Job Name', e.name AS 'Employee',
+            SELECT t.id,
+                   COALESCE(NULLIF(t.period_type, ''), 'Single Day') AS 'Period',
+                   COALESCE(NULLIF(t.period_start, ''), t.work_date) AS 'From Date',
+                   COALESCE(NULLIF(t.period_end, ''), t.work_date) AS 'Week Ending / To Date',
+                   j.job_no AS 'Job No', j.job_name AS 'Job Name', e.name AS 'Employee',
                    t.start_time AS 'Start', t.finish_time AS 'Finish', t.break_minutes AS 'Break Minutes',
                    t.total_hours AS 'Hours', t.work_type AS 'Work Type', t.status AS 'Status',
                    t.submitted_by AS 'Submitted By', t.submitted_at AS 'Submitted At', t.notes AS 'Notes'
@@ -3510,7 +3905,7 @@ def timesheets_page(employee_restricted=False):
             st.info("No timesheets submitted yet.")
         else:
             st.dataframe(df.drop(columns=["id"]), width="stretch", hide_index=True)
-            options = {f"{r['Date']} - {r['Employee']} - {r['Job No']} - {r['Hours']} hrs": int(r["id"]) for _, r in df.iterrows()}
+            options = {f"{r['From Date']} to {r['Week Ending / To Date']} - {r['Employee']} - {r['Job No']} - {r['Hours']} hrs": int(r["id"]) for _, r in df.iterrows()}
             selected = st.selectbox("Select timesheet to approve/delete", list(options.keys()))
             selected_id = options[selected]
             col1, col2, col3 = st.columns(3)
@@ -3534,7 +3929,10 @@ def timesheets_page(employee_restricted=False):
             selected_job = st.selectbox("Select Job", list(job_options.keys()), key="timesheet_by_job_select")
             selected_job_id = job_options[selected_job]
             by_job = df_query("""
-                SELECT t.work_date AS 'Date', e.name AS 'Employee', t.start_time AS 'Start', t.finish_time AS 'Finish',
+                SELECT COALESCE(NULLIF(t.period_type, ''), 'Single Day') AS 'Period',
+                       COALESCE(NULLIF(t.period_start, ''), t.work_date) AS 'From Date',
+                       COALESCE(NULLIF(t.period_end, ''), t.work_date) AS 'Week Ending / To Date',
+                       e.name AS 'Employee', t.start_time AS 'Start', t.finish_time AS 'Finish',
                        t.break_minutes AS 'Break Minutes', t.total_hours AS 'Hours', t.work_type AS 'Work Type',
                        t.status AS 'Status', t.notes AS 'Notes'
                 FROM timesheet_entries t
@@ -6722,7 +7120,7 @@ def pb_control_daily_dashboard(df):
 
 def pb_control_job_health(df):
     st.subheader("Job Health Score")
-    st.caption("Green = on track, Orange = needs attention, Red = margin/schedule/data risk.")
+    st.caption("Green = on track, Orange = needs attention, Red = margin/schedule/data risk. The entire job line is coloured to match the health score.")
 
     status_filter = st.selectbox("Status Filter", ["All"] + sorted([str(x) for x in df["Status"].fillna("").unique() if str(x).strip()]), key="health_status_filter")
     filtered = df.copy()
@@ -6733,8 +7131,21 @@ def pb_control_job_health(df):
     filtered = filtered[filtered["Health"].isin(health_filter)]
 
     cols = ["Job No", "Job Name", "Builder / Client", "Status", "Health", "Health Notes", "Adjusted Contract Value", "Total Actual Cost", "Gross Profit %", "Cost to Date %", "Remaining Labour Hours", "End Date"]
-    st.dataframe(filtered[cols], width="stretch", hide_index=True)
+    health_view = filtered[cols].copy()
 
+    def colour_health_row(row):
+        health = str(row.get("Health", "")).lower()
+        if health == "red":
+            style = "background-color: #fee2e2; color: #111827; font-weight: 700;"
+        elif health == "orange":
+            style = "background-color: #ffedd5; color: #111827; font-weight: 600;"
+        elif health == "green":
+            style = "background-color: #dcfce7; color: #111827;"
+        else:
+            style = "background-color: #ffffff; color: #111827;"
+        return [style for _ in row]
+
+    st.dataframe(health_view.style.apply(colour_health_row, axis=1), width="stretch", hide_index=True)
 
 def pb_control_budget_lock(df):
     st.subheader("Job Budget Lock-In")
@@ -6905,6 +7316,8 @@ def pb_control_invoice_claims():
 
 def pb_control_staff_schedule():
     st.subheader("Staff Scheduling Board")
+    st.caption("Schedule one day or one full week against a job. Use the grouped views to quickly see staff by job or jobs by staff.")
+
     job_options = get_job_options()
     employee_options = get_employee_options(active_only=True)
     if not job_options or not employee_options:
@@ -6913,45 +7326,131 @@ def pb_control_staff_schedule():
 
     with st.expander("Add Staff Schedule Entry", expanded=True):
         with st.form("staff_schedule_form"):
-            c1, c2 = st.columns(2)
-            selected_job = c1.selectbox("Job", list(job_options.keys()), key="schedule_job")
-            selected_employee = c2.selectbox("Employee", list(employee_options.keys()), key="schedule_employee")
-            c3, c4, c5 = st.columns(3)
-            schedule_date = c3.text_input("Date", value=str(date.today()))
-            start_time = c4.text_input("Start Time", value="07:00")
-            finish_time = c5.text_input("Finish Time", value="15:00")
-            site_role = st.selectbox("Site Role", ["Painter", "Leading Hand", "Supervisor", "Apprentice", "Subcontractor", "Other"])
-            notes = st.text_area("Notes")
+            selected_job = st.selectbox("Job", list(job_options.keys()), key="schedule_job")
+            selected_employees = st.multiselect(
+                "Staff Members",
+                list(employee_options.keys()),
+                default=[list(employee_options.keys())[0]] if employee_options else [],
+                key="schedule_employees_multi",
+            )
+
+            period_type = st.radio(
+                "Schedule Type",
+                ["Single Day", "Week Ending"],
+                horizontal=True,
+                key="schedule_period_type",
+            )
+
+            if period_type == "Single Day":
+                c1, c2, c3, c4 = st.columns(4)
+                schedule_day = c1.date_input("Date", value=date.today(), key="schedule_single_day")
+                start_time = c2.text_input("Start Time", value="07:00", key="schedule_single_start")
+                finish_time = c3.text_input("Finish Time", value="15:00", key="schedule_single_finish")
+                planned_hours = c4.number_input("Planned Hours", min_value=0.0, step=0.25, value=7.5, key="schedule_single_hours")
+                schedule_date = str(schedule_day)
+                period_start = str(schedule_day)
+                period_end = str(schedule_day)
+            else:
+                c1, c2, c3, c4 = st.columns(4)
+                default_week_end = date.today()
+                default_week_start = default_week_end - timedelta(days=4)
+                from_date = c1.date_input("From Date", value=default_week_start, key="schedule_week_from")
+                week_ending = c2.date_input("Week Ending", value=default_week_end, key="schedule_week_ending")
+                start_time = c3.text_input("Daily Start", value="07:00", key="schedule_week_start_time")
+                finish_time = c4.text_input("Daily Finish", value="15:00", key="schedule_week_finish_time")
+                planned_hours = st.number_input("Planned Hours Per Staff Member for This Job / Week", min_value=0.0, step=0.25, value=38.0, key="schedule_week_hours")
+                schedule_date = str(from_date)
+                period_start = str(from_date)
+                period_end = str(week_ending)
+                st.caption("Use this when the same staff are planned on the same job for the week. It creates one weekly schedule row per staff member.")
+
+            site_role = st.selectbox("Site Role", ["Painter", "Leading Hand", "Supervisor", "Apprentice", "Subcontractor", "Other"], key="schedule_site_role")
+            notes = st.text_area("Notes", key="schedule_notes")
             submitted = st.form_submit_button("Save Schedule Entry")
+
         if submitted:
-            execute("""
-                INSERT INTO staff_schedule
-                (job_id, employee_id, schedule_date, start_time, finish_time, site_role, notes, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (job_options[selected_job], employee_options[selected_employee], schedule_date, start_time, finish_time, site_role, notes, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-            st.success("Schedule entry saved.")
-            refresh()
+            if not selected_employees:
+                st.error("Select at least one staff member.")
+            elif period_type == "Week Ending" and period_end < period_start:
+                st.error("Week ending date must be after the from date.")
+            else:
+                saved_count = 0
+                for employee_name in selected_employees:
+                    execute("""
+                        INSERT INTO staff_schedule
+                        (job_id, employee_id, schedule_date, start_time, finish_time, site_role, notes, created_at,
+                         period_type, period_start, period_end, planned_hours)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        job_options[selected_job],
+                        employee_options[employee_name],
+                        schedule_date,
+                        start_time,
+                        finish_time,
+                        site_role,
+                        notes,
+                        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        period_type,
+                        period_start,
+                        period_end,
+                        planned_hours,
+                    ))
+                    saved_count += 1
+                st.success(f"Saved {saved_count} schedule entr{'y' if saved_count == 1 else 'ies'} for {selected_job}.")
+                refresh()
 
     c1, c2 = st.columns(2)
-    start_filter = c1.text_input("From Date", value=str(date.today()))
-    end_filter = c2.text_input("To Date", value=str(date.today() + timedelta(days=7)))
+    start_filter = str(c1.date_input("From Date", value=date.today(), key="schedule_filter_from"))
+    end_filter = str(c2.date_input("To / Week Ending", value=date.today() + timedelta(days=7), key="schedule_filter_to"))
+
     schedule = df_query("""
         SELECT s.id AS 'ID',
-               s.schedule_date AS 'Date',
-               e.name AS 'Employee',
+               COALESCE(NULLIF(s.period_type, ''), 'Single Day') AS 'Schedule Type',
+               COALESCE(NULLIF(s.period_start, ''), s.schedule_date) AS 'From Date',
+               COALESCE(NULLIF(s.period_end, ''), s.schedule_date) AS 'Week Ending / To Date',
                j.job_no AS 'Job No',
                j.job_name AS 'Job Name',
+               COALESCE(j.site_address, '') AS 'Site Address',
+               e.name AS 'Staff Member',
                s.start_time AS 'Start',
                s.finish_time AS 'Finish',
+               COALESCE(s.planned_hours, 0) AS 'Planned Hours',
                s.site_role AS 'Role',
                s.notes AS 'Notes'
         FROM staff_schedule s
         JOIN jobs j ON j.id = s.job_id
         JOIN employees e ON e.id = s.employee_id
-        WHERE s.schedule_date >= ? AND s.schedule_date <= ?
-        ORDER BY s.schedule_date, e.name
-    """, (start_filter, end_filter))
-    st.dataframe(schedule, width="stretch", hide_index=True)
+        WHERE COALESCE(NULLIF(s.period_start, ''), s.schedule_date) <= ?
+          AND COALESCE(NULLIF(s.period_end, ''), s.schedule_date) >= ?
+        ORDER BY COALESCE(NULLIF(s.period_start, ''), s.schedule_date), j.job_no, e.name
+    """, (end_filter, start_filter))
+
+    if schedule.empty:
+        st.info("No staff schedule entries found for this date range.")
+        return
+
+    schedule["Job"] = schedule["Job No"].astype(str) + " - " + schedule["Job Name"].astype(str)
+
+    st.markdown("### Schedule by Job")
+    by_job = schedule.groupby(["From Date", "Week Ending / To Date", "Job", "Site Address", "Role"], dropna=False).agg({
+        "Staff Member": lambda s: ", ".join(sorted([str(x) for x in s if str(x).strip()])),
+        "Planned Hours": "sum",
+    }).reset_index().rename(columns={"Staff Member": "Staff"})
+    st.dataframe(by_job, width="stretch", hide_index=True)
+
+    st.markdown("### Schedule by Staff")
+    by_staff = schedule.groupby(["Staff Member", "From Date", "Week Ending / To Date"], dropna=False).agg({
+        "Job": lambda s: ", ".join(sorted(set([str(x) for x in s if str(x).strip()]))),
+        "Planned Hours": "sum",
+    }).reset_index().rename(columns={"Job": "Jobs"})
+    st.dataframe(by_staff, width="stretch", hide_index=True)
+
+    st.markdown("### Full Schedule Detail")
+    detail_cols = [
+        "Schedule Type", "From Date", "Week Ending / To Date", "Job No", "Job Name",
+        "Staff Member", "Role", "Start", "Finish", "Planned Hours", "Site Address", "Notes"
+    ]
+    st.dataframe(schedule[detail_cols], width="stretch", hide_index=True)
 
 
 def pb_control_timesheet_approval():
@@ -6960,7 +7459,9 @@ def pb_control_timesheet_approval():
 
     pending = df_query("""
         SELECT t.id AS 'ID',
-               t.work_date AS 'Date',
+               COALESCE(NULLIF(t.period_type, ''), 'Single Day') AS 'Period',
+               COALESCE(NULLIF(t.period_start, ''), t.work_date) AS 'From Date',
+               COALESCE(NULLIF(t.period_end, ''), t.work_date) AS 'Week Ending / To Date',
                e.name AS 'Employee',
                j.job_no AS 'Job No',
                j.job_name AS 'Job Name',
@@ -6975,7 +7476,7 @@ def pb_control_timesheet_approval():
         JOIN jobs j ON j.id = t.job_id
         JOIN employees e ON e.id = t.employee_id
         WHERE COALESCE(t.status, 'Submitted') = 'Submitted'
-        ORDER BY t.work_date DESC, t.id DESC
+        ORDER BY COALESCE(NULLIF(t.period_start, ''), t.work_date) DESC, t.id DESC
     """)
 
     if pending.empty:
@@ -6983,7 +7484,7 @@ def pb_control_timesheet_approval():
         return
 
     st.dataframe(pending, width="stretch", hide_index=True)
-    options = {f"{row['Date']} | {row['Employee']} | {row['Job No']} | {row['Hours']} hrs | ID {row['ID']}": int(row["ID"]) for _, row in pending.iterrows()}
+    options = {f"{row['From Date']} to {row['Week Ending / To Date']} | {row['Employee']} | {row['Job No']} | {row['Hours']} hrs | ID {row['ID']}": int(row["ID"]) for _, row in pending.iterrows()}
     selected = st.multiselect("Select timesheets", list(options.keys()), key="approve_timesheets_select")
     selected_ids = [options[x] for x in selected]
 
@@ -7131,6 +7632,1580 @@ def current_username():
 
 
 
+
+
+# =============================
+# PAINTING TAKE-OFF GENERATOR
+# =============================
+
+TAKEOFF_LABOUR_CATEGORIES = ["Walls", "Ceilings", "Woodwork", "Features", "Exterior", "Prep / Other"]
+TAKEOFF_AREA_TYPES = ["Internal", "External"]
+TAKEOFF_FINISH_TYPES = ["Standard Paint", "Gloss / Enamel", "Primer / Sealer", "Texture / Membrane", "Other"]
+TAKEOFF_COVERAGE_M2_PER_LITRE = 12.0
+GLOSS_FRAME_LITRES_PER_ITEM = 0.10
+GLOSS_DOOR_LITRES_PER_ITEM = 0.50
+GLOSS_SKIRTING_LITRES_PER_100LM = 1.00
+TAKEOFF_SUBSTRATES = [
+    "Internal Plasterboard Walls",
+    "Internal Plasterboard Ceilings",
+    "Set Plaster / Bulkheads",
+    "Timber Doors",
+    "Grooved Doors",
+    "Door Frames / Jambs",
+    "Skirting / Architraves",
+    "Feature Wall",
+    "Dark Colour Areas",
+    "External Render",
+    "Hebel / AAC Panels",
+    "Weatherboards",
+    "FC Cladding",
+    "Brick / Masonry",
+    "Eaves / Soffits",
+    "External Timberwork",
+    "Metalwork / Handrails",
+    "Fence / Screens",
+    "Other",
+]
+TAKEOFF_FLAGS = [
+    "High ceilings",
+    "Grooved doors",
+    "Multiple colours",
+    "Dark colour",
+    "Feature colour",
+    "Texture coating",
+    "Difficult access",
+    "EWP / scaffold required",
+    "Patch / prep heavy",
+    "External weather exposure",
+]
+
+DEFAULT_TAKEOFF_PRODUCTIVITY = {
+    ("Internal", "Walls"): 9.0,
+    ("Internal", "Ceilings"): 8.0,
+    ("Internal", "Woodwork"): 3.0,
+    ("Internal", "Features"): 6.0,
+    ("Internal", "Prep / Other"): 6.0,
+    ("External", "Walls"): 7.0,
+    ("External", "Ceilings"): 5.0,
+    ("External", "Woodwork"): 3.0,
+    ("External", "Features"): 5.0,
+    ("External", "Exterior"): 6.0,
+    ("External", "Prep / Other"): 5.0,
+}
+
+
+def takeoff_default_productivity(area_type, labour_category, substrate=""):
+    area_type = str(area_type or "Internal")
+    labour_category = str(labour_category or "Walls")
+    substrate = str(substrate or "").lower()
+    if "grooved" in substrate or "door" in substrate or "timber" in substrate:
+        return 3.0
+    if "ceiling" in substrate or "soffit" in substrate or "eave" in substrate:
+        return 8.0 if area_type == "Internal" else 5.0
+    if "feature" in substrate or "dark" in substrate:
+        return 5.5
+    return DEFAULT_TAKEOFF_PRODUCTIVITY.get((area_type, labour_category), 7.0)
+
+
+def takeoff_line_hours(m2, coats, productivity_m2_per_hour):
+    try:
+        m2 = float(m2 or 0)
+        coats = float(coats or 0)
+        productivity = float(productivity_m2_per_hour or 0)
+    except Exception:
+        return 0.0
+    if productivity <= 0:
+        return 0.0
+    # Productivity is m2 per labour hour per coat. Two coats doubles the hours.
+    return round((m2 * coats) / productivity, 2)
+
+
+def takeoff_line_paint_litres(substrate, labour_category, m2, coats, finish_type="Standard Paint", element_count=0, lineal_metres=0):
+    """Calculate a basic paint allowance from each take-off line.
+
+    General paint uses 12m² coverage per litre per coat.
+    Gloss/enamel woodwork can use simple item allowances:
+      - 100ml per window frame, door frame, jamb, architrave or similar item
+      - 500ml per door
+      - 1 litre per 100 lineal metres of skirting
+    If item counts/lineal metres are not provided, it falls back to the 12m²/L rule.
+    """
+    try:
+        m2 = float(m2 or 0)
+        coats = float(coats or 0)
+        element_count = float(element_count or 0)
+        lineal_metres = float(lineal_metres or 0)
+    except Exception:
+        return 0.0
+
+    substrate_text = str(substrate or "").lower()
+    category_text = str(labour_category or "").lower()
+    finish_text = str(finish_type or "").lower()
+    is_gloss = any(x in finish_text for x in ["gloss", "enamel", "woodwork"]) or category_text == "woodwork"
+
+    if is_gloss:
+        if "skirting" in substrate_text and lineal_metres > 0:
+            return round((lineal_metres / 100.0) * GLOSS_SKIRTING_LITRES_PER_100LM, 2)
+        if ("door" in substrate_text and not any(x in substrate_text for x in ["frame", "jamb"])) and element_count > 0:
+            return round(element_count * GLOSS_DOOR_LITRES_PER_ITEM, 2)
+        if any(x in substrate_text for x in ["frame", "jamb", "architrave", "window"]) and element_count > 0:
+            return round(element_count * GLOSS_FRAME_LITRES_PER_ITEM, 2)
+
+    if TAKEOFF_COVERAGE_M2_PER_LITRE <= 0:
+        return 0.0
+    return round((m2 * coats) / TAKEOFF_COVERAGE_M2_PER_LITRE, 2)
+
+
+def takeoff_paint_summary_from_lines(lines_df):
+    if lines_df is None or lines_df.empty:
+        return {
+            "total_paint_litres": 0.0,
+            "standard_paint_litres": 0.0,
+            "gloss_paint_litres": 0.0,
+            "by_finish": pd.DataFrame(),
+            "by_substrate": pd.DataFrame(),
+        }
+    df = lines_df.copy()
+    for col in ["m2", "Coats", "Item Count", "Lineal Metres", "Paint Litres"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+    if "Paint Litres" not in df.columns:
+        df["Paint Litres"] = df.apply(lambda r: takeoff_line_paint_litres(
+            r.get("Substrate", ""), r.get("Labour Category", ""), r.get("m2", 0), r.get("Coats", 0),
+            r.get("Finish Type", "Standard Paint"), r.get("Item Count", 0), r.get("Lineal Metres", 0)
+        ), axis=1)
+    finish_col = "Finish Type" if "Finish Type" in df.columns else None
+    gloss_mask = df[finish_col].astype(str).str.lower().str.contains("gloss|enamel", regex=True, na=False) if finish_col else df["Labour Category"].astype(str).str.lower().eq("woodwork")
+    standard_l = float(df.loc[~gloss_mask, "Paint Litres"].sum()) if not df.empty else 0.0
+    gloss_l = float(df.loc[gloss_mask, "Paint Litres"].sum()) if not df.empty else 0.0
+    by_finish = pd.DataFrame()
+    by_substrate = pd.DataFrame()
+    if finish_col:
+        by_finish = df.groupby(["Finish Type"], dropna=False).agg({"Paint Litres": "sum", "m2": "sum"}).reset_index()
+    if "Substrate" in df.columns:
+        by_substrate = df.groupby(["Area", "Substrate"], dropna=False).agg({"Paint Litres": "sum", "m2": "sum"}).reset_index()
+    return {
+        "total_paint_litres": round(float(df["Paint Litres"].sum()), 2),
+        "standard_paint_litres": round(standard_l, 2),
+        "gloss_paint_litres": round(gloss_l, 2),
+        "by_finish": by_finish,
+        "by_substrate": by_substrate,
+    }
+
+
+def next_takeoff_no(job_id):
+    job_no = get_job_no_for_id(job_id)
+    existing = df_query("SELECT COUNT(*) AS c FROM painting_takeoff_packages WHERE job_id = ?", (job_id,))
+    next_num = int(existing.iloc[0]["c"] or 0) + 1 if not existing.empty else 1
+    return f"TO-{safe_file_name(job_no)}-{next_num:02d}"
+
+
+def create_takeoff_package(job_id, method="Manual", source_documents="", assumptions="", ai_notes="", notes=""):
+    takeoff_no = next_takeoff_no(job_id)
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    execute("""
+        INSERT INTO painting_takeoff_packages
+        (job_id, takeoff_no, takeoff_date, status, source_documents, generated_method, assumptions,
+         ai_notes, created_by, created_at, updated_at, notes)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        job_id,
+        takeoff_no,
+        str(date.today()),
+        "Draft",
+        source_documents,
+        method,
+        assumptions,
+        ai_notes,
+        current_username(),
+        now,
+        now,
+        notes,
+    ))
+    created = df_query("SELECT id FROM painting_takeoff_packages WHERE job_id = ? AND takeoff_no = ? ORDER BY id DESC LIMIT 1", (job_id, takeoff_no))
+    if created.empty:
+        raise ValueError("Could not create take-off package.")
+    return int(created.iloc[0]["id"])
+
+
+def recalc_takeoff_package(package_id):
+    lines = df_query("""
+        SELECT area_type, substrate, labour_category, m2, coats, productivity_m2_per_hour, labour_hours,
+               COALESCE(finish_type, 'Standard Paint') AS finish_type,
+               COALESCE(element_count, 0) AS element_count,
+               COALESCE(lineal_metres, 0) AS lineal_metres,
+               COALESCE(paint_litres, 0) AS paint_litres
+        FROM painting_takeoff_lines
+        WHERE package_id = ?
+    """, (package_id,))
+
+    if lines.empty:
+        vals = dict(
+            interior=0, exterior=0, walls=0, ceilings=0, woodwork=0, features=0,
+            exterior_hours=0, total=0, total_paint=0, standard_paint=0, gloss_paint=0
+        )
+    else:
+        for col in ["m2", "coats", "labour_hours", "element_count", "lineal_metres", "paint_litres"]:
+            lines[col] = pd.to_numeric(lines[col], errors="coerce").fillna(0)
+        # Backfill paint litres for older lines that pre-date the paint calculator.
+        lines["calc_paint_litres"] = lines.apply(lambda r: takeoff_line_paint_litres(
+            r.get("substrate", ""), r.get("labour_category", ""), r.get("m2", 0), r.get("coats", 0),
+            r.get("finish_type", "Standard Paint"), r.get("element_count", 0), r.get("lineal_metres", 0)
+        ), axis=1)
+        lines["paint_litres_final"] = lines.apply(lambda r: float(r["paint_litres"]) if float(r["paint_litres"] or 0) > 0 else float(r["calc_paint_litres"]), axis=1)
+        gloss_mask = lines["finish_type"].astype(str).str.lower().str.contains("gloss|enamel", regex=True, na=False) | lines["labour_category"].astype(str).str.lower().eq("woodwork")
+        vals = {
+            "interior": float(lines[lines["area_type"].astype(str).str.lower() == "internal"]["m2"].sum()),
+            "exterior": float(lines[lines["area_type"].astype(str).str.lower() == "external"]["m2"].sum()),
+            "walls": float(lines[lines["labour_category"].astype(str).str.lower() == "walls"]["labour_hours"].sum()),
+            "ceilings": float(lines[lines["labour_category"].astype(str).str.lower() == "ceilings"]["labour_hours"].sum()),
+            "woodwork": float(lines[lines["labour_category"].astype(str).str.lower() == "woodwork"]["labour_hours"].sum()),
+            "features": float(lines[lines["labour_category"].astype(str).str.lower() == "features"]["labour_hours"].sum()),
+            "exterior_hours": float(lines[lines["area_type"].astype(str).str.lower() == "external"]["labour_hours"].sum()),
+            "total": float(lines["labour_hours"].sum()),
+            "total_paint": float(lines["paint_litres_final"].sum()),
+            "standard_paint": float(lines.loc[~gloss_mask, "paint_litres_final"].sum()),
+            "gloss_paint": float(lines.loc[gloss_mask, "paint_litres_final"].sum()),
+        }
+
+    execute("""
+        UPDATE painting_takeoff_packages
+        SET interior_total_m2 = ?, exterior_total_m2 = ?, wall_labour_hours = ?, ceiling_labour_hours = ?,
+            woodwork_labour_hours = ?, feature_labour_hours = ?, exterior_labour_hours = ?, total_labour_hours = ?,
+            total_paint_litres = ?, standard_paint_litres = ?, gloss_paint_litres = ?, updated_at = ?
+        WHERE id = ?
+    """, (
+        round(vals["interior"], 2),
+        round(vals["exterior"], 2),
+        round(vals["walls"], 2),
+        round(vals["ceilings"], 2),
+        round(vals["woodwork"], 2),
+        round(vals["features"], 2),
+        round(vals["exterior_hours"], 2),
+        round(vals["total"], 2),
+        round(vals["total_paint"], 2),
+        round(vals["standard_paint"], 2),
+        round(vals["gloss_paint"], 2),
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        package_id,
+    ))
+
+
+def add_takeoff_line(package_id, area_type, location_area, substrate, labour_category, m2, coats, productivity, flags, notes, finish_type="Standard Paint", element_count=0, lineal_metres=0):
+    labour_hours = takeoff_line_hours(m2, coats, productivity)
+    paint_litres = takeoff_line_paint_litres(substrate, labour_category, m2, coats, finish_type, element_count, lineal_metres)
+    execute("""
+        INSERT INTO painting_takeoff_lines
+        (package_id, area_type, location_area, substrate, labour_category, m2, coats,
+         productivity_m2_per_hour, labour_hours, finish_type, element_count, lineal_metres, paint_litres, flags, notes, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        package_id,
+        area_type,
+        location_area,
+        substrate,
+        labour_category,
+        float(m2 or 0),
+        float(coats or 0),
+        float(productivity or 0),
+        labour_hours,
+        finish_type,
+        float(element_count or 0),
+        float(lineal_metres or 0),
+        paint_litres,
+        flags,
+        notes,
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    ))
+    recalc_takeoff_package(package_id)
+
+
+def takeoff_source_documents(job_id):
+    return df_query("""
+        SELECT id, document_type AS "Document Type", file_name AS "File Name", file_path, created_at AS "Created At", notes AS "Notes"
+        FROM job_documents
+        WHERE job_id = ?
+        ORDER BY id DESC
+    """, (job_id,))
+
+
+def extract_text_from_pdf_file(file_path, max_pages=25, max_chars=45000):
+    text_parts = []
+    try:
+        reader = PdfReader(file_path)
+        for page_index, page in enumerate(reader.pages[:max_pages]):
+            try:
+                page_text = page.extract_text() or ""
+            except Exception:
+                page_text = ""
+            if page_text.strip():
+                text_parts.append(f"\n--- PAGE {page_index + 1} ---\n{page_text}")
+            if sum(len(x) for x in text_parts) >= max_chars:
+                break
+    except Exception as e:
+        return "", f"Could not read PDF text from {os.path.basename(file_path)}: {e}"
+    extracted = "\n".join(text_parts).strip()
+    return extracted[:max_chars], None
+
+
+def collect_takeoff_context_from_documents(job_id, selected_doc_ids=None):
+    docs = takeoff_source_documents(job_id)
+    if selected_doc_ids:
+        selected_doc_ids = {int(x) for x in selected_doc_ids}
+        docs = docs[docs["id"].astype(int).isin(selected_doc_ids)]
+
+    context_parts = []
+    warnings = []
+    used_names = []
+    for _, doc in docs.iterrows():
+        file_path = str(doc.get("file_path") or "")
+        file_name = str(doc.get("File Name") or os.path.basename(file_path))
+        ext = os.path.splitext(file_name)[1].lower()
+        if ext != ".pdf":
+            warnings.append(f"Skipped {file_name}: only PDF text extraction is available inside the app for now.")
+            continue
+        if not os.path.exists(file_path):
+            warnings.append(f"Skipped {file_name}: file is missing from storage.")
+            continue
+        extracted, err = extract_text_from_pdf_file(file_path)
+        if err:
+            warnings.append(err)
+        elif extracted:
+            context_parts.append(f"DOCUMENT: {file_name}\nTYPE: {doc.get('Document Type', '')}\n{extracted}")
+            used_names.append(file_name)
+        else:
+            warnings.append(f"No readable text found in {file_name}. This may be a scanned/image plan.")
+
+    return "\n\n".join(context_parts)[:60000], used_names, warnings
+
+
+def parse_ai_takeoff_json(ai_text):
+    raw = str(ai_text or "").strip()
+    if not raw:
+        return None, "AI returned an empty response."
+    candidates = [raw]
+    fence = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", raw, flags=re.DOTALL | re.IGNORECASE)
+    if fence:
+        candidates.insert(0, fence.group(1))
+    brace = re.search(r"(\{.*\})", raw, flags=re.DOTALL)
+    if brace:
+        candidates.append(brace.group(1))
+    last_error = "Could not find valid JSON in the AI response."
+    for candidate in candidates:
+        try:
+            return json.loads(candidate), None
+        except Exception as e:
+            last_error = str(e)
+    return None, last_error
+
+
+def generate_ai_takeoff_lines(job_id, selected_doc_ids=None, extra_scope_notes=""):
+    context_text, used_names, warnings = collect_takeoff_context_from_documents(job_id, selected_doc_ids)
+    if not context_text.strip():
+        return None, "No readable PDF text was found in the selected documents. Upload text-based plans/specs or add lines manually.", warnings
+
+    job = get_job_details_for_pdf(job_id) or {}
+    system_text = """
+You are a professional painting estimator for Premier Brushworks. Create a painting take-off draft from the provided plans/specs text.
+Only use areas, dimensions, room schedules, wall types, finishes, door/window schedules or explicit scope details that are present in the context. Do not invent quantities.
+If exact m2 cannot be calculated from the text, make a conservative line with m2 0 and explain what measurement is missing in notes.
+Return only valid JSON. No markdown. No commentary outside JSON.
+"""
+    prompt = f"""
+Prepare a draft painting take-off for this job.
+
+JOB:
+{job.get('job_no','')} - {job.get('job_name','')}
+Address: {job.get('site_address','')}
+Builder/Client: {job.get('builder_client','')}
+
+EXTRA SCOPE NOTES FROM USER:
+{extra_scope_notes}
+
+Return JSON in this exact shape:
+{{
+  "assumptions": "short assumptions and measurement limitations",
+  "ai_notes": "important warnings such as high ceilings, grooved doors, dark colours, multiple colours, EWP/scaffold, texture coating",
+  "lines": [
+    {{
+      "area_type": "Internal or External",
+      "location_area": "room/elevation/level/area",
+      "substrate": "substrate to be painted",
+      "labour_category": "Walls, Ceilings, Woodwork, Features, Exterior or Prep / Other",
+      "m2": 0,
+      "coats": 2,
+      "productivity_m2_per_hour": 8,
+      "finish_type": "Standard Paint or Gloss / Enamel",
+      "element_count": 0,
+      "lineal_metres": 0,
+      "flags": "comma separated flags",
+      "notes": "brief scope/measurement notes"
+    }}
+  ]
+}}
+
+Important: Include separate lines for internal walls, ceilings, woodwork/doors, feature/dark colour areas, and external substrates when the information is available.
+For paint requirements, standard paint is calculated later at 12m² per litre per coat. For gloss/enamel lines, include element_count where the plans/schedules show door quantities, window frame quantities, door frame/jamb quantities, architrave quantities or similar. For skirting lines, include lineal_metres where available. Do not invent counts or lineal metres.
+"""
+    answer, err = jobhub_ai_answer(prompt, context_text)
+    if err:
+        return None, err, warnings
+    data, parse_err = parse_ai_takeoff_json(answer)
+    if parse_err:
+        return {"raw_ai_response": answer, "assumptions": "AI response could not be parsed into lines.", "ai_notes": parse_err, "lines": []}, None, warnings
+    data["_used_names"] = used_names
+    return data, None, warnings
+
+
+def save_ai_takeoff_package(job_id, ai_data, selected_doc_names=None):
+    selected_doc_names = selected_doc_names or ai_data.get("_used_names") or []
+    assumptions = str(ai_data.get("assumptions", "") or "")
+    ai_notes = str(ai_data.get("ai_notes", "") or "")
+    if ai_data.get("raw_ai_response"):
+        ai_notes = (ai_notes + "\n\nRAW AI RESPONSE:\n" + str(ai_data.get("raw_ai_response")))[:12000]
+    package_id = create_takeoff_package(
+        job_id,
+        method="AI Draft from uploaded plans/specs",
+        source_documents="; ".join(selected_doc_names),
+        assumptions=assumptions,
+        ai_notes=ai_notes,
+        notes="Generated as editable draft. Review against drawings before pricing.",
+    )
+    for line in ai_data.get("lines", []) or []:
+        area_type = str(line.get("area_type", "Internal") or "Internal")
+        if area_type not in TAKEOFF_AREA_TYPES:
+            area_type = "External" if "ext" in area_type.lower() else "Internal"
+        category = str(line.get("labour_category", "Walls") or "Walls")
+        if category not in TAKEOFF_LABOUR_CATEGORIES:
+            category = "Exterior" if area_type == "External" else "Walls"
+        substrate = str(line.get("substrate", "") or "Other")
+        productivity = float(line.get("productivity_m2_per_hour") or takeoff_default_productivity(area_type, category, substrate))
+        finish_type = str(line.get("finish_type") or ("Gloss / Enamel" if category == "Woodwork" else "Standard Paint"))
+        if finish_type not in TAKEOFF_FINISH_TYPES:
+            finish_type = "Gloss / Enamel" if "gloss" in finish_type.lower() or category == "Woodwork" else "Standard Paint"
+        add_takeoff_line(
+            package_id,
+            area_type,
+            str(line.get("location_area", "") or ""),
+            substrate,
+            category,
+            float(line.get("m2") or 0),
+            float(line.get("coats") or 2),
+            productivity,
+            str(line.get("flags", "") or ""),
+            str(line.get("notes", "") or ""),
+            finish_type=finish_type,
+            element_count=float(line.get("element_count") or 0),
+            lineal_metres=float(line.get("lineal_metres") or 0),
+        )
+    recalc_takeoff_package(package_id)
+    return package_id
+
+
+def takeoff_summary_data(package_id):
+    pkg = df_query("SELECT * FROM painting_takeoff_packages WHERE id = ?", (package_id,))
+    lines = df_query("""
+        SELECT id AS "ID", area_type AS "Area", location_area AS "Location / Area", substrate AS "Substrate",
+               labour_category AS "Labour Category", m2 AS "m2", coats AS "Coats",
+               productivity_m2_per_hour AS "m2 / Labour Hr / Coat", labour_hours AS "Labour Hours",
+               COALESCE(finish_type, 'Standard Paint') AS "Finish Type",
+               COALESCE(element_count, 0) AS "Item Count",
+               COALESCE(lineal_metres, 0) AS "Lineal Metres",
+               COALESCE(paint_litres, 0) AS "Paint Litres",
+               flags AS "Flags", notes AS "Notes"
+        FROM painting_takeoff_lines
+        WHERE package_id = ?
+        ORDER BY area_type, labour_category, location_area, id
+    """, (package_id,))
+    if not lines.empty:
+        for col in ["m2", "Coats", "m2 / Labour Hr / Coat", "Labour Hours", "Item Count", "Lineal Metres", "Paint Litres"]:
+            lines[col] = pd.to_numeric(lines[col], errors="coerce").fillna(0)
+        # Older records may have 0L saved. Recalculate display litres from the rule when needed.
+        lines["Paint Litres"] = lines.apply(lambda r: float(r["Paint Litres"]) if float(r["Paint Litres"] or 0) > 0 else takeoff_line_paint_litres(
+            r.get("Substrate", ""), r.get("Labour Category", ""), r.get("m2", 0), r.get("Coats", 0),
+            r.get("Finish Type", "Standard Paint"), r.get("Item Count", 0), r.get("Lineal Metres", 0)
+        ), axis=1)
+    return pkg, lines
+
+
+def takeoff_export_excel(package_id):
+    pkg, lines = takeoff_summary_data(package_id)
+    if pkg.empty:
+        raise ValueError("Take-off package not found.")
+    pkg_row = pkg.iloc[0]
+    job = df_query("""
+        SELECT j.job_no AS "Job No", j.job_name AS "Job Name", COALESCE(bc.name, '') AS "Builder / Client", j.site_address AS "Site Address"
+        FROM jobs j
+        LEFT JOIN builders_clients bc ON bc.id = j.builder_client_id
+        WHERE j.id = ?
+    """, (int(pkg_row["job_id"]),))
+
+    lines_export = lines.drop(columns=["ID"]) if not lines.empty else pd.DataFrame(columns=[
+        "Area", "Location / Area", "Substrate", "Labour Category", "m2", "Coats", "m2 / Labour Hr / Coat",
+        "Labour Hours", "Finish Type", "Item Count", "Lineal Metres", "Paint Litres", "Flags", "Notes"
+    ])
+
+    by_area = pd.DataFrame()
+    by_labour = pd.DataFrame()
+    by_paint_finish = pd.DataFrame()
+    by_paint_substrate = pd.DataFrame()
+    if not lines_export.empty:
+        by_area = lines_export.groupby(["Area", "Substrate"], dropna=False).agg({"m2": "sum", "Labour Hours": "sum", "Paint Litres": "sum"}).reset_index()
+        by_labour = lines_export.groupby(["Area", "Labour Category"], dropna=False).agg({"m2": "sum", "Labour Hours": "sum", "Paint Litres": "sum"}).reset_index()
+        by_paint_finish = lines_export.groupby(["Finish Type"], dropna=False).agg({"Paint Litres": "sum", "m2": "sum", "Item Count": "sum", "Lineal Metres": "sum"}).reset_index()
+        by_paint_substrate = lines_export.groupby(["Area", "Substrate", "Finish Type"], dropna=False).agg({"Paint Litres": "sum", "m2": "sum", "Item Count": "sum", "Lineal Metres": "sum"}).reset_index()
+
+    summary = pd.DataFrame([
+        {"Metric": "Internal m2", "Value": float(pkg_row.get("interior_total_m2") or 0)},
+        {"Metric": "External m2", "Value": float(pkg_row.get("exterior_total_m2") or 0)},
+        {"Metric": "Wall Labour Hours", "Value": float(pkg_row.get("wall_labour_hours") or 0)},
+        {"Metric": "Ceiling Labour Hours", "Value": float(pkg_row.get("ceiling_labour_hours") or 0)},
+        {"Metric": "Woodwork Labour Hours", "Value": float(pkg_row.get("woodwork_labour_hours") or 0)},
+        {"Metric": "Feature Labour Hours", "Value": float(pkg_row.get("feature_labour_hours") or 0)},
+        {"Metric": "Exterior Labour Hours", "Value": float(pkg_row.get("exterior_labour_hours") or 0)},
+        {"Metric": "Total Labour Hours", "Value": float(pkg_row.get("total_labour_hours") or 0)},
+        {"Metric": "Total Paint Required Litres", "Value": float(pkg_row.get("total_paint_litres") or lines_export.get("Paint Litres", pd.Series(dtype=float)).sum() if not lines_export.empty else 0)},
+        {"Metric": "Standard Paint Litres", "Value": float(pkg_row.get("standard_paint_litres") or 0)},
+        {"Metric": "Gloss / Enamel Litres", "Value": float(pkg_row.get("gloss_paint_litres") or 0)},
+    ])
+
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        if not job.empty:
+            job.to_excel(writer, index=False, sheet_name="Job")
+        pd.DataFrame([pkg_row.to_dict()]).to_excel(writer, index=False, sheet_name="Takeoff Package")
+        summary.to_excel(writer, index=False, sheet_name="Summary")
+        by_area.to_excel(writer, index=False, sheet_name="Substrate Totals")
+        by_labour.to_excel(writer, index=False, sheet_name="Labour Breakdown")
+        by_paint_finish.to_excel(writer, index=False, sheet_name="Paint by Finish")
+        by_paint_substrate.to_excel(writer, index=False, sheet_name="Paint by Substrate")
+        lines_export.to_excel(writer, index=False, sheet_name="Takeoff Lines")
+        for ws in writer.book.worksheets:
+            for column_cells in ws.columns:
+                max_len = 0
+                col_letter = column_cells[0].column_letter
+                for cell in column_cells:
+                    value = "" if cell.value is None else str(cell.value)
+                    max_len = max(max_len, len(value))
+                ws.column_dimensions[col_letter].width = min(max(max_len + 2, 12), 52)
+    output.seek(0)
+    return output.getvalue()
+
+
+def app_float(value, default=0.0):
+    try:
+        if value is None or value == "":
+            return float(default)
+        return float(value)
+    except Exception:
+        return float(default)
+
+
+def get_adjusted_contract_value(job_id):
+    job_df = df_query("SELECT contract_value FROM jobs WHERE id = ?", (job_id,))
+    contract_value = app_float(job_df.iloc[0]["contract_value"] if not job_df.empty else 0)
+    try:
+        variations_df = df_query("""
+            SELECT COALESCE(SUM(COALESCE(amount_ex_gst, 0)), 0) AS total
+            FROM job_variations
+            WHERE job_id = ? AND LOWER(COALESCE(status, '')) = 'approved'
+        """, (job_id,))
+        approved_variations = app_float(variations_df.iloc[0]["total"] if not variations_df.empty else 0)
+    except Exception:
+        approved_variations = 0.0
+    return contract_value + approved_variations
+
+
+def get_billed_amount_for_job(job_id):
+    try:
+        billed_df = df_query("""
+            SELECT COALESCE(SUM(COALESCE(amount_ex_gst, 0)), 0) AS total
+            FROM invoice_claims
+            WHERE job_id = ?
+              AND LOWER(COALESCE(status, '')) NOT IN ('draft', 'void', 'cancelled', 'rejected')
+        """, (job_id,))
+        return app_float(billed_df.iloc[0]["total"] if not billed_df.empty else 0)
+    except Exception:
+        return 0.0
+
+
+def latest_takeoff_package_for_job(job_id):
+    packages = df_query("""
+        SELECT id
+        FROM painting_takeoff_packages
+        WHERE job_id = ?
+        ORDER BY id DESC
+        LIMIT 1
+    """, (job_id,))
+    if packages.empty:
+        return None
+    return int(packages.iloc[0]["id"])
+
+
+def run_twenty_point_takeoff_check(package_id, save_result=True):
+    pkg, lines = takeoff_summary_data(package_id)
+    if pkg.empty:
+        return pd.DataFrame()
+
+    p = pkg.iloc[0]
+    lines_df = lines.copy()
+    if not lines_df.empty:
+        for col in ["m2", "Coats", "m2 / Labour Hr / Coat", "Labour Hours"]:
+            lines_df[col] = pd.to_numeric(lines_df[col], errors="coerce").fillna(0)
+
+    checks = []
+
+    def add_check(no, name, passed, severity="Warning", notes=""):
+        checks.append({
+            "No": no,
+            "Check": name,
+            "Result": "Pass" if passed else severity,
+            "Notes": notes if notes else ("OK" if passed else "Needs review"),
+        })
+
+    total_lines = len(lines_df)
+    total_m2 = float(lines_df["m2"].sum()) if not lines_df.empty else 0.0
+    total_hours = float(lines_df["Labour Hours"].sum()) if not lines_df.empty else 0.0
+    internal_m2 = float(lines_df[lines_df["Area"].astype(str).str.lower() == "internal"]["m2"].sum()) if not lines_df.empty else 0.0
+    external_m2 = float(lines_df[lines_df["Area"].astype(str).str.lower() == "external"]["m2"].sum()) if not lines_df.empty else 0.0
+    categories = set(lines_df["Labour Category"].astype(str).str.lower()) if not lines_df.empty else set()
+    substrates = set(lines_df["Substrate"].astype(str).str.lower()) if not lines_df.empty else set()
+    flags_text = " ".join(lines_df["Flags"].fillna("").astype(str).tolist()).lower() if not lines_df.empty else ""
+    notes_text = " ".join(lines_df["Notes"].fillna("").astype(str).tolist()).lower() if not lines_df.empty else ""
+    source_docs = str(p.get("source_documents") or "")
+    assumptions = str(p.get("assumptions") or "")
+    package_status = str(p.get("status") or "Draft")
+
+    add_check(1, "Take-off has lines", total_lines > 0, "Critical", f"{total_lines} line(s) found.")
+    add_check(2, "Total m² greater than zero", total_m2 > 0, "Critical", f"Total measured area: {total_m2:,.2f}m².")
+    add_check(3, "Every line has Internal / External", lines_df.empty or lines_df["Area"].astype(str).str.strip().ne("").all(), "Critical")
+    add_check(4, "Every line has a location / area", lines_df.empty or lines_df["Location / Area"].astype(str).str.strip().ne("").all(), "Warning")
+    add_check(5, "Every line has a substrate", lines_df.empty or lines_df["Substrate"].astype(str).str.strip().ne("").all(), "Critical")
+    add_check(6, "Every line has a labour category", lines_df.empty or lines_df["Labour Category"].astype(str).str.strip().ne("").all(), "Critical")
+    add_check(7, "Every line has positive coats", lines_df.empty or (lines_df["Coats"] > 0).all(), "Critical")
+    add_check(8, "Every line has positive productivity", lines_df.empty or (lines_df["m2 / Labour Hr / Coat"] > 0).all(), "Critical")
+    add_check(9, "Calculated labour hours are present", total_hours > 0, "Critical", f"Total labour hours: {total_hours:,.2f}.")
+    add_check(10, "Internal totals calculated", internal_m2 > 0, "Warning", f"Internal total: {internal_m2:,.2f}m².")
+    add_check(11, "External totals considered", external_m2 > 0 or "external" in assumptions.lower() or "external" in notes_text, "Warning", f"External total: {external_m2:,.2f}m².")
+    add_check(12, "Wall labour category reviewed", "walls" in categories, "Warning")
+    add_check(13, "Ceiling labour category reviewed", "ceilings" in categories or "ceiling" in substrates or "ceiling" in assumptions.lower(), "Warning")
+    add_check(14, "Woodwork / doors reviewed", "woodwork" in categories or "door" in " ".join(substrates) or "timber" in " ".join(substrates), "Warning")
+    add_check(15, "Feature / dark colours reviewed", "features" in categories or "feature" in flags_text or "dark" in flags_text or "feature" in assumptions.lower() or "dark" in assumptions.lower(), "Warning")
+    add_check(16, "High ceilings flagged where required", "high" in flags_text or "ceiling" not in assumptions.lower() or "height" not in assumptions.lower(), "Warning")
+    add_check(17, "Grooved doors / detailed doors flagged where required", "grooved" in flags_text or "grooved" not in notes_text, "Warning")
+    add_check(18, "Difficult access / EWP reviewed for exterior", external_m2 == 0 or "access" in flags_text or "ewp" in flags_text or "scaffold" in flags_text or "access" in assumptions.lower(), "Warning")
+    add_check(19, "Source documents recorded", bool(source_docs.strip()) or str(p.get("generated_method") or "").lower() == "manual", "Warning", source_docs or "Manual take-off or no source documents recorded.")
+    add_check(20, "Package has been reviewed before issue", package_status.lower() in ["reviewed", "issued"], "Warning", f"Current status: {package_status}.")
+
+    audit_df = pd.DataFrame(checks)
+    pass_count = int((audit_df["Result"] == "Pass").sum()) if not audit_df.empty else 0
+    score = round((pass_count / 20) * 100, 1)
+    if save_result:
+        notes = audit_df.to_json(orient="records")[:12000]
+        try:
+            execute("""
+                UPDATE painting_takeoff_packages
+                SET audit_score = ?, audit_notes = ?, audit_at = ?, updated_at = ?
+                WHERE id = ?
+            """, (score, notes, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), datetime.now().strftime("%Y-%m-%d %H:%M:%S"), package_id))
+        except Exception:
+            pass
+    return audit_df
+
+
+def render_takeoff_audit_panel(package_id, key_prefix="takeoff_audit"):
+    st.markdown("### 20-Point Take-off Check")
+    st.caption("This runs twenty practical estimating checks against the take-off before you rely on it for pricing, progress claims or labour planning.")
+    audit_df = run_twenty_point_takeoff_check(package_id, save_result=True)
+    if audit_df.empty:
+        st.info("No audit available for this take-off package.")
+        return
+    pass_count = int((audit_df["Result"] == "Pass").sum())
+    warning_count = int((audit_df["Result"] == "Warning").sum())
+    critical_count = int((audit_df["Result"] == "Critical").sum())
+    score = round((pass_count / 20) * 100, 1)
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Audit Score", f"{score:.1f}%")
+    c2.metric("Passed", pass_count)
+    c3.metric("Warnings", warning_count)
+    c4.metric("Critical", critical_count)
+    st.dataframe(audit_df, width="stretch", hide_index=True)
+
+
+def progress_package_options(job_id):
+    packages = df_query("""
+        SELECT id, takeoff_no, status, generated_method, interior_total_m2, exterior_total_m2, total_labour_hours
+        FROM painting_takeoff_packages
+        WHERE job_id = ?
+        ORDER BY id DESC
+    """, (job_id,))
+    if packages.empty:
+        return {}
+    return {
+        f"{row['takeoff_no']} - {row['status']} - {float(row['interior_total_m2'] or 0):,.0f}m² internal / {float(row['exterior_total_m2'] or 0):,.0f}m² external": int(row["id"])
+        for _, row in packages.iterrows()
+    }
+
+
+def ensure_progress_sections_for_package(package_id, reset_values=False):
+    pkg = df_query("SELECT * FROM painting_takeoff_packages WHERE id = ?", (package_id,))
+    if pkg.empty:
+        raise ValueError("Take-off package not found.")
+    job_id = int(pkg.iloc[0]["job_id"])
+    job_no = get_job_no_for_id(job_id)
+    lines = df_query("""
+        SELECT id, area_type, location_area, substrate, labour_category, m2, labour_hours
+        FROM painting_takeoff_lines
+        WHERE package_id = ?
+        ORDER BY area_type, labour_category, location_area, id
+    """, (package_id,))
+    if lines.empty:
+        return 0
+
+    adjusted_contract = get_adjusted_contract_value(job_id)
+    lines_calc = lines.copy()
+    lines_calc["m2"] = pd.to_numeric(lines_calc["m2"], errors="coerce").fillna(0)
+    lines_calc["labour_hours"] = pd.to_numeric(lines_calc["labour_hours"], errors="coerce").fillna(0)
+    basis_total = float(lines_calc["labour_hours"].sum()) or float(lines_calc["m2"].sum()) or 0.0
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    created_count = 0
+
+    for _, line in lines_calc.iterrows():
+        line_id = int(line["id"])
+        basis = app_float(line.get("labour_hours")) if app_float(line.get("labour_hours")) > 0 else app_float(line.get("m2"))
+        allocated = round((adjusted_contract * basis / basis_total), 2) if basis_total > 0 and adjusted_contract > 0 else 0.0
+        section_code = f"{safe_file_name(job_no)}-S{line_id}"
+        existing = df_query("""
+            SELECT id, allocated_value_ex_gst
+            FROM painting_progress_sections
+            WHERE takeoff_line_id = ?
+            ORDER BY id
+            LIMIT 1
+        """, (line_id,))
+        if existing.empty:
+            execute("""
+                INSERT INTO painting_progress_sections
+                (job_id, package_id, takeoff_line_id, section_code, area_type, location_area, substrate,
+                 labour_category, total_m2, allocated_value_ex_gst, completed_m2, completed_percent,
+                 status, notes, updated_by, updated_at, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                job_id, package_id, line_id, section_code,
+                str(line.get("area_type") or ""), str(line.get("location_area") or ""), str(line.get("substrate") or ""),
+                str(line.get("labour_category") or ""), app_float(line.get("m2")), allocated, 0.0, 0.0,
+                "Not Started", "", current_username(), now, now,
+            ))
+            created_count += 1
+        else:
+            progress_id = int(existing.iloc[0]["id"])
+            current_allocated = app_float(existing.iloc[0].get("allocated_value_ex_gst"))
+            use_allocated = allocated if reset_values or current_allocated <= 0 else current_allocated
+            execute("""
+                UPDATE painting_progress_sections
+                SET job_id = ?, package_id = ?, section_code = ?, area_type = ?, location_area = ?, substrate = ?,
+                    labour_category = ?, total_m2 = ?, allocated_value_ex_gst = ?, updated_at = ?
+                WHERE id = ?
+            """, (
+                job_id, package_id, section_code,
+                str(line.get("area_type") or ""), str(line.get("location_area") or ""), str(line.get("substrate") or ""),
+                str(line.get("labour_category") or ""), app_float(line.get("m2")), use_allocated, now, progress_id,
+            ))
+    return created_count
+
+
+def progress_sections_df(job_id, package_id=None):
+    params = [job_id]
+    where = "WHERE ps.job_id = ?"
+    if package_id:
+        where += " AND ps.package_id = ?"
+        params.append(package_id)
+    df = df_query(f"""
+        SELECT ps.id AS "ID",
+               ps.package_id AS "Package ID",
+               ps.takeoff_line_id AS "Takeoff Line ID",
+               ps.section_code AS "Section Code",
+               ps.area_type AS "Area",
+               ps.location_area AS "Location / Area",
+               ps.substrate AS "Substrate",
+               ps.labour_category AS "Labour Category",
+               ps.total_m2 AS "Total m2",
+               ps.completed_m2 AS "Completed m2",
+               (ps.total_m2 - ps.completed_m2) AS "Remaining m2",
+               ps.completed_percent AS "Completed %",
+               ps.allocated_value_ex_gst AS "Section Value Ex GST",
+               (ps.allocated_value_ex_gst * ps.completed_percent / 100.0) AS "Billable Value Ex GST",
+               tl.labour_hours AS "Total Labour Hours",
+               tl.paint_litres AS "Total Paint Litres",
+               tl.finish_type AS "Paint / Finish Type",
+               tl.coats AS "Coats",
+               tl.productivity_m2_per_hour AS "Productivity m2/hr",
+               tl.element_count AS "Door/Frame/Window Count",
+               tl.lineal_metres AS "Lineal Metres",
+               tl.flags AS "Flags",
+               ps.status AS "Status",
+               ps.notes AS "Notes",
+               ps.updated_by AS "Updated By",
+               ps.updated_at AS "Updated At"
+        FROM painting_progress_sections ps
+        LEFT JOIN painting_takeoff_lines tl ON tl.id = ps.takeoff_line_id
+        {where}
+        ORDER BY ps.area_type, ps.location_area, ps.substrate, ps.id
+    """, tuple(params))
+    if df.empty:
+        return df
+    numeric_cols = [
+        "Total m2", "Completed m2", "Remaining m2", "Completed %",
+        "Section Value Ex GST", "Billable Value Ex GST", "Total Labour Hours", "Total Paint Litres",
+        "Coats", "Productivity m2/hr", "Door/Frame/Window Count", "Lineal Metres"
+    ]
+    for col in numeric_cols:
+        if col not in df.columns:
+            df[col] = 0.0
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+    df["Remaining m2"] = (df["Total m2"] - df["Completed m2"]).clip(lower=0)
+    df["Completed Labour Hours"] = df.apply(lambda r: (app_float(r["Total Labour Hours"]) * app_float(r["Completed m2"]) / app_float(r["Total m2"])) if app_float(r["Total m2"]) > 0 else 0, axis=1)
+    df["Remaining Labour Hours"] = (df["Total Labour Hours"] - df["Completed Labour Hours"]).clip(lower=0)
+    df["Completed Paint Litres"] = df.apply(lambda r: (app_float(r["Total Paint Litres"]) * app_float(r["Completed m2"]) / app_float(r["Total m2"])) if app_float(r["Total m2"]) > 0 else 0, axis=1)
+    df["Remaining Paint Litres"] = (df["Total Paint Litres"] - df["Completed Paint Litres"]).clip(lower=0)
+    df["Remaining Value Ex GST"] = (df["Section Value Ex GST"] - df["Billable Value Ex GST"]).clip(lower=0)
+    return df
+
+def progress_model_summary(job_id, package_id=None):
+    sections = progress_sections_df(job_id, package_id)
+    if sections.empty:
+        return {
+            "total_m2": 0.0, "completed_m2": 0.0, "remaining_m2": 0.0, "completed_percent": 0.0,
+            "total_value": 0.0, "billable_value": 0.0, "billed_value": get_billed_amount_for_job(job_id),
+            "remaining_value": 0.0, "claim_available": 0.0,
+        }, sections
+
+    for col in ["Total m2", "Completed m2", "Remaining m2", "Completed %", "Section Value Ex GST", "Billable Value Ex GST"]:
+        sections[col] = pd.to_numeric(sections[col], errors="coerce").fillna(0)
+    total_m2 = float(sections["Total m2"].sum())
+    completed_m2 = float(sections["Completed m2"].sum())
+    completed_percent = round((completed_m2 / total_m2) * 100, 2) if total_m2 > 0 else 0.0
+    total_value = float(sections["Section Value Ex GST"].sum())
+    billable_value = float(sections["Billable Value Ex GST"].sum())
+    billed_value = get_billed_amount_for_job(job_id)
+    return {
+        "total_m2": total_m2,
+        "completed_m2": completed_m2,
+        "remaining_m2": max(total_m2 - completed_m2, 0.0),
+        "completed_percent": completed_percent,
+        "total_value": total_value,
+        "billable_value": billable_value,
+        "billed_value": billed_value,
+        "remaining_value": max(total_value - billable_value, 0.0),
+        "claim_available": billable_value - billed_value,
+    }, sections
+
+
+def update_progress_section(section_id, completed_m2, allocated_value, status, notes):
+    row_df = df_query("SELECT total_m2 FROM painting_progress_sections WHERE id = ?", (section_id,))
+    if row_df.empty:
+        raise ValueError("Progress section not found.")
+    total_m2 = app_float(row_df.iloc[0]["total_m2"])
+    completed_m2 = max(min(app_float(completed_m2), total_m2), 0.0) if total_m2 > 0 else max(app_float(completed_m2), 0.0)
+    completed_percent = round((completed_m2 / total_m2) * 100, 2) if total_m2 > 0 else 0.0
+    if completed_percent <= 0:
+        status = "Not Started"
+    elif completed_percent >= 99.99:
+        status = "Complete"
+    elif not status or status == "Not Started":
+        status = "In Progress"
+    execute("""
+        UPDATE painting_progress_sections
+        SET completed_m2 = ?, completed_percent = ?, allocated_value_ex_gst = ?, status = ?, notes = ?,
+            updated_by = ?, updated_at = ?
+        WHERE id = ?
+    """, (
+        completed_m2, completed_percent, app_float(allocated_value), status, notes,
+        current_username(), datetime.now().strftime("%Y-%m-%d %H:%M:%S"), section_id,
+    ))
+
+
+def progress_export_excel(job_id, package_id=None):
+    summary, sections = progress_model_summary(job_id, package_id)
+    job = df_query("""
+        SELECT j.job_no AS "Job No", j.job_name AS "Job Name", COALESCE(bc.name, '') AS "Builder / Client",
+               j.site_address AS "Site Address", j.contract_value AS "Contract Value Ex GST"
+        FROM jobs j
+        LEFT JOIN builders_clients bc ON bc.id = j.builder_client_id
+        WHERE j.id = ?
+    """, (job_id,))
+    summary_df = pd.DataFrame([{"Metric": k.replace("_", " ").title(), "Value": v} for k, v in summary.items()])
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        if not job.empty:
+            job.to_excel(writer, index=False, sheet_name="Job")
+        summary_df.to_excel(writer, index=False, sheet_name="Progress Summary")
+        sections.to_excel(writer, index=False, sheet_name="Progress Sections")
+        if not sections.empty:
+            by_substrate = sections.groupby(["Area", "Substrate"], dropna=False).agg({"Total m2": "sum", "Completed m2": "sum", "Billable Value Ex GST": "sum"}).reset_index()
+            by_substrate.to_excel(writer, index=False, sheet_name="By Substrate")
+        for ws in writer.book.worksheets:
+            for column_cells in ws.columns:
+                max_len = 0
+                col_letter = column_cells[0].column_letter
+                for cell in column_cells:
+                    value = "" if cell.value is None else str(cell.value)
+                    max_len = max(max_len, len(value))
+                ws.column_dimensions[col_letter].width = min(max(max_len + 2, 12), 52)
+    output.seek(0)
+    return output.getvalue()
+
+
+
+def progress_row_colour(status, selected=False):
+    status_text = str(status or "").lower()
+    if selected:
+        return "background-color: #dbeafe; font-weight: 700;"
+    if "complete" in status_text:
+        return "background-color: #dcfce7;"
+    if "progress" in status_text:
+        return "background-color: #fef9c3;"
+    if "hold" in status_text or "review" in status_text:
+        return "background-color: #ffedd5;"
+    return "background-color: #ffffff;"
+
+
+def style_progress_rows(df):
+    def apply_row(row):
+        selected = str(row.get("Selected", "")).strip() in ["✅", "True", "true", "1", "Yes"]
+        style = progress_row_colour(row.get("Status"), selected=selected)
+        return [style for _ in row]
+    return df.style.apply(apply_row, axis=1)
+
+
+def progress_section_label(row):
+    return (
+        f"{row.get('Section Code', '')} | {row.get('Area', '')} | {row.get('Location / Area', '')} | "
+        f"{row.get('Substrate', '')} | {app_float(row.get('Total m2')):,.1f}m² | "
+        f"{app_float(row.get('Section Value Ex GST')):,.0f} ex GST | {app_float(row.get('Completed %')):.1f}%"
+    )
+
+
+def progress_selection_summary(selected_df):
+    if selected_df is None or selected_df.empty:
+        return {
+            "selected_m2": 0.0, "completed_m2": 0.0, "remaining_m2": 0.0,
+            "selected_value": 0.0, "current_billable": 0.0, "available_if_complete": 0.0,
+            "labour_hours": 0.0, "remaining_labour_hours": 0.0,
+            "paint_litres": 0.0, "remaining_paint_litres": 0.0,
+        }
+    return {
+        "selected_m2": float(selected_df["Total m2"].sum()),
+        "completed_m2": float(selected_df["Completed m2"].sum()),
+        "remaining_m2": float(selected_df["Remaining m2"].sum()),
+        "selected_value": float(selected_df["Section Value Ex GST"].sum()),
+        "current_billable": float(selected_df["Billable Value Ex GST"].sum()),
+        "available_if_complete": float(selected_df["Remaining Value Ex GST"].sum()),
+        "labour_hours": float(selected_df["Total Labour Hours"].sum()),
+        "remaining_labour_hours": float(selected_df["Remaining Labour Hours"].sum()),
+        "paint_litres": float(selected_df["Total Paint Litres"].sum()),
+        "remaining_paint_litres": float(selected_df["Remaining Paint Litres"].sum()),
+    }
+
+
+def render_progress_visual_cards(display_sections, selected_ids, key_prefix="progress_cards"):
+    if display_sections.empty:
+        return
+    st.markdown("### Visual Job Model")
+    st.caption("Completed items stay green, in-progress items stay yellow and selected items are highlighted blue.")
+    cards = display_sections.copy().head(120)
+    chunks = [cards.iloc[i:i + 3] for i in range(0, len(cards), 3)]
+    for chunk_index, chunk in enumerate(chunks):
+        cols = st.columns(3)
+        for col, (_, row) in zip(cols, chunk.iterrows()):
+            status = str(row.get("Status") or "Not Started")
+            selected = int(row.get("ID")) in selected_ids
+            border = "#2563eb" if selected else ("#16a34a" if "complete" in status.lower() else "#f59e0b" if "progress" in status.lower() else "#d1d5db")
+            bg = "#eff6ff" if selected else ("#dcfce7" if "complete" in status.lower() else "#fef9c3" if "progress" in status.lower() else "#ffffff")
+            col.markdown(f"""
+                <div style="background:{bg}; border:2px solid {border}; border-radius:14px; padding:12px; margin-bottom:10px; min-height:150px;">
+                    <div style="font-weight:800; font-size:0.92rem; color:#111827;">{row.get('Location / Area', '')}</div>
+                    <div style="font-size:0.8rem; color:#374151; margin-top:4px;">{row.get('Area', '')} • {row.get('Substrate', '')}</div>
+                    <div style="font-size:0.8rem; color:#374151;">{row.get('Labour Category', '')}</div>
+                    <div style="font-size:1.05rem; font-weight:800; color:#111827; margin-top:8px;">{app_float(row.get('Completed %')):.1f}% complete</div>
+                    <div style="font-size:0.78rem; color:#374151; margin-top:4px;">{app_float(row.get('Total m2')):,.1f}m² • {pb_money(row.get('Section Value Ex GST'))}</div>
+                    <div style="font-size:0.75rem; color:#6b7280; margin-top:4px;">{status}</div>
+                </div>
+            """, unsafe_allow_html=True)
+
+def render_progress_billing_model(job_id, package_id=None, key_prefix="progress_model"):
+    if not package_id:
+        package_id = latest_takeoff_package_for_job(job_id)
+    if not package_id:
+        st.info("Create or generate a painting take-off first. The progress/billing model is built from the take-off lines.")
+        return
+
+    st.markdown("### Interactive Progress, Substrate & Billing Model")
+    st.caption("Select any itemised sections with your mouse, view the selected m², substrate breakdown, labour/material projection and dollar value, then mark selected work as complete or partially complete.")
+
+    c_model1, c_model2 = st.columns(2)
+    if c_model1.button("Generate / Refresh Model from Take-off", key=f"{key_prefix}_refresh_model_{job_id}_{package_id}"):
+        created = ensure_progress_sections_for_package(package_id, reset_values=False)
+        st.success(f"Progress model refreshed. {created} new section(s) created.")
+        refresh()
+    reset_values = c_model2.checkbox("Reset section values pro-rata from contract", key=f"{key_prefix}_reset_values_{job_id}_{package_id}")
+    if reset_values and c_model2.button("Apply Pro-rata Values", key=f"{key_prefix}_apply_reset_values_{job_id}_{package_id}"):
+        ensure_progress_sections_for_package(package_id, reset_values=True)
+        st.success("Section values reset from current contract value and approved variations.")
+        refresh()
+
+    sections_check = progress_sections_df(job_id, package_id)
+    if sections_check.empty:
+        ensure_progress_sections_for_package(package_id, reset_values=False)
+
+    summary, sections = progress_model_summary(job_id, package_id)
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Completed", f"{summary['completed_percent']:.1f}%")
+    c2.metric("Completed m²", f"{summary['completed_m2']:,.1f}")
+    c3.metric("Remaining m²", f"{summary['remaining_m2']:,.1f}")
+    c4.metric("Billable Value", pb_money(summary["billable_value"]))
+    c5.metric("Billed", pb_money(summary["billed_value"]))
+    st.progress(min(max(summary["completed_percent"] / 100, 0), 1))
+
+    claim_balance = summary["claim_available"]
+    if claim_balance > 0:
+        st.success(f"Estimated billable balance available: {pb_money(claim_balance)} ex GST.")
+    elif claim_balance < 0:
+        st.warning(f"Billed value is currently {pb_money(abs(claim_balance))} ahead of measured progress.")
+    else:
+        st.info("Billable value and billed value are currently balanced.")
+
+    if sections.empty:
+        st.info("No progress sections have been created yet.")
+        return
+
+    display_sections = sections.copy()
+    numeric_cols = [
+        "Total m2", "Completed m2", "Remaining m2", "Completed %", "Section Value Ex GST", "Billable Value Ex GST",
+        "Remaining Value Ex GST", "Total Labour Hours", "Completed Labour Hours", "Remaining Labour Hours",
+        "Total Paint Litres", "Completed Paint Litres", "Remaining Paint Litres"
+    ]
+    for col in numeric_cols:
+        if col not in display_sections.columns:
+            display_sections[col] = 0.0
+        display_sections[col] = pd.to_numeric(display_sections[col], errors="coerce").fillna(0)
+
+    selection_key = f"{key_prefix}_selected_section_ids_{job_id}_{package_id}"
+    selected_ids = [int(x) for x in st.session_state.get(selection_key, []) if str(x).isdigit() or isinstance(x, int)]
+
+    with st.sidebar.expander("Progress model selector", expanded=False):
+        st.caption("Filter and select the exact parts of the job you want to view or mark complete.")
+        area_values = sorted([str(x) for x in display_sections["Area"].fillna("").unique() if str(x).strip()])
+        substrate_values = sorted([str(x) for x in display_sections["Substrate"].fillna("").unique() if str(x).strip()])
+        labour_values = sorted([str(x) for x in display_sections["Labour Category"].fillna("").unique() if str(x).strip()])
+        status_values = sorted([str(x) for x in display_sections["Status"].fillna("").unique() if str(x).strip()])
+        area_filter = st.multiselect("Area", area_values, default=area_values, key=f"{key_prefix}_area_filter_{job_id}_{package_id}")
+        substrate_filter = st.multiselect("Substrate", substrate_values, default=substrate_values, key=f"{key_prefix}_substrate_filter_{job_id}_{package_id}")
+        labour_filter = st.multiselect("Labour", labour_values, default=labour_values, key=f"{key_prefix}_labour_filter_{job_id}_{package_id}")
+        status_filter = st.multiselect("Status", status_values, default=status_values, key=f"{key_prefix}_status_filter_{job_id}_{package_id}")
+
+    filtered_sections = display_sections.copy()
+    if area_filter:
+        filtered_sections = filtered_sections[filtered_sections["Area"].astype(str).isin(area_filter)]
+    if substrate_filter:
+        filtered_sections = filtered_sections[filtered_sections["Substrate"].astype(str).isin(substrate_filter)]
+    if labour_filter:
+        filtered_sections = filtered_sections[filtered_sections["Labour Category"].astype(str).isin(labour_filter)]
+    if status_filter:
+        filtered_sections = filtered_sections[filtered_sections["Status"].astype(str).isin(status_filter)]
+
+    section_labels = {progress_section_label(row): int(row["ID"]) for _, row in filtered_sections.iterrows()}
+    selected_label_defaults = [label for label, sid in section_labels.items() if sid in selected_ids]
+    with st.sidebar.expander("Selected itemised sections", expanded=True):
+        selected_labels = st.multiselect(
+            "Select / deselect sections",
+            list(section_labels.keys()),
+            default=selected_label_defaults,
+            key=f"{key_prefix}_section_multiselect_{job_id}_{package_id}",
+        )
+        selected_ids = [section_labels[label] for label in selected_labels]
+        if st.button("Clear selected sections", key=f"{key_prefix}_clear_selected_{job_id}_{package_id}"):
+            selected_ids = []
+            st.session_state[selection_key] = []
+            st.rerun()
+    st.session_state[selection_key] = selected_ids
+
+    st.markdown("### Mouse Select Sections")
+    st.caption("Tick rows to select sections. The selected value, labour, paint and substrate totals update below.")
+    selector_cols = [
+        "ID", "Section Code", "Area", "Location / Area", "Substrate", "Labour Category", "Total m2",
+        "Completed %", "Remaining m2", "Section Value Ex GST", "Billable Value Ex GST", "Remaining Value Ex GST", "Status"
+    ]
+    selector_df = filtered_sections[selector_cols].copy()
+    selector_df.insert(0, "Select", selector_df["ID"].astype(int).isin(selected_ids))
+    disabled_cols = [c for c in selector_df.columns if c != "Select"]
+    edited_selector = st.data_editor(
+        selector_df,
+        hide_index=True,
+        width="stretch",
+        disabled=disabled_cols,
+        key=f"{key_prefix}_mouse_selector_{job_id}_{package_id}",
+    )
+    try:
+        selected_ids = edited_selector.loc[edited_selector["Select"] == True, "ID"].astype(int).tolist()
+        st.session_state[selection_key] = selected_ids
+    except Exception:
+        pass
+
+    selected_df = display_sections[display_sections["ID"].astype(int).isin(selected_ids)].copy()
+    selected_summary = progress_selection_summary(selected_df)
+
+    st.markdown("### Selected Section Projection")
+    s1, s2, s3, s4 = st.columns(4)
+    s1.metric("Selected m²", f"{selected_summary['selected_m2']:,.1f}")
+    s2.metric("Selected Value", pb_money(selected_summary["selected_value"]))
+    s3.metric("Current Billable", pb_money(selected_summary["current_billable"]))
+    s4.metric("Extra Billable if Complete", pb_money(selected_summary["available_if_complete"]))
+
+    s5, s6, s7, s8 = st.columns(4)
+    s5.metric("Projected Labour", f"{selected_summary['labour_hours']:,.1f} hrs")
+    s6.metric("Remaining Labour", f"{selected_summary['remaining_labour_hours']:,.1f} hrs")
+    s7.metric("Projected Paint", f"{selected_summary['paint_litres']:,.1f} L")
+    s8.metric("Remaining Paint", f"{selected_summary['remaining_paint_litres']:,.1f} L")
+
+    if selected_df.empty:
+        st.info("Select one or more sections above to view substrate totals and mark them as complete.")
+    else:
+        st.markdown("#### Selected Breakdown by Substrate")
+        selected_by_substrate = selected_df.groupby(["Area", "Substrate", "Labour Category"], dropna=False).agg({
+            "Total m2": "sum",
+            "Completed m2": "sum",
+            "Remaining m2": "sum",
+            "Section Value Ex GST": "sum",
+            "Billable Value Ex GST": "sum",
+            "Remaining Value Ex GST": "sum",
+            "Total Labour Hours": "sum",
+            "Remaining Labour Hours": "sum",
+            "Total Paint Litres": "sum",
+            "Remaining Paint Litres": "sum",
+        }).reset_index()
+        st.dataframe(selected_by_substrate, width="stretch", hide_index=True)
+
+    st.markdown("### Mark Selected Work")
+    action_col1, action_col2, action_col3 = st.columns(3)
+    if action_col1.button("Mark Selected as Complete", key=f"{key_prefix}_mark_selected_complete_{job_id}_{package_id}", disabled=not bool(selected_ids), use_container_width=True):
+        for _, row in selected_df.iterrows():
+            update_progress_section(int(row["ID"]), app_float(row["Total m2"]), app_float(row["Section Value Ex GST"]), "Complete", str(row.get("Notes") or ""))
+        st.success("Selected sections marked as complete and will remain highlighted green.")
+        refresh()
+
+    bulk_percent = action_col2.number_input("Set selected to %", min_value=0.0, max_value=100.0, value=100.0, step=5.0, key=f"{key_prefix}_bulk_percent_{job_id}_{package_id}")
+    if action_col2.button("Apply % to Selected", key=f"{key_prefix}_apply_selected_percent_{job_id}_{package_id}", disabled=not bool(selected_ids), use_container_width=True):
+        for _, row in selected_df.iterrows():
+            completed_m2 = app_float(row["Total m2"]) * bulk_percent / 100.0
+            status = "Complete" if bulk_percent >= 99.99 else "In Progress" if bulk_percent > 0 else "Not Started"
+            update_progress_section(int(row["ID"]), completed_m2, app_float(row["Section Value Ex GST"]), status, str(row.get("Notes") or ""))
+        st.success(f"Selected sections updated to {bulk_percent:.1f}% complete.")
+        refresh()
+
+    selected_group_m2 = action_col3.number_input("Completed m² across selected", min_value=0.0, value=0.0, step=1.0, key=f"{key_prefix}_bulk_group_m2_{job_id}_{package_id}")
+    if action_col3.button("Apply m² Across Selected", key=f"{key_prefix}_apply_selected_m2_{job_id}_{package_id}", disabled=not bool(selected_ids), use_container_width=True):
+        total_selected_m2 = float(selected_df["Total m2"].sum()) if not selected_df.empty else 0.0
+        if total_selected_m2 <= 0:
+            st.error("Selected sections have no measurable m².")
+        else:
+            capped_group_m2 = min(max(selected_group_m2, 0.0), total_selected_m2)
+            for _, row in selected_df.iterrows():
+                section_total = app_float(row["Total m2"])
+                completed_m2 = section_total * capped_group_m2 / total_selected_m2
+                pct = completed_m2 / section_total * 100 if section_total else 0
+                status = "Complete" if pct >= 99.99 else "In Progress" if pct > 0 else "Not Started"
+                update_progress_section(int(row["ID"]), completed_m2, app_float(row["Section Value Ex GST"]), status, str(row.get("Notes") or ""))
+            st.success(f"{capped_group_m2:,.1f} completed m² allocated across selected sections.")
+            refresh()
+
+    render_progress_visual_cards(display_sections, selected_ids, key_prefix=f"{key_prefix}_cards_{job_id}_{package_id}")
+
+    st.markdown("### Progress by Substrate")
+    by_substrate = display_sections.groupby(["Area", "Substrate"], dropna=False).agg({
+        "Total m2": "sum",
+        "Completed m2": "sum",
+        "Remaining m2": "sum",
+        "Section Value Ex GST": "sum",
+        "Billable Value Ex GST": "sum",
+        "Remaining Value Ex GST": "sum",
+        "Total Labour Hours": "sum",
+        "Remaining Labour Hours": "sum",
+        "Total Paint Litres": "sum",
+        "Remaining Paint Litres": "sum",
+    }).reset_index()
+    by_substrate["Completed %"] = by_substrate.apply(lambda r: round((r["Completed m2"] / r["Total m2"] * 100), 2) if r["Total m2"] else 0, axis=1)
+    st.dataframe(by_substrate, width="stretch", hide_index=True)
+
+    st.markdown("### Update One Section Exactly")
+    section_options = {
+        f"{row['Section Code']} | {row['Area']} | {row['Location / Area']} | {row['Substrate']} | {float(row['Total m2'] or 0):,.1f}m² | {float(row['Completed %'] or 0):.1f}% complete": int(row["ID"])
+        for _, row in display_sections.iterrows()
+    }
+    selected_label = st.selectbox("Select section/substrate area", list(section_options.keys()), key=f"{key_prefix}_section_select_{job_id}_{package_id}")
+    selected_id = section_options[selected_label]
+    selected_row = display_sections[display_sections["ID"].astype(int) == int(selected_id)].iloc[0]
+
+    with st.form(f"{key_prefix}_update_form_{job_id}_{package_id}_{selected_id}"):
+        u1, u2, u3, u4 = st.columns(4)
+        total_m2 = app_float(selected_row["Total m2"])
+        current_completed = app_float(selected_row["Completed m2"])
+        current_percent = app_float(selected_row["Completed %"])
+        update_method = u1.selectbox("Update Method", ["Completed m²", "Completed %"], key=f"{key_prefix}_method_{selected_id}")
+        if update_method == "Completed %":
+            new_percent = u2.number_input("Completed %", min_value=0.0, max_value=100.0, step=5.0, value=float(current_percent), key=f"{key_prefix}_percent_{selected_id}")
+            new_completed_m2 = round(total_m2 * new_percent / 100, 2)
+            u3.metric("Completed m²", f"{new_completed_m2:,.2f}")
+        else:
+            new_completed_m2 = u2.number_input("Completed m²", min_value=0.0, max_value=float(max(total_m2, current_completed, 1.0)), step=1.0, value=float(current_completed), key=f"{key_prefix}_completed_m2_{selected_id}")
+            new_percent = round((new_completed_m2 / total_m2) * 100, 2) if total_m2 else 0.0
+            u3.metric("Completed %", f"{new_percent:.1f}%")
+        new_value = u4.number_input("Section Value Ex GST", min_value=0.0, step=100.0, value=float(app_float(selected_row["Section Value Ex GST"])), key=f"{key_prefix}_section_value_{selected_id}")
+        status_options = ["Not Started", "In Progress", "Complete", "On Hold", "Needs Review"]
+        current_status = str(selected_row.get("Status") or "Not Started")
+        status_index = status_options.index(current_status) if current_status in status_options else 0
+        status = st.selectbox("Status", status_options, index=status_index, key=f"{key_prefix}_status_{selected_id}")
+        notes = st.text_area("Notes / claim comments", value=str(selected_row.get("Notes") or ""), key=f"{key_prefix}_notes_{selected_id}")
+        save_update = st.form_submit_button("Save Section Progress")
+        if save_update:
+            update_progress_section(selected_id, new_completed_m2, new_value, status, notes)
+            st.success("Progress section updated.")
+            refresh()
+
+    st.markdown("### Full Progress Model")
+    full_model = display_sections.copy()
+    full_model["Selected"] = full_model["ID"].astype(int).isin(selected_ids).map({True: "✅", False: ""})
+    full_model_view = full_model.drop(columns=["ID", "Package ID", "Takeoff Line ID"], errors="ignore")
+    st.dataframe(style_progress_rows(full_model_view), width="stretch", hide_index=True)
+
+    st.markdown("### Claim / Billing")
+    claim_col1, claim_col2 = st.columns(2)
+    claim_col1.metric("Measured Billable Value", pb_money(summary["billable_value"]))
+    claim_col2.metric("Unbilled / Available to Claim", pb_money(summary["claim_available"]))
+    claim_description = f"Progress claim from measured painting progress to {summary['completed_percent']:.1f}% complete"
+    confirm_claim = st.checkbox("Confirm create draft claim for available billable balance", key=f"{key_prefix}_confirm_claim_{job_id}_{package_id}")
+    if st.button("Create Draft Claim from Progress", key=f"{key_prefix}_create_claim_{job_id}_{package_id}"):
+        if not confirm_claim:
+            st.error("Tick confirm first so a duplicate claim is not created accidentally.")
+        elif summary["claim_available"] <= 0:
+            st.error("There is no positive unbilled value available to claim.")
+        else:
+            claim_no = f"PC-{date.today().strftime('%Y%m%d')}-{int(package_id)}"
+            execute("""
+                INSERT INTO invoice_claims
+                (job_id, claim_no, description, amount_ex_gst, invoice_date, due_date, paid_date, status, notes, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                job_id, claim_no, claim_description, round(summary["claim_available"], 2),
+                str(date.today()), "", "", "Draft",
+                f"Generated from progress model package ID {package_id}. Review before sending.",
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            ))
+            st.success(f"Draft claim {claim_no} created. Review it in Control Centre → Invoice / Claim Tracker before sending.")
+            refresh()
+
+    export_bytes = progress_export_excel(job_id, package_id)
+    st.download_button(
+        "Download Progress / Billing Model Excel",
+        data=export_bytes,
+        file_name=f"{safe_file_name(get_job_no_for_id(job_id))}_Progress_Billing_Model.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key=f"{key_prefix}_export_{job_id}_{package_id}",
+    )
+
+def progress_billing_model_page(default_job_id=None):
+    pb_page_header(
+        "Progress / Billing Model",
+        "Generate a basic job model from the take-off, mark completed substrates, calculate remaining work and compare billable value against billed claims.",
+        "Estimating"
+    )
+    job_options = get_job_options()
+    if not job_options:
+        st.info("Create a job first.")
+        return
+    labels = list(job_options.keys())
+    index = 0
+    if default_job_id:
+        for i, label in enumerate(labels):
+            if int(job_options[label]) == int(default_job_id):
+                index = i
+                break
+    selected_job = st.selectbox("Select Job", labels, index=index, key=f"progress_job_select_{default_job_id or 'main'}")
+    job_id = int(job_options[selected_job])
+    packages = progress_package_options(job_id)
+    if not packages:
+        st.info("No painting take-off package has been created for this job yet. Upload plans and generate the take-off first.")
+        if st.button("Open Painting Take-off Generator", key=f"progress_open_takeoff_{job_id}"):
+            st.session_state["go_to_menu"] = "Painting Take-off Generator"
+            st.rerun()
+        return
+    selected_package = st.selectbox("Select Take-off Package / Model Source", list(packages.keys()), key=f"progress_package_select_{job_id}")
+    package_id = int(packages[selected_package])
+    render_progress_billing_model(job_id, package_id, key_prefix=f"progress_page_{job_id}")
+
+
+def render_takeoff_package(package_id, key_prefix="takeoff"):
+    try:
+        recalc_takeoff_package(package_id)
+    except Exception:
+        pass
+    pkg, lines = takeoff_summary_data(package_id)
+    if pkg.empty:
+        st.warning("Selected take-off package could not be found.")
+        return
+    p = pkg.iloc[0]
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Internal m²", f"{float(p.get('interior_total_m2') or 0):,.2f}")
+    c2.metric("External m²", f"{float(p.get('exterior_total_m2') or 0):,.2f}")
+    c3.metric("Total Labour Hours", f"{float(p.get('total_labour_hours') or 0):,.2f}")
+    c4.metric("Status", str(p.get("status") or "Draft"))
+
+    b1, b2, b3, b4, b5 = st.columns(5)
+    b1.metric("Walls", f"{float(p.get('wall_labour_hours') or 0):,.2f} hrs")
+    b2.metric("Ceilings", f"{float(p.get('ceiling_labour_hours') or 0):,.2f} hrs")
+    b3.metric("Woodwork", f"{float(p.get('woodwork_labour_hours') or 0):,.2f} hrs")
+    b4.metric("Features", f"{float(p.get('feature_labour_hours') or 0):,.2f} hrs")
+    b5.metric("Exterior", f"{float(p.get('exterior_labour_hours') or 0):,.2f} hrs")
+
+    paint_total = float(p.get("total_paint_litres") or 0)
+    paint_standard = float(p.get("standard_paint_litres") or 0)
+    paint_gloss = float(p.get("gloss_paint_litres") or 0)
+    if lines is not None and not lines.empty and paint_total <= 0:
+        paint_summary_calc = takeoff_paint_summary_from_lines(lines)
+        paint_total = paint_summary_calc["total_paint_litres"]
+        paint_standard = paint_summary_calc["standard_paint_litres"]
+        paint_gloss = paint_summary_calc["gloss_paint_litres"]
+    p1, p2, p3 = st.columns(3)
+    p1.metric("Total Paint Required", f"{paint_total:,.2f} L")
+    p2.metric("Standard Paint", f"{paint_standard:,.2f} L")
+    p3.metric("Gloss / Enamel", f"{paint_gloss:,.2f} L")
+    st.caption("Paint allowance rule: standard paint = m² × coats ÷ 12. Gloss/enamel = 100ml per frame/jamb/window item, 500ml per door, and 1L per 100 lineal metres of skirting where counts/lineal metres are entered.")
+
+    if str(p.get("assumptions") or "").strip():
+        st.info(str(p.get("assumptions") or ""))
+    if str(p.get("ai_notes") or "").strip():
+        st.warning(str(p.get("ai_notes") or "")[:3000])
+
+    st.markdown("### Take-off Lines")
+    if lines.empty:
+        st.info("No take-off lines added yet.")
+    else:
+        view_lines = lines.drop(columns=["ID"])
+        st.dataframe(view_lines, width="stretch", hide_index=True)
+
+        area_summary = view_lines.groupby(["Area", "Substrate"], dropna=False).agg({"m2": "sum", "Labour Hours": "sum"}).reset_index()
+        labour_summary = view_lines.groupby(["Area", "Labour Category"], dropna=False).agg({"m2": "sum", "Labour Hours": "sum"}).reset_index()
+        s1, s2 = st.columns(2)
+        with s1:
+            st.markdown("#### Substrate m² Totals")
+            st.dataframe(area_summary, width="stretch", hide_index=True)
+        with s2:
+            st.markdown("#### Labour Breakdown")
+            st.dataframe(labour_summary, width="stretch", hide_index=True)
+
+        paint_summary = takeoff_paint_summary_from_lines(view_lines)
+        ps1, ps2 = st.columns(2)
+        with ps1:
+            st.markdown("#### Paint Required by Finish")
+            if paint_summary["by_finish"].empty:
+                st.info("No paint summary available yet.")
+            else:
+                st.dataframe(paint_summary["by_finish"], width="stretch", hide_index=True)
+        with ps2:
+            st.markdown("#### Paint Required by Substrate")
+            if paint_summary["by_substrate"].empty:
+                st.info("No paint summary available yet.")
+            else:
+                st.dataframe(paint_summary["by_substrate"], width="stretch", hide_index=True)
+
+    with st.expander("Add manual take-off line", expanded=lines.empty):
+        with st.form(f"{key_prefix}_add_line_{package_id}"):
+            col1, col2, col3 = st.columns(3)
+            area_type = col1.selectbox("Internal / External", TAKEOFF_AREA_TYPES, key=f"{key_prefix}_area_type_{package_id}")
+            labour_category = col2.selectbox("Labour Category", TAKEOFF_LABOUR_CATEGORIES, key=f"{key_prefix}_lab_cat_{package_id}")
+            substrate = col3.selectbox("Substrate", TAKEOFF_SUBSTRATES, key=f"{key_prefix}_substrate_{package_id}")
+            col4, col5, col6, col7 = st.columns(4)
+            location_area = col4.text_input("Room / Elevation / Area", key=f"{key_prefix}_location_{package_id}")
+            m2 = col5.number_input("m²", min_value=0.0, step=1.0, key=f"{key_prefix}_m2_{package_id}")
+            coats = col6.number_input("Coats", min_value=0.0, step=1.0, value=2.0, key=f"{key_prefix}_coats_{package_id}")
+            default_prod = takeoff_default_productivity(area_type, labour_category, substrate)
+            productivity = col7.number_input("m² / labour hr / coat", min_value=0.1, step=0.5, value=float(default_prod), key=f"{key_prefix}_prod_{package_id}")
+            paint_col1, paint_col2, paint_col3 = st.columns(3)
+            default_finish = "Gloss / Enamel" if labour_category == "Woodwork" else "Standard Paint"
+            finish_index = TAKEOFF_FINISH_TYPES.index(default_finish) if default_finish in TAKEOFF_FINISH_TYPES else 0
+            finish_type = paint_col1.selectbox("Paint / Finish Type", TAKEOFF_FINISH_TYPES, index=finish_index, key=f"{key_prefix}_finish_type_{package_id}")
+            element_count = paint_col2.number_input("Door / frame / window count", min_value=0.0, step=1.0, value=0.0, key=f"{key_prefix}_element_count_{package_id}")
+            lineal_metres = paint_col3.number_input("Skirting lineal metres", min_value=0.0, step=1.0, value=0.0, key=f"{key_prefix}_lineal_metres_{package_id}")
+            flags_selected = st.multiselect("Flags / Allowances", TAKEOFF_FLAGS, key=f"{key_prefix}_flags_{package_id}")
+            notes = st.text_area("Notes", key=f"{key_prefix}_notes_{package_id}")
+            preview_hours = takeoff_line_hours(m2, coats, productivity)
+            preview_litres = takeoff_line_paint_litres(substrate, labour_category, m2, coats, finish_type, element_count, lineal_metres)
+            st.caption(f"Labour preview: {preview_hours:,.2f} hours | Paint preview: {preview_litres:,.2f} litres")
+            add_line = st.form_submit_button("Add Take-off Line")
+            if add_line:
+                add_takeoff_line(
+                    package_id, area_type, location_area, substrate, labour_category, m2, coats, productivity,
+                    ", ".join(flags_selected), notes, finish_type=finish_type, element_count=element_count, lineal_metres=lineal_metres
+                )
+                st.success("Take-off line added.")
+                refresh()
+
+    if not lines.empty:
+        with st.expander("Delete a take-off line"):
+            delete_options = {
+                f"{row['Area']} - {row['Location / Area']} - {row['Substrate']} - {float(row['m2'] or 0):,.2f}m²": int(row["ID"])
+                for _, row in lines.iterrows()
+            }
+            selected_delete = st.selectbox("Line to delete", list(delete_options.keys()), key=f"{key_prefix}_delete_select_{package_id}")
+            confirm_delete = st.checkbox("Confirm delete selected line", key=f"{key_prefix}_delete_confirm_{package_id}")
+            if st.button("Delete Take-off Line", key=f"{key_prefix}_delete_button_{package_id}"):
+                if not confirm_delete:
+                    st.error("Tick confirm first.")
+                else:
+                    execute("DELETE FROM painting_takeoff_lines WHERE id = ?", (delete_options[selected_delete],))
+                    recalc_takeoff_package(package_id)
+                    st.success("Take-off line deleted.")
+                    refresh()
+
+    st.divider()
+    render_takeoff_audit_panel(package_id, key_prefix=f"{key_prefix}_audit_{package_id}")
+
+    export_data = takeoff_export_excel(package_id)
+    file_name = f"{safe_file_name(str(p.get('takeoff_no') or 'painting_takeoff'))}_Painting_Takeoff.xlsx"
+    st.download_button(
+        "Download Painting Take-off Excel",
+        data=export_data,
+        file_name=file_name,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key=f"{key_prefix}_download_excel_{package_id}",
+    )
+
+
+def painting_takeoff_generator_page(default_job_id=None):
+    pb_page_header(
+        "Painting Take-off Generator",
+        "Upload plans/specs, generate an editable painting take-off, break totals down by substrate/labour, and calculate basic paint litres required.",
+        "Estimating"
+    )
+
+    job_options = get_job_options()
+    if not job_options:
+        st.info("Create a job first, then upload plans and generate a painting take-off.")
+        return
+
+    labels = list(job_options.keys())
+    index = 0
+    if default_job_id:
+        for i, label in enumerate(labels):
+            if int(job_options[label]) == int(default_job_id):
+                index = i
+                break
+    selected_job_label = st.selectbox("Select Job", labels, index=index, key=f"takeoff_job_select_{default_job_id or 'main'}")
+    job_id = int(job_options[selected_job_label])
+
+    st.markdown("### 1. Upload plans, specs, colour schedules or scope")
+    st.caption("Use this upload area for the take-off source documents. They save directly into the selected Job Folder.")
+    render_job_documents_panel(job_id, allow_upload=True, allow_delete=False, key_prefix=f"takeoff_docs_{job_id}")
+
+    st.divider()
+    st.markdown("### 2. Generate or create a take-off package")
+    docs = takeoff_source_documents(job_id)
+    selected_doc_ids = []
+    if docs.empty:
+        st.info("No documents uploaded yet. Upload the architectural plans/specifications first, or create a blank manual take-off package.")
+    else:
+        source_options = {f"{row['Document Type']} - {row['File Name']}": int(row["id"]) for _, row in docs.iterrows()}
+        default_selection = [label for label in source_options.keys() if any(x in label.lower() for x in ["architectural", "spec", "colour", "scope"])]
+        selected_sources = st.multiselect("Source documents for AI draft", list(source_options.keys()), default=default_selection, key=f"takeoff_source_docs_{job_id}")
+        selected_doc_ids = [source_options[label] for label in selected_sources]
+
+    extra_scope_notes = st.text_area(
+        "Extra scope notes for the take-off",
+        placeholder="Example: include internal walls, ceilings, timberwork, grooved doors, external render, eaves/soffits, dark colours, high ceilings. Note door/window/frame counts and skirting lm where known for gloss allowance.",
+        key=f"takeoff_extra_notes_{job_id}",
+    )
+
+    c_manual, c_ai = st.columns(2)
+    with c_manual:
+        if st.button("Create Blank Manual Take-off", key=f"create_manual_takeoff_{job_id}"):
+            package_id = create_takeoff_package(job_id, method="Manual", notes=extra_scope_notes)
+            st.session_state[f"selected_takeoff_package_{job_id}"] = package_id
+            st.success("Blank take-off package created. Add lines below.")
+            refresh()
+
+    with c_ai:
+        ai_ready, ai_msg = ai_backend_ready()
+        if not ai_ready:
+            st.caption("AI draft unavailable: " + ai_msg)
+        if st.button("Generate AI Draft Take-off from Uploaded Plans", key=f"generate_ai_takeoff_{job_id}", disabled=not ai_ready):
+            with st.spinner("Reading uploaded plan/spec text and preparing take-off draft..."):
+                ai_data, err, warnings = generate_ai_takeoff_lines(job_id, selected_doc_ids=selected_doc_ids, extra_scope_notes=extra_scope_notes)
+            for warning in warnings or []:
+                st.warning(warning)
+            if err:
+                st.error(err)
+            else:
+                used_names = ai_data.get("_used_names", []) if isinstance(ai_data, dict) else []
+                package_id = save_ai_takeoff_package(job_id, ai_data, selected_doc_names=used_names)
+                run_twenty_point_takeoff_check(package_id, save_result=True)
+                ensure_progress_sections_for_package(package_id, reset_values=False)
+                st.session_state[f"selected_takeoff_package_{job_id}"] = package_id
+                st.success("AI draft take-off created, checked through the 20-point review, and a progress/billing model was prepared. Review and adjust every line before pricing.")
+                refresh()
+
+    packages = df_query("""
+        SELECT id, takeoff_no, takeoff_date, status, generated_method, interior_total_m2, exterior_total_m2, total_labour_hours, updated_at
+        FROM painting_takeoff_packages
+        WHERE job_id = ?
+        ORDER BY id DESC
+    """, (job_id,))
+
+    st.divider()
+    st.markdown("### 3. Review, edit and export the take-off")
+    if packages.empty:
+        st.info("No take-off packages for this job yet.")
+        return
+
+    package_options = {
+        f"{row['takeoff_no']} - {row['status']} - {float(row['interior_total_m2'] or 0):,.0f}m² internal / {float(row['exterior_total_m2'] or 0):,.0f}m² external - {float(row['total_labour_hours'] or 0):,.1f} hrs": int(row["id"])
+        for _, row in packages.iterrows()
+    }
+    default_pkg = st.session_state.get(f"selected_takeoff_package_{job_id}")
+    pkg_labels = list(package_options.keys())
+    pkg_index = 0
+    if default_pkg:
+        for i, label in enumerate(pkg_labels):
+            if int(package_options[label]) == int(default_pkg):
+                pkg_index = i
+                break
+    selected_pkg_label = st.selectbox("Select Take-off Package", pkg_labels, index=pkg_index, key=f"select_takeoff_package_{job_id}")
+    package_id = int(package_options[selected_pkg_label])
+    st.session_state[f"selected_takeoff_package_{job_id}"] = package_id
+
+    with st.expander("Package status / notes"):
+        pkg = df_query("SELECT * FROM painting_takeoff_packages WHERE id = ?", (package_id,))
+        if not pkg.empty:
+            p = pkg.iloc[0]
+            with st.form(f"takeoff_package_update_{package_id}"):
+                c1, c2 = st.columns(2)
+                status_options = ["Draft", "Reviewed", "Issued", "Superseded"]
+                current_status = str(p.get("status") or "Draft")
+                status_index = status_options.index(current_status) if current_status in status_options else 0
+                status = c1.selectbox("Status", status_options, index=status_index)
+                takeoff_date = c2.text_input("Take-off Date", value=str(p.get("takeoff_date") or str(date.today())))
+                assumptions = st.text_area("Assumptions / measurement notes", value=str(p.get("assumptions") or ""))
+                notes = st.text_area("Internal Notes", value=str(p.get("notes") or ""))
+                save_pkg = st.form_submit_button("Save Package Details")
+                if save_pkg:
+                    execute("""
+                        UPDATE painting_takeoff_packages
+                        SET status = ?, takeoff_date = ?, assumptions = ?, notes = ?, updated_at = ?
+                        WHERE id = ?
+                    """, (status, takeoff_date, assumptions, notes, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), package_id))
+                    st.success("Take-off package updated.")
+                    refresh()
+
+    render_takeoff_package(package_id, key_prefix=f"takeoff_page_{job_id}")
 
 # =============================
 # LINKED JOB LOOKUP / DRILL-DOWN
@@ -7293,8 +9368,10 @@ def render_job_linked_info(job_id, expanded=True):
 
     wage_details = safe_df_query("""
         SELECT w.id AS "ID",
+               COALESCE(NULLIF(w.period_type, ''), 'Single Day') AS "Period",
+               COALESCE(NULLIF(w.period_start, ''), w.work_date) AS "From Date",
+               COALESCE(NULLIF(w.period_end, ''), w.work_date) AS "Week Ending / To Date",
                e.name AS "Employee",
-               w.work_date AS "Date",
                w.hours AS "Hours",
                e.base_hourly_rate AS "Base Rate",
                e.rate_plus_10 AS "Rate + 10%",
@@ -7303,12 +9380,14 @@ def render_job_linked_info(job_id, expanded=True):
         FROM wage_entries w
         JOIN employees e ON e.id = w.employee_id
         WHERE w.job_id = ?
-        ORDER BY w.work_date DESC, w.id DESC
+        ORDER BY COALESCE(NULLIF(w.period_start, ''), w.work_date) DESC, w.id DESC
     """, (job_id,))
 
     timesheet_details = safe_df_query("""
         SELECT t.id AS "ID",
-               t.work_date AS "Date",
+               COALESCE(NULLIF(t.period_type, ''), 'Single Day') AS "Period",
+               COALESCE(NULLIF(t.period_start, ''), t.work_date) AS "From Date",
+               COALESCE(NULLIF(t.period_end, ''), t.work_date) AS "Week Ending / To Date",
                e.name AS "Employee",
                t.start_time AS "Start",
                t.finish_time AS "Finish",
@@ -7320,7 +9399,7 @@ def render_job_linked_info(job_id, expanded=True):
         FROM timesheet_entries t
         JOIN employees e ON e.id = t.employee_id
         WHERE t.job_id = ?
-        ORDER BY t.work_date DESC, t.id DESC
+        ORDER BY COALESCE(NULLIF(t.period_start, ''), t.work_date) DESC, t.id DESC
     """, (job_id,))
 
     estimate_summary = safe_df_query("""
@@ -7444,16 +9523,19 @@ def render_job_linked_info(job_id, expanded=True):
     """, (job_id,))
 
     schedule_df = safe_df_query("""
-        SELECT s.schedule_date AS "Date",
-               e.name AS "Employee",
+        SELECT COALESCE(NULLIF(s.period_type, ''), 'Single Day') AS "Schedule Type",
+               COALESCE(NULLIF(s.period_start, ''), s.schedule_date) AS "From Date",
+               COALESCE(NULLIF(s.period_end, ''), s.schedule_date) AS "Week Ending / To Date",
+               e.name AS "Staff Member",
                s.start_time AS "Start",
                s.finish_time AS "Finish",
+               COALESCE(s.planned_hours, 0) AS "Planned Hours",
                s.site_role AS "Role",
                s.notes AS "Notes"
         FROM staff_schedule s
         JOIN employees e ON e.id = s.employee_id
         WHERE s.job_id = ?
-        ORDER BY s.schedule_date DESC, e.name
+        ORDER BY COALESCE(NULLIF(s.period_start, ''), s.schedule_date) DESC, e.name
     """, (job_id,))
 
     photos_meta = safe_df_query("""
@@ -7491,8 +9573,11 @@ def render_job_linked_info(job_id, expanded=True):
     m4.metric("Wages", f"${wage_total:,.2f}")
     m5.metric("Basic Position", f"${gross_position:,.2f}")
 
-    tab_summary, tab_costs, tab_materials, tab_wages, tab_equipment, tab_control, tab_photos = st.tabs([
+    tab_summary, tab_documents, tab_takeoff, tab_progress, tab_costs, tab_materials, tab_wages, tab_equipment, tab_control, tab_photos = st.tabs([
         "Summary",
+        "Plans / Docs",
+        "Painting Take-off",
+        "Progress / Billing",
         "Costs & Estimates",
         "Materials",
         "Wages & Timesheets",
@@ -7505,12 +9590,20 @@ def render_job_linked_info(job_id, expanded=True):
         st.markdown("### Job Details")
         st.dataframe(job_details, width="stretch", hide_index=True)
 
-
         st.markdown("### Staff Schedule")
         if schedule_df.empty:
             st.info("No staff schedule entries saved for this job.")
         else:
             st.dataframe(schedule_df, width="stretch", hide_index=True)
+
+    with tab_documents:
+        render_job_documents_panel(job_id, allow_upload=True, allow_delete=True, key_prefix="linked_job_docs")
+
+    with tab_takeoff:
+        painting_takeoff_generator_page(default_job_id=job_id)
+
+    with tab_progress:
+        progress_billing_model_page(default_job_id=job_id)
 
     with tab_costs:
         c1, c2, c3 = st.columns(3)
@@ -7928,6 +10021,8 @@ elif role == "manager":
         "Equipment": "Equipment",
     }
     estimating_menu_map = {
+        "Painting Take-off Generator": "Painting Take-off Generator",
+        "Progress / Billing Model": "Progress / Billing Model",
         "Estimate Working Sheet": "Estimate Working Sheet",
         "Job Costs / Forecasting": "Job Costs / Forecasting",
     }
@@ -7961,6 +10056,8 @@ else:
         "Equipment": "Equipment",
     }
     estimating_menu_map = {
+        "Painting Take-off Generator": "Painting Take-off Generator",
+        "Progress / Billing Model": "Progress / Billing Model",
         "Estimate Working Sheet": "Estimate Working Sheet",
         "Job Costs / Forecasting": "Job Costs / Forecasting",
     }
@@ -8160,27 +10257,93 @@ elif menu == "Dashboard":
         overdue_claims = 0
         overdue_value = 0
 
+    try:
+        takeoff_count = int(df_query("SELECT COUNT(*) AS c FROM painting_takeoff_packages").iloc[0]["c"])
+    except Exception:
+        takeoff_count = 0
+    try:
+        progress_count = int(df_query("SELECT COUNT(*) AS c FROM painting_progress_sections").iloc[0]["c"])
+    except Exception:
+        progress_count = 0
+    try:
+        schedule_count = int(df_query("SELECT COUNT(*) AS c FROM staff_schedule").iloc[0]["c"])
+    except Exception:
+        schedule_count = 0
+    try:
+        documents_count = int(df_query("SELECT COUNT(*) AS c FROM job_documents").iloc[0]["c"])
+    except Exception:
+        documents_count = 0
+
     m1, m2, m3, m4 = st.columns(4)
     with m1:
         pb_metric_card("Active Jobs", active_jobs_count, f"{jobs_count} total jobs", "green")
+        if st.button("Open jobs", key="dash_card_open_jobs", use_container_width=True):
+            st.session_state["main_menu"] = "Job Folders"
+            st.rerun()
     with m2:
         pb_metric_card("Active Staff", employee_count, "Available employee records", "blue")
+        if st.button("Open staff", key="dash_card_open_staff", use_container_width=True):
+            st.session_state["go_to_menu"] = "Employees"
+            st.rerun()
     with m3:
         pb_metric_card("Timesheets Pending", pending_timesheets, "Submitted and awaiting review", "orange" if pending_timesheets else "green")
+        if st.button("Review timesheets", key="dash_card_review_timesheets", use_container_width=True):
+            st.session_state["go_to_menu"] = "Timesheets"
+            st.rerun()
     with m4:
         pb_metric_card("Overdue Claims", overdue_claims, pb_money(overdue_value), "red" if overdue_claims else "green")
+        if st.button("Open claims", key="dash_card_open_claims", use_container_width=True):
+            st.session_state["main_menu"] = "Control Centre"
+            st.session_state["control_centre_section"] = "Invoice / Claim Tracker"
+            st.rerun()
 
     m5, m6, m7, m8 = st.columns(4)
     with m5:
         pb_metric_card("Builders / Clients", builder_count, "Saved contact records", "taupe")
+        if st.button("Open builders", key="dash_card_open_builders", use_container_width=True):
+            st.session_state["go_to_menu"] = "Builders & Clients"
+            st.rerun()
     with m6:
         pb_metric_card("Open Variations", open_variations, "Draft, submitted or sent", "orange" if open_variations else "green")
+        if st.button("Open variations", key="dash_card_open_variations", use_container_width=True):
+            st.session_state["main_menu"] = "Control Centre"
+            st.session_state["control_centre_section"] = "Variations Register"
+            st.rerun()
     with m7:
         products_count = int(df_query("SELECT COUNT(*) AS c FROM products").iloc[0]["c"])
         pb_metric_card("Products", products_count, "Saved product list", "blue")
+        if st.button("Open products", key="dash_card_open_products", use_container_width=True):
+            st.session_state["go_to_menu"] = "Products"
+            st.rerun()
     with m8:
         photos_count = int(df_query("SELECT COUNT(*) AS c FROM job_photos").iloc[0]["c"])
         pb_metric_card("Photos", photos_count, "Stored against job folders", "taupe")
+        if st.button("Open photos", key="dash_card_open_photos", use_container_width=True):
+            st.session_state["go_to_menu"] = "Job Photos"
+            st.rerun()
+
+    m9, m10, m11, m12 = st.columns(4)
+    with m9:
+        pb_metric_card("Take-offs", takeoff_count, "Painting take-off packages", "blue")
+        if st.button("Open take-offs", key="dash_card_open_takeoffs", use_container_width=True):
+            st.session_state["go_to_menu"] = "Painting Take-off Generator"
+            st.rerun()
+    with m10:
+        pb_metric_card("Progress Models", progress_count, "Measured sections / substrates", "green")
+        if st.button("Open progress", key="dash_card_open_progress", use_container_width=True):
+            st.session_state["go_to_menu"] = "Progress / Billing Model"
+            st.rerun()
+    with m11:
+        pb_metric_card("Staff Schedule", schedule_count, "Saved schedule entries", "orange" if schedule_count else "taupe")
+        if st.button("Open scheduling", key="dash_card_open_scheduling", use_container_width=True):
+            st.session_state["main_menu"] = "Control Centre"
+            st.session_state["control_centre_section"] = "Staff Scheduling Board"
+            st.rerun()
+    with m12:
+        pb_metric_card("Plans / Docs", documents_count, "Uploaded job documents", "taupe")
+        if st.button("Open documents", key="dash_card_open_documents", use_container_width=True):
+            st.session_state["main_menu"] = "Job Folders"
+            st.rerun()
 
     st.markdown("### Open Jobs")
     active = df_query("""
@@ -8564,6 +10727,14 @@ elif menu == "Jobs":
 # =============================
 # ESTIMATE WORKING SHEET
 # =============================
+elif menu == "Painting Take-off Generator":
+    painting_takeoff_generator_page()
+
+
+elif menu == "Progress / Billing Model":
+    progress_billing_model_page()
+
+
 elif menu == "Estimate Working Sheet":
     estimate_working_sheet_page()
 
@@ -9289,27 +11460,57 @@ elif menu == "Wages":
                         f"Rate + 10%: ${float(employee.iloc[0]['rate_plus_10'] or 0):.2f}"
                     )
 
-                col1, col2 = st.columns(2)
-                work_date = col1.text_input("Date", value=str(date.today()))
-                hours = col2.number_input("Hours", min_value=0.0, step=0.5)
+                period_type = st.radio(
+                    "Entry Type",
+                    ["Single Day", "Week Ending"],
+                    horizontal=True,
+                    key="wage_entry_period_type",
+                )
+
+                if period_type == "Single Day":
+                    col1, col2 = st.columns(2)
+                    work_day = col1.date_input("Date", value=date.today(), key="wage_single_date")
+                    hours = col2.number_input("Hours", min_value=0.0, step=0.5, key="wage_single_hours")
+                    work_date = str(work_day)
+                    period_start = str(work_day)
+                    period_end = str(work_day)
+                else:
+                    col1, col2, col3 = st.columns(3)
+                    default_week_end = date.today()
+                    default_week_start = default_week_end - timedelta(days=4)
+                    from_date = col1.date_input("From Date", value=default_week_start, key="wage_week_from")
+                    week_ending = col2.date_input("Week Ending", value=default_week_end, key="wage_week_ending")
+                    hours = col3.number_input("Total Hours for This Job / Week", min_value=0.0, step=0.5, value=38.0, key="wage_week_hours")
+                    work_date = str(from_date)
+                    period_start = str(from_date)
+                    period_end = str(week_ending)
+                    st.caption("Use this when the employee was on the same job for the full week. It saves one wage entry instead of daily entries.")
+
                 notes = st.text_area("Notes")
                 submitted = st.form_submit_button("Save Wage Entry")
 
                 if submitted:
-                    execute("""
-                        INSERT INTO wage_entries
-                        (job_id, employee_id, work_date, hours, notes)
-                        VALUES (?, ?, ?, ?, ?)
-                    """, (job_options[job_label], employee_id, work_date, hours, notes))
-                    st.success("Wage entry saved.")
-                    refresh()
+                    if hours <= 0:
+                        st.error("Hours must be greater than 0.")
+                    elif period_type == "Week Ending" and period_end < period_start:
+                        st.error("Week ending date must be after the from date.")
+                    else:
+                        execute("""
+                            INSERT INTO wage_entries
+                            (job_id, employee_id, work_date, hours, notes, period_type, period_start, period_end)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (job_options[job_label], employee_id, work_date, hours, notes, period_type, period_start, period_end))
+                        st.success("Wage entry saved.")
+                        refresh()
 
     df = df_query("""
         SELECT w.id AS 'ID',
                j.job_no AS 'Job No',
                j.job_name AS 'Job Name',
                e.name AS 'Employee',
-               w.work_date AS 'Date',
+               COALESCE(NULLIF(w.period_type, ''), 'Single Day') AS 'Period',
+               COALESCE(NULLIF(w.period_start, ''), w.work_date) AS 'From Date',
+               COALESCE(NULLIF(w.period_end, ''), w.work_date) AS 'Week Ending / To Date',
                w.hours AS 'Hours',
                e.base_hourly_rate AS 'Base Rate',
                e.rate_plus_10 AS 'Rate + 10%',
@@ -9318,7 +11519,7 @@ elif menu == "Wages":
         FROM wage_entries w
         JOIN jobs j ON j.id = w.job_id
         JOIN employees e ON e.id = w.employee_id
-        ORDER BY w.work_date DESC, w.id DESC
+        ORDER BY COALESCE(NULLIF(w.period_start, ''), w.work_date) DESC, w.id DESC
     """)
     st.dataframe(df, width="stretch", hide_index=True)
 
@@ -9328,7 +11529,7 @@ elif menu == "Wages":
         st.info("No wage entries to delete.")
     else:
         wage_options = {
-            f"ID {row['ID']} | {row['Date']} | {row['Employee']} | {row['Job No']} - {row['Job Name']} | {row['Hours']} hrs | ${float(row['Total Wage Cost'] or 0):,.2f}": int(row["ID"])
+            f"ID {row['ID']} | {row['From Date']} to {row['Week Ending / To Date']} | {row['Employee']} | {row['Job No']} - {row['Job Name']} | {row['Hours']} hrs | ${float(row['Total Wage Cost'] or 0):,.2f}": int(row["ID"])
             for _, row in df.iterrows()
         }
         selected_wage_labels = st.multiselect(
