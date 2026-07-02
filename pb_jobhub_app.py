@@ -34,6 +34,8 @@ PHOTOS_DIR = os.path.join(DATA_DIR, "photos")
 EXPORTS_DIR = os.path.join(DATA_DIR, "exports")
 
 TEMPLATE_DIR = os.path.join(os.path.dirname(__file__), "templates")
+ASSET_DIR = os.path.join(os.path.dirname(__file__), "assets")
+PB_LOGO_BACKGROUND_IMAGE = os.path.join(ASSET_DIR, "PB_Logo_Main_PNG.png")
 
 EQUIPMENT_TEMPLATE_PDF = os.path.join(
     TEMPLATE_DIR,
@@ -54,6 +56,7 @@ os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(JOB_FILES_DIR, exist_ok=True)
 os.makedirs(PHOTOS_DIR, exist_ok=True)
 os.makedirs(EXPORTS_DIR, exist_ok=True)
+# Asset folder is included in GitHub/Render for logos and branding files.
 
 
 def get_job_folder(job_number):
@@ -83,6 +86,23 @@ PB_MENU_ICONS = {
 }
 
 
+def pb_logo_data_uri():
+    """Return the Premier Brushworks logo as a browser-safe data URI for CSS backgrounds."""
+    possible_paths = [
+        PB_LOGO_BACKGROUND_IMAGE,
+        os.path.join(os.path.dirname(__file__), "PB_Logo_Main_PNG.png"),
+    ]
+    for logo_path in possible_paths:
+        try:
+            if os.path.exists(logo_path):
+                with open(logo_path, "rb") as f:
+                    encoded_logo = base64.b64encode(f.read()).decode("utf-8")
+                return f"data:image/png;base64,{encoded_logo}"
+        except Exception:
+            pass
+    return ""
+
+
 def pb_html(value):
     return html.escape(str(value or ""))
 
@@ -95,6 +115,26 @@ def pb_money(value):
 
 
 def apply_pb_branding():
+    logo_data_uri = pb_logo_data_uri()
+    logo_background_css = ""
+    if logo_data_uri:
+        logo_background_css = f"""
+    .stApp {{
+        background-image:
+            linear-gradient(rgba(247, 243, 238, 0.89), rgba(247, 243, 238, 0.89)),
+            url("{logo_data_uri}");
+        background-size: cover, min(72vw, 760px) auto;
+        background-position: center center;
+        background-repeat: no-repeat;
+        background-attachment: fixed;
+        background-color: var(--pb-bg);
+    }}
+
+    [data-testid="stAppViewContainer"] {{
+        background: transparent !important;
+    }}
+        """
+
     st.markdown("""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700;800&display=swap');
@@ -122,6 +162,8 @@ def apply_pb_branding():
             radial-gradient(circle at top left, rgba(216, 200, 184, 0.36), rgba(247, 243, 238, 0) 34rem),
             var(--pb-bg);
     }
+
+    """ + logo_background_css + """
 
     section[data-testid="stSidebar"] {
         background: linear-gradient(180deg, #171717 0%, #29231f 100%);
