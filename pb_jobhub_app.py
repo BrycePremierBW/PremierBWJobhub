@@ -8227,6 +8227,28 @@ def add_takeoff_line(package_id, area_type, location_area, substrate, labour_cat
     recalc_takeoff_package(package_id)
 
 
+def delete_takeoff_line_safely(line_id):
+    """Delete a take-off line and any progress-model sections that were generated from it.
+
+    Progress sections keep a foreign-key reference back to painting_takeoff_lines.
+    Deleting the progress rows first prevents PostgreSQL foreign-key crashes while keeping
+    the progress model in sync with the take-off.
+    """
+    line_df = df_query("SELECT package_id FROM painting_takeoff_lines WHERE id = ?", (line_id,))
+    if line_df.empty:
+        return 0, None
+
+    package_id = int(line_df.iloc[0]["package_id"])
+    linked_df = df_query("SELECT COUNT(*) AS c FROM painting_progress_sections WHERE takeoff_line_id = ?", (line_id,))
+    linked_count = int(linked_df.iloc[0]["c"] or 0) if not linked_df.empty else 0
+
+    # Delete dependent progress rows first. This fixes PostgreSQL ForeignKeyViolation errors.
+    execute("DELETE FROM painting_progress_sections WHERE takeoff_line_id = ?", (line_id,))
+    execute("DELETE FROM painting_takeoff_lines WHERE id = ?", (line_id,))
+    recalc_takeoff_package(package_id)
+    return linked_count, package_id
+
+
 def takeoff_source_documents(job_id):
     return df_query("""
         SELECT id, document_type AS "Document Type", file_name AS "File Name", file_path, created_at AS "Created At", notes AS "Notes"
@@ -9662,8 +9684,9 @@ def render_takeoff_package(package_id, key_prefix="takeoff"):
                 if not confirm_delete:
                     st.error("Tick confirm first.")
                 else:
-                    execute("DELETE FROM painting_takeoff_lines WHERE id = ?", (delete_options[selected_delete],))
-                    recalc_takeoff_package(package_id)
+                    linked_progress_count, _deleted_package_id = delete_takeoff_line_safely(delete_options[selected_delete])
+                    if linked_progress_count:
+                        st.info(f"Also removed {linked_progress_count} linked progress model section(s) so the take-off and progress model stay in sync.")
                     st.success("Take-off line deleted.")
                     refresh()
 
