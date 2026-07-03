@@ -2183,8 +2183,163 @@ def save_uploaded_job_document(job_id, uploaded_file, document_type, notes=""):
     return file_path
 
 
+# =============================
+# PDF / DRAWING CONVERSION HELPERS
+# =============================
+
+def parse_page_selection(page_text, max_pages):
+    """Parse page text like '1,3,5-7'. Returns zero-based page indexes."""
+    if max_pages <= 0:
+        return []
+    text_value = str(page_text or "").strip()
+    if not text_value:
+        return list(range(max_pages))
+    selected = set()
+    for part in text_value.replace(";", ",").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            start_text, end_text = part.split("-", 1)
+            try:
+                start = int(start_text.strip())
+                end = int(end_text.strip())
+            except Exception:
+                continue
+            if end < start:
+                start, end = end, start
+            for page_no in range(start, end + 1):
+                if 1 <= page_no <= max_pages:
+                    selected.add(page_no - 1)
+        else:
+            try:
+                page_no = int(part)
+            except Exception:
+                continue
+            if 1 <= page_no <= max_pages:
+                selected.add(page_no - 1)
+    return sorted(selected)
+
+
+def get_pdf_page_count_from_bytes(pdf_bytes):
+    """Count PDF pages with PyMuPDF if available, otherwise pypdf."""
+    try:
+        import fitz  # PyMuPDF
+        with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
+            return int(doc.page_count)
+    except Exception:
+        try:
+            reader = PdfReader(BytesIO(pdf_bytes))
+            return len(reader.pages)
+        except Exception:
+            return 0
+
+
+def save_converted_drawing_image(job_id, source_pdf_name, page_index, image_bytes, image_format, view_name, notes=""):
+    """Save a rendered PDF page image and attach it as a drawing mapper document."""
+    job = get_job_details_for_pdf(job_id)
+    if not job:
+        raise ValueError("Job not found.")
+    job_no = str(job.get("job_no") or f"job_{job_id}")
+    job_folder = get_job_folder(job_no)
+    documents_folder = os.path.join(job_folder, "documents")
+    os.makedirs(documents_folder, exist_ok=True)
+
+    stem = os.path.splitext(safe_file_name(source_pdf_name))[0]
+    ext = "jpg" if str(image_format).upper() in ["JPG", "JPEG"] else "png"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    stored_file_name = f"{timestamp}_{stem}_page_{page_index + 1:03d}.{ext}"
+    file_path = os.path.join(documents_folder, stored_file_name)
+    with open(file_path, "wb") as f:
+        f.write(image_bytes)
+    attach_document_to_job(
+        job_id,
+        f"Drawing Mapper - {view_name}",
+        file_path,
+        notes=notes or f"Converted from PDF page {page_index + 1} for plan/elevation mapping.",
+    )
+    return file_path
+
+
+def convert_pdf_bytes_to_drawing_images(job_id, pdf_bytes, pdf_name, page_indexes, view_name, dpi=220, image_format="PNG"):
+    """Render selected PDF pages to high quality PNG/JPEG images for the mapper."""
+    try:
+        import fitz  # PyMuPDF
+    except Exception as exc:
+        raise RuntimeError("PDF to image conversion needs PyMuPDF. Add 'PyMuPDF' to requirements.txt, commit, and redeploy Render.") from exc
+
+    output_paths = []
+    fmt = "jpeg" if str(image_format).upper() in ["JPG", "JPEG"] else "png"
+    matrix_scale = max(float(dpi), 72.0) / 72.0
+    mat = fitz.Matrix(matrix_scale, matrix_scale)
+    with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
+        if not page_indexes:
+            page_indexes = list(range(doc.page_count))
+        for page_index in page_indexes:
+            if page_index < 0 or page_index >= doc.page_count:
+                continue
+            page = doc.load_page(page_index)
+            pix = page.get_pixmap(matrix=mat, alpha=False)
+            if fmt == "jpeg":
+                # Re-save through Pillow to control JPEG output and keep file size sensible.
+                img = Image.open(BytesIO(pix.tobytes("png"))).convert("RGB")
+                img_buffer = BytesIO()
+                img.save(img_buffer, format="JPEG", quality=92, optimize=True)
+                image_bytes = img_buffer.getvalue()
+                saved_format = "JPEG"
+            else:
+                image_bytes = pix.tobytes("png")
+                saved_format = "PNG"
+            output_paths.append(save_converted_drawing_image(
+                job_id,
+                pdf_name,
+                page_index,
+                image_bytes,
+                saved_format,
+                view_name,
+                notes=f"High quality {saved_format} rendered from {pdf_name}, PDF page {page_index + 1}, {dpi} DPI.",
+            ))
+    return output_paths
+
+
+def maybe_convert_uploaded_pdf_to_mapper_images(job_id, uploaded_pdfs, view_name, page_selection_text, dpi, image_format, key_prefix):
+    """UI helper used by the actual plan/elevation mapper."""
+    if not uploaded_pdfs:
+        st.error("Choose at least one PDF plan/elevation file first.")
+        return 0
+    total_saved = 0
+    for uploaded_pdf in uploaded_pdfs:
+        try:
+            pdf_bytes = uploaded_pdf.getvalue()
+            page_count = get_pdf_page_count_from_bytes(pdf_bytes)
+            if page_count <= 0:
+                st.error(f"Could not read pages from {uploaded_pdf.name}.")
+                continue
+            page_indexes = parse_page_selection(page_selection_text, page_count)
+            if not page_indexes:
+                st.error(f"No valid pages selected for {uploaded_pdf.name}. This PDF has {page_count} page(s).")
+                continue
+            if len(page_indexes) > 25:
+                st.warning(f"{uploaded_pdf.name}: converting the first 25 selected pages only to keep Render responsive.")
+                page_indexes = page_indexes[:25]
+            saved_paths = convert_pdf_bytes_to_drawing_images(
+                job_id,
+                pdf_bytes,
+                uploaded_pdf.name,
+                page_indexes,
+                view_name,
+                dpi=int(dpi),
+                image_format=image_format,
+            )
+            total_saved += len(saved_paths)
+            st.success(f"Converted {len(saved_paths)} page(s) from {uploaded_pdf.name} into mapper-ready image(s).")
+        except Exception as e:
+            st.error(f"Could not convert {uploaded_pdf.name}: {e}")
+    return total_saved
+
+
 def delete_job_document(document_id):
-    """Delete a job document record and remove the saved file if it still exists."""
+    """Delete a job document record, remove linked mapper zones, and remove the saved file if it still exists."""
     doc_df = df_query("SELECT file_path FROM job_documents WHERE id = ?", (document_id,))
     if not doc_df.empty:
         file_path = str(doc_df.iloc[0]["file_path"] or "")
@@ -2193,7 +2348,31 @@ def delete_job_document(document_id):
                 os.remove(file_path)
             except Exception:
                 pass
+
+    # Drawing mapper zones can reference job_documents. Remove these first so PostgreSQL
+    # does not block deletion when a PDF/image was attached to the wrong job.
+    try:
+        execute("DELETE FROM drawing_progress_zones WHERE document_id = ?", (document_id,))
+    except Exception:
+        pass
+
     execute("DELETE FROM job_documents WHERE id = ?", (document_id,))
+
+
+def move_job_document_to_job(document_id, new_job_id):
+    """Move a document record to another job folder. The existing file path is retained."""
+    execute("UPDATE job_documents SET job_id = ? WHERE id = ?", (new_job_id, document_id))
+    try:
+        execute("UPDATE drawing_progress_zones SET job_id = ? WHERE document_id = ?", (new_job_id, document_id))
+    except Exception:
+        pass
+
+
+def job_document_id_for_path(file_path):
+    doc_df = df_query("SELECT id FROM job_documents WHERE file_path = ? ORDER BY id DESC LIMIT 1", (file_path,))
+    if doc_df.empty:
+        return None
+    return int(doc_df.iloc[0]["id"])
 
 
 def download_mime_for_file(file_name):
@@ -2311,6 +2490,227 @@ def pdf_import_categories_for_context(context="all"):
     return categories
 
 
+
+
+def guess_drawing_view_from_filename_global(file_name, fallback_view="Auto-detect from file name"):
+    """Guess mapper view from a plan/elevation image or PDF file name."""
+    if fallback_view and fallback_view != "Auto-detect from file name":
+        return fallback_view
+    name = str(file_name or "").lower().replace("_", " ").replace("-", " ")
+    checks = [
+        (["front", "north elevation", "north elev"], "Front Elevation"),
+        (["rear", "back", "south elevation", "south elev"], "Rear Elevation"),
+        (["left", "west elevation", "west elev"], "Left Elevation"),
+        (["right", "east elevation", "east elev"], "Right Elevation"),
+        (["ground", "gf", "floor plan", "floorplan", "level 0"], "Ground Floor Plan"),
+        (["level 1", "lvl 1", "first floor", "l1"], "Level 1 Plan"),
+        (["level 2", "lvl 2", "second floor", "l2"], "Level 2 Plan"),
+        (["roof", "soffit", "eaves"], "Roof / Soffit Plan"),
+        (["internal", "room", "rooms"], "Internal Areas"),
+        (["site plan", "site"], "Site Plan"),
+    ]
+    for keywords, label in checks:
+        if any(keyword in name for keyword in keywords):
+            return label
+    return "Other"
+
+
+def classify_uploaded_job_file(file_name):
+    """Auto-classify uploaded job files so plan sets go into the correct JobHub sections."""
+    name = str(file_name or "").lower().replace("_", " ").replace("-", " ")
+    ext = os.path.splitext(name)[1].lower()
+    if any(x in name for x in ["colour", "color", "finish", "finishes", "schedule"]):
+        return "Colour Schedule"
+    if any(x in name for x in ["spec", "specification", "architectural specification"]):
+        return "Specifications"
+    if any(x in name for x in ["scope", "sow", "work scope"]):
+        return "Scope of Works"
+    if any(x in name for x in ["quote", "estimate", "pricing", "tender"]):
+        return "Quote / Estimate"
+    if any(x in name for x in ["po", "purchase order", "work order", "contract"]):
+        return "Purchase Order"
+    if any(x in name for x in ["claim", "invoice"]):
+        return "Progress Claim / Invoice"
+    if any(x in name for x in ["variation", "var"]):
+        return "Variation"
+    if any(x in name for x in ["defect", "qa", "itp", "punch", "touch up"]):
+        return "Defects / QA"
+    if any(x in name for x in ["swms", "safety", "whs", "jsa", "risk"]):
+        return "Safety / SWMS"
+    if any(x in name for x in ["elevation", "drawing", "architectural", "plans", "plan", "roof", "floor"]):
+        return "Architectural Plans"
+    if ext in [".png", ".jpg", ".jpeg", ".webp"]:
+        return f"Drawing Mapper - {guess_drawing_view_from_filename_global(file_name)}"
+    if ext == ".pdf":
+        return "Other PDF"
+    return "Other"
+
+
+def render_remove_or_move_wrong_job_documents(job_id, key_prefix="wrong_job_docs"):
+    """Allow admins/managers to remove or move PDFs/images uploaded to the wrong job."""
+    st.markdown("### Remove / move files attached to the wrong job")
+    docs = df_query("""
+        SELECT id, document_type AS type, file_name, file_path, created_at, notes
+        FROM job_documents
+        WHERE job_id = ?
+        ORDER BY id DESC
+    """, (job_id,))
+    if docs.empty:
+        st.info("No documents are attached to this job yet.")
+        return
+
+    options = {
+        f"{int(r['id'])} | {r['type']} | {r['file_name']} | {r['created_at']}": int(r["id"])
+        for _, r in docs.iterrows()
+    }
+    selected = st.multiselect(
+        "Select wrong file(s)",
+        list(options.keys()),
+        key=f"{key_prefix}_selected_{job_id}",
+    )
+    selected_ids = [options[label] for label in selected]
+    action = st.radio(
+        "Action",
+        ["Delete selected from this job", "Move selected to another job"],
+        horizontal=True,
+        key=f"{key_prefix}_action_{job_id}",
+    )
+    target_job_id = None
+    if action == "Move selected to another job":
+        job_options = get_job_options()
+        target_options = {label: int(value) for label, value in job_options.items() if int(value) != int(job_id)}
+        if target_options:
+            target_label = st.selectbox("Move to job", list(target_options.keys()), key=f"{key_prefix}_target_{job_id}")
+            target_job_id = target_options[target_label]
+        else:
+            st.warning("No other jobs exist to move the selected files to.")
+
+    confirm_text = st.text_input(
+        "Type CONFIRM to apply",
+        key=f"{key_prefix}_confirm_{job_id}",
+        placeholder="CONFIRM",
+    )
+    if st.button("Apply document fix", key=f"{key_prefix}_apply_{job_id}", disabled=not selected_ids):
+        if confirm_text.strip().upper() != "CONFIRM":
+            st.error("Type CONFIRM first.")
+            return
+        if action == "Delete selected from this job":
+            for doc_id in selected_ids:
+                delete_job_document(doc_id)
+            st.success(f"Deleted {len(selected_ids)} selected file(s) from this job.")
+            refresh()
+        else:
+            if not target_job_id:
+                st.error("Choose a destination job first.")
+                return
+            for doc_id in selected_ids:
+                move_job_document_to_job(doc_id, target_job_id)
+            st.success(f"Moved {len(selected_ids)} selected file(s) to the selected job.")
+            refresh()
+
+
+def render_smart_plan_set_import(job_id, key_prefix="smart_plan_set", expanded=False):
+    """One-stop plan set import: categorise files, convert plan PDFs, and optionally run AI take-off."""
+    with st.expander("Smart plan set import - upload new plans and place info in the right spots", expanded=expanded):
+        st.caption("Upload a whole plan/spec/colour/scope set. JobHub auto-saves each file as Plans, Specs, Colour Schedule, Scope, etc. Plan PDFs can also be converted to mapper images.")
+        uploaded_files = st.file_uploader(
+            "Upload new plan/spec/scope/colour file set",
+            type=["pdf", "doc", "docx", "xls", "xlsx", "csv", "jpg", "jpeg", "png", "webp"],
+            accept_multiple_files=True,
+            key=f"{key_prefix}_files_{job_id}",
+        )
+        c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
+        auto_convert = c1.checkbox("Convert plan PDFs to mapper images", value=True, key=f"{key_prefix}_convert_{job_id}")
+        page_selection = c2.text_input("Plan PDF pages", value="", placeholder="blank = all, or 1,3,5-7", key=f"{key_prefix}_pages_{job_id}")
+        dpi = c3.selectbox("Image quality", [150, 200, 220, 300], index=2, key=f"{key_prefix}_dpi_{job_id}")
+        image_format = c4.selectbox("Image output", ["PNG", "JPEG"], index=0, key=f"{key_prefix}_format_{job_id}")
+        run_ai_after_import = st.checkbox(
+            "After upload, run AI take-off and place results into Painting Take-off + Progress/Billing",
+            value=False,
+            key=f"{key_prefix}_run_ai_{job_id}",
+        )
+        extra_notes = st.text_area(
+            "Import / scope notes",
+            value="New plan set imported. Review all AI/manual take-off data against the drawings before issuing price or claim.",
+            key=f"{key_prefix}_notes_{job_id}",
+        )
+        ai_confirmed = True
+        if run_ai_after_import:
+            ai_ready, ai_msg = ai_backend_ready()
+            if not ai_ready:
+                st.warning("AI take-off is unavailable: " + ai_msg)
+            ai_confirmed = bool(confirm_ai_api_spend("Confirm: use OpenAI/Ollama AI for plan set extraction", key=f"{key_prefix}_ai_confirm_{job_id}"))
+
+        if st.button("Import new plan set", key=f"{key_prefix}_button_{job_id}", use_container_width=True):
+            if not uploaded_files:
+                st.error("Choose at least one file first.")
+                return
+            saved_doc_ids = []
+            saved_messages = []
+            converted_count = 0
+            for uploaded in uploaded_files:
+                try:
+                    doc_type = classify_uploaded_job_file(uploaded.name)
+                    file_path = save_uploaded_job_document(job_id, uploaded, doc_type, notes=extra_notes)
+                    doc_id = job_document_id_for_path(file_path)
+                    if doc_id:
+                        saved_doc_ids.append(doc_id)
+                    saved_messages.append(f"{uploaded.name} → {doc_type}")
+
+                    name_lower = str(uploaded.name).lower()
+                    is_pdf = name_lower.endswith(".pdf")
+                    looks_like_plan = doc_type == "Architectural Plans" or any(x in name_lower for x in ["plan", "drawing", "elevation", "architectural"])
+                    if auto_convert and is_pdf and looks_like_plan:
+                        pdf_bytes = uploaded.getvalue()
+                        page_count = get_pdf_page_count_from_bytes(pdf_bytes)
+                        page_indexes = parse_page_selection(page_selection, page_count)
+                        if len(page_indexes) > 25:
+                            st.warning(f"{uploaded.name}: converting first 25 selected pages only.")
+                            page_indexes = page_indexes[:25]
+                        view_name = guess_drawing_view_from_filename_global(uploaded.name)
+                        saved_images = convert_pdf_bytes_to_drawing_images(
+                            job_id,
+                            pdf_bytes,
+                            uploaded.name,
+                            page_indexes,
+                            view_name,
+                            dpi=int(dpi),
+                            image_format=image_format,
+                        )
+                        converted_count += len(saved_images)
+                except Exception as e:
+                    st.error(f"Could not import {uploaded.name}: {e}")
+
+            if saved_messages:
+                st.success(f"Imported {len(saved_messages)} file(s) into the selected job.")
+                with st.expander("Where the files were placed", expanded=True):
+                    for msg in saved_messages:
+                        st.write(msg)
+                if converted_count:
+                    st.success(f"Created {converted_count} mapper-ready plan/elevation image(s). Open the Plan / Elevation Mapper and select the drawing background.")
+
+            if run_ai_after_import and saved_doc_ids:
+                ai_ready, ai_msg = ai_backend_ready()
+                if not ai_ready:
+                    st.warning("Files were imported, but AI take-off was not run: " + ai_msg)
+                elif not ai_confirmed:
+                    st.warning("Files were imported, but AI take-off was not run because AI spend was not confirmed.")
+                else:
+                    with st.spinner("Reading imported plan set and creating take-off/progress model..."):
+                        ai_data, err, warnings = generate_ai_takeoff_lines(job_id, selected_doc_ids=saved_doc_ids, extra_scope_notes=extra_notes)
+                    for warning in warnings or []:
+                        st.warning(warning)
+                    if err:
+                        st.error(err)
+                    else:
+                        used_names = ai_data.get("_used_names", []) if isinstance(ai_data, dict) else []
+                        package_id = save_ai_takeoff_package(job_id, ai_data, selected_doc_names=used_names)
+                        run_twenty_point_takeoff_check(package_id, save_result=True)
+                        ensure_progress_sections_for_package(package_id, reset_values=False)
+                        st.session_state[f"selected_takeoff_package_{job_id}"] = package_id
+                        st.success("AI take-off created and placed into Painting Take-off + Progress/Billing. Review every line before using it for price or claim.")
+            refresh()
+
 def render_quick_pdf_import_buttons(job_id, categories=None, title="Quick PDF Import Buttons", key_prefix="quick_pdf_import", expanded=False):
     """Render multiple small PDF-only uploaders and save PDFs straight into the selected job folder."""
     if not job_id:
@@ -2401,6 +2801,8 @@ def pdf_import_centre_page(default_job_id=None):
     selected_job = st.selectbox("Select Job", labels, index=index, key=f"pdf_import_centre_job_{default_job_id or 'main'}")
     job_id = int(job_options[selected_job])
 
+    render_smart_plan_set_import(job_id, key_prefix=f"pdf_centre_smart_import_{job_id}", expanded=True)
+
     st.markdown("### Import PDF by area")
     tab_setup, tab_site, tab_claims, tab_all = st.tabs([
         "Job Setup / Tender",
@@ -2442,21 +2844,25 @@ def pdf_import_centre_page(default_job_id=None):
         )
 
     st.divider()
-    st.markdown("### PDFs already attached to this job")
+    st.markdown("### PDFs/files already attached to this job")
     attached = df_query("""
-        SELECT document_type AS 'Type', file_name AS 'File Name', created_at AS 'Uploaded', notes AS 'Notes'
+        SELECT id, document_type AS 'Type', file_name AS 'File Name', created_at AS 'Uploaded', notes AS 'Notes'
         FROM job_documents
         WHERE job_id = ?
-          AND LOWER(COALESCE(file_name, '')) LIKE '%.pdf'
         ORDER BY id DESC
     """, (job_id,))
     if attached.empty:
-        st.info("No PDFs have been attached to this job yet.")
+        st.info("No files have been attached to this job yet.")
     else:
-        st.dataframe(attached, width="stretch", hide_index=True)
+        st.dataframe(attached[["Type", "File Name", "Uploaded", "Notes"]], width="stretch", hide_index=True)
+        with st.expander("Remove or move files attached to the wrong job", expanded=False):
+            render_remove_or_move_wrong_job_documents(job_id, key_prefix=f"pdf_centre_wrong_docs_{job_id}")
 
 def render_job_documents_panel(job_id, allow_upload=True, allow_delete=True, key_prefix="job_docs"):
     st.markdown("### Plans / Specs / Job Documents")
+
+    if allow_upload:
+        render_smart_plan_set_import(job_id, key_prefix=f"{key_prefix}_smart_import_{job_id}", expanded=False)
 
     if allow_upload:
         render_quick_pdf_import_buttons(
@@ -10338,10 +10744,55 @@ def building_progress_mapper_page(default_job_id=None):
             st.rerun()
         return
 
-    st.markdown("### 1. Upload actual drawing page image")
-    st.caption("For the closest match to the plans, upload a screenshot/export of the actual floor plan or elevation page as PNG/JPG. PDFs can still be stored as references, but the clickable overlay works best on an image.")
+    st.markdown("### 1. Convert or upload actual drawing page images")
+    st.caption("For the closest match to the plans, use the PDF converter below to turn plan/elevation PDF pages into clean PNG/JPEG images, then place clickable zones over the real drawing.")
+    render_smart_plan_set_import(selected_job_id, key_prefix=f"actual_mapper_smart_import_{selected_job_id}", expanded=False)
     render_quick_pdf_import_buttons(selected_job_id, categories=["Architectural Plans", "Specifications", "Colour Schedule", "Scope of Works"], title="Attach PDFs as reference", key_prefix=f"actual_mapper_reference_pdf_{selected_job_id}", expanded=False)
-    with st.expander("Upload plan/elevation image(s) for clickable overlay", expanded=True):
+
+    with st.expander("Convert PDF plans/elevations to PNG/JPEG for mapper", expanded=True):
+        st.info("Use this when you have a PDF plan set. Convert the exact elevation/floor plan pages you need, then select the converted image below for mapping.")
+        pc1, pc2, pc3, pc4 = st.columns([1.2, 1, 1, 1])
+        pdf_view_name = pc1.selectbox(
+            "Converted drawing view",
+            [
+                "Front Elevation",
+                "Rear Elevation",
+                "Left Elevation",
+                "Right Elevation",
+                "Ground Floor Plan",
+                "Level 1 Plan",
+                "Level 2 Plan",
+                "Roof / Soffit Plan",
+                "Internal Areas",
+                "Other",
+            ],
+            key=f"actual_mapper_pdf_convert_view_{selected_job_id}",
+        )
+        pdf_page_selection = pc2.text_input("Pages to convert", value="", placeholder="e.g. 1,3,5-7", key=f"actual_mapper_pdf_convert_pages_{selected_job_id}")
+        pdf_dpi = pc3.selectbox("Image quality", [150, 200, 220, 300], index=2, key=f"actual_mapper_pdf_convert_dpi_{selected_job_id}")
+        pdf_image_format = pc4.selectbox("Output", ["PNG", "JPEG"], key=f"actual_mapper_pdf_convert_format_{selected_job_id}")
+        uploaded_pdf_plans = st.file_uploader(
+            "Upload one or more PDF plan/elevation files to convert",
+            type=["pdf"],
+            accept_multiple_files=True,
+            key=f"actual_mapper_pdf_converter_upload_{selected_job_id}",
+        )
+        st.caption("Blank page selection converts every page. For big drawing sets, enter only the pages you need so the app stays fast. PNG is best quality; JPEG is smaller.")
+        if st.button("Convert PDF page(s) to mapper image(s)", key=f"actual_mapper_pdf_convert_btn_{selected_job_id}", use_container_width=True):
+            saved_count = maybe_convert_uploaded_pdf_to_mapper_images(
+                selected_job_id,
+                uploaded_pdf_plans,
+                pdf_view_name,
+                pdf_page_selection,
+                pdf_dpi,
+                pdf_image_format,
+                key_prefix=f"actual_mapper_pdf_convert_{selected_job_id}",
+            )
+            if saved_count:
+                st.success(f"Created {saved_count} clean drawing image(s). Select one below to build the progress overlay.")
+                st.rerun()
+
+    with st.expander("Upload existing plan/elevation image(s) for clickable overlay", expanded=False):
         c1, c2 = st.columns([1, 2])
         view_name_upload = c1.selectbox(
             "Drawing view",
@@ -10422,7 +10873,7 @@ def building_progress_mapper_page(default_job_id=None):
     if image_docs.empty:
         pdf_docs = drawing_mapper_reference_pdfs_df(selected_job_id)
         if not pdf_docs.empty:
-            st.info("PDF plans are attached, but to make the progress mapper resemble the plans you need a screenshot/image of the plan or elevation page. Open the PDF, screenshot the elevation/floor plan page, then upload it above.")
+            st.info("PDF plans are attached. Use the PDF converter above to turn the correct plan/elevation pages into PNG/JPEG images, then select the converted image here for the clickable progress overlay.")
             st.dataframe(pdf_docs[["Type", "File Name", "Uploaded"]], width="stretch", hide_index=True)
         else:
             st.info("No plan/elevation images are uploaded yet. Upload a screenshot/export of the plan or elevation page above.")
@@ -11042,6 +11493,7 @@ def painting_takeoff_generator_page(default_job_id=None):
 
     st.markdown("### 1. Upload plans, specs, colour schedules or scope")
     st.caption("Use this upload area for the take-off source documents. They save directly into the selected Job Folder.")
+    render_smart_plan_set_import(job_id, key_prefix=f"takeoff_smart_import_{job_id}", expanded=True)
     render_job_documents_panel(job_id, allow_upload=True, allow_delete=False, key_prefix=f"takeoff_docs_{job_id}")
 
     st.divider()

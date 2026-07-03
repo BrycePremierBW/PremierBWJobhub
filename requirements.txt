@@ -1,7 +1,8 @@
 streamlit
 pandas
-openpyxl
-pypdf
-psycopg2-binary
-Pillow
+pillow
 requests
+psycopg2-binary
+pypdf
+openpyxl
+PyMuPDF
