@@ -84,6 +84,7 @@ PB_MENU_ICONS = {
     "Management": "⚙️",
     "AI Assistant": "🤖",
     "3D Building Mapper": "🏗️",
+    "Building Progress Mapper": "🗺️",
     "Employee Portal": "👷",
 }
 
@@ -1180,6 +1181,51 @@ def init_db():
     cur.execute("CREATE INDEX IF NOT EXISTS idx_building_surfaces_package_id ON building_model_surfaces(package_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_building_surfaces_progress_id ON building_model_surfaces(progress_section_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_building_surfaces_takeoff_line_id ON building_model_surfaces(takeoff_line_id)")
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS drawing_progress_zones (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_id INTEGER NOT NULL,
+        package_id INTEGER,
+        document_id INTEGER,
+        progress_section_id INTEGER,
+        takeoff_line_id INTEGER,
+        view_name TEXT,
+        zone_name TEXT,
+        x_percent REAL DEFAULT 5,
+        y_percent REAL DEFAULT 5,
+        width_percent REAL DEFAULT 15,
+        height_percent REAL DEFAULT 10,
+        colour_hex TEXT,
+        notes TEXT,
+        created_at TEXT,
+        updated_at TEXT,
+        FOREIGN KEY(job_id) REFERENCES jobs(id),
+        FOREIGN KEY(package_id) REFERENCES painting_takeoff_packages(id),
+        FOREIGN KEY(document_id) REFERENCES job_documents(id),
+        FOREIGN KEY(progress_section_id) REFERENCES painting_progress_sections(id),
+        FOREIGN KEY(takeoff_line_id) REFERENCES painting_takeoff_lines(id)
+    )
+    """)
+    ensure_column("drawing_progress_zones", "job_id", "INTEGER")
+    ensure_column("drawing_progress_zones", "package_id", "INTEGER")
+    ensure_column("drawing_progress_zones", "document_id", "INTEGER")
+    ensure_column("drawing_progress_zones", "progress_section_id", "INTEGER")
+    ensure_column("drawing_progress_zones", "takeoff_line_id", "INTEGER")
+    ensure_column("drawing_progress_zones", "view_name", "TEXT")
+    ensure_column("drawing_progress_zones", "zone_name", "TEXT")
+    ensure_column("drawing_progress_zones", "x_percent", "REAL DEFAULT 5")
+    ensure_column("drawing_progress_zones", "y_percent", "REAL DEFAULT 5")
+    ensure_column("drawing_progress_zones", "width_percent", "REAL DEFAULT 15")
+    ensure_column("drawing_progress_zones", "height_percent", "REAL DEFAULT 10")
+    ensure_column("drawing_progress_zones", "colour_hex", "TEXT")
+    ensure_column("drawing_progress_zones", "notes", "TEXT")
+    ensure_column("drawing_progress_zones", "created_at", "TEXT")
+    ensure_column("drawing_progress_zones", "updated_at", "TEXT")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_drawing_zones_job_id ON drawing_progress_zones(job_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_drawing_zones_package_id ON drawing_progress_zones(package_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_drawing_zones_document_id ON drawing_progress_zones(document_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_drawing_zones_progress_id ON drawing_progress_zones(progress_section_id)")
 
 
     cur.execute("CREATE INDEX IF NOT EXISTS idx_timesheet_entries_job_id ON timesheet_entries(job_id)")
@@ -9922,6 +9968,452 @@ def building_mapper_page(default_job_id=None):
                 st.success("Mapped surface deleted.")
                 st.rerun()
 
+# =============================
+# ACTUAL PLAN / ELEVATION PROGRESS MAPPER
+# =============================
+
+def drawing_mapper_image_documents_df(job_id):
+    return df_query("""
+        SELECT id AS "ID",
+               document_type AS "Type",
+               file_name AS "File Name",
+               file_path AS "File Path",
+               created_at AS "Uploaded",
+               notes AS "Notes"
+        FROM job_documents
+        WHERE job_id = ?
+          AND LOWER(COALESCE(file_name, '')) LIKE '%.png'
+           OR (job_id = ? AND LOWER(COALESCE(file_name, '')) LIKE '%.jpg')
+           OR (job_id = ? AND LOWER(COALESCE(file_name, '')) LIKE '%.jpeg')
+           OR (job_id = ? AND LOWER(COALESCE(file_name, '')) LIKE '%.webp')
+        ORDER BY id DESC
+    """, (job_id, job_id, job_id, job_id))
+
+
+def drawing_mapper_reference_pdfs_df(job_id):
+    return df_query("""
+        SELECT id AS "ID",
+               document_type AS "Type",
+               file_name AS "File Name",
+               file_path AS "File Path",
+               created_at AS "Uploaded",
+               notes AS "Notes"
+        FROM job_documents
+        WHERE job_id = ?
+          AND LOWER(COALESCE(file_name, '')) LIKE '%.pdf'
+        ORDER BY id DESC
+    """, (job_id,))
+
+
+def drawing_progress_zones_df(job_id, package_id=None, document_id=None):
+    params = [job_id]
+    where = "WHERE z.job_id = ?"
+    if package_id:
+        where += " AND z.package_id = ?"
+        params.append(package_id)
+    if document_id:
+        where += " AND z.document_id = ?"
+        params.append(document_id)
+    df = df_query(f"""
+        SELECT z.id AS "ID",
+               z.job_id AS "Job ID",
+               z.package_id AS "Package ID",
+               z.document_id AS "Document ID",
+               z.progress_section_id AS "Progress Section ID",
+               z.takeoff_line_id AS "Takeoff Line ID",
+               z.view_name AS "View",
+               z.zone_name AS "Zone Name",
+               z.x_percent AS "X %",
+               z.y_percent AS "Y %",
+               z.width_percent AS "Width %",
+               z.height_percent AS "Height %",
+               z.colour_hex AS "Base Colour",
+               ps.section_code AS "Section Code",
+               ps.area_type AS "Area",
+               ps.location_area AS "Location / Area",
+               ps.substrate AS "Substrate",
+               ps.labour_category AS "Labour Category",
+               ps.total_m2 AS "Total m2",
+               ps.completed_m2 AS "Completed m2",
+               ps.completed_percent AS "Completed %",
+               ps.allocated_value_ex_gst AS "Section Value Ex GST",
+               (ps.allocated_value_ex_gst * ps.completed_percent / 100.0) AS "Billable Value Ex GST",
+               tl.labour_hours AS "Total Labour Hours",
+               tl.paint_litres AS "Total Paint Litres",
+               ps.status AS "Status",
+               z.notes AS "Notes",
+               z.updated_at AS "Updated At"
+        FROM drawing_progress_zones z
+        LEFT JOIN painting_progress_sections ps ON ps.id = z.progress_section_id
+        LEFT JOIN painting_takeoff_lines tl ON tl.id = z.takeoff_line_id
+        {where}
+        ORDER BY z.view_name, z.id
+    """, tuple(params))
+    numeric_cols = ["X %", "Y %", "Width %", "Height %", "Total m2", "Completed m2", "Completed %", "Section Value Ex GST", "Billable Value Ex GST", "Total Labour Hours", "Total Paint Litres"]
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+    return df
+
+
+def progress_zone_status_colour(row):
+    try:
+        pct = float(row.get("Completed %") or 0)
+    except Exception:
+        pct = 0
+    if pct >= 99.5:
+        return "#16a34a"  # complete
+    if pct > 0:
+        return "#f59e0b"  # in progress
+    return str(row.get("Base Colour") or building_surface_colour(row.get("Substrate"), row.get("Labour Category"), row.get("Area")) or "#60a5fa")
+
+
+def render_actual_drawing_progress_overlay(image_path, zones_df, key_prefix="actual_drawing_mapper"):
+    if not image_path or not os.path.exists(str(image_path)):
+        st.warning("The selected drawing image file could not be found. Upload the plan/elevation image again.")
+        return
+    try:
+        with Image.open(image_path) as img:
+            width, height = img.size
+        with open(image_path, "rb") as f:
+            encoded = base64.b64encode(f.read()).decode("utf-8")
+        ext = os.path.splitext(str(image_path))[1].lower().replace(".", "") or "png"
+        mime = "image/jpeg" if ext in ["jpg", "jpeg"] else f"image/{ext}"
+        data_uri = f"data:{mime};base64,{encoded}"
+    except Exception as e:
+        st.error(f"Could not load drawing image: {e}")
+        return
+
+    zones = []
+    if zones_df is not None and not zones_df.empty:
+        for _, row in zones_df.iterrows():
+            pct = app_float(row.get("Completed %"))
+            colour = progress_zone_status_colour(row)
+            zones.append({
+                "id": int(row.get("ID") or 0),
+                "name": str(row.get("Zone Name") or row.get("Location / Area") or "Zone"),
+                "section": str(row.get("Section Code") or ""),
+                "area": str(row.get("Area") or ""),
+                "location": str(row.get("Location / Area") or ""),
+                "substrate": str(row.get("Substrate") or ""),
+                "labour": float(app_float(row.get("Total Labour Hours"))),
+                "paint": float(app_float(row.get("Total Paint Litres"))),
+                "m2": float(app_float(row.get("Total m2"))),
+                "value": float(app_float(row.get("Section Value Ex GST"))),
+                "billable": float(app_float(row.get("Billable Value Ex GST"))),
+                "pct": float(pct),
+                "status": str(row.get("Status") or "Not Started"),
+                "x": max(0, min(100, app_float(row.get("X %")))),
+                "y": max(0, min(100, app_float(row.get("Y %")))),
+                "w": max(1, min(100, app_float(row.get("Width %")))),
+                "h": max(1, min(100, app_float(row.get("Height %")))),
+                "colour": colour,
+            })
+    zones_json = json.dumps(zones)
+    aspect = max(width / max(height, 1), 0.2)
+    html_doc = f"""
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8" />
+<style>
+  body {{ margin:0; background:#0b0f12; font-family: Inter, Arial, sans-serif; color:#f8fafc; }}
+  .wrap {{ display:grid; grid-template-columns:minmax(0,1fr) 320px; gap:14px; height:720px; padding:12px; box-sizing:border-box; }}
+  .drawingPanel {{ background:#111827; border:1px solid rgba(255,255,255,.12); border-radius:16px; padding:14px; overflow:auto; }}
+  .title {{ font-size:18px; font-weight:800; margin-bottom:4px; }}
+  .hint {{ font-size:12px; color:#cbd5e1; margin-bottom:10px; }}
+  .canvasOuter {{ min-width:760px; max-width:100%; }}
+  .canvas {{ position:relative; width:100%; aspect-ratio:{aspect}; background-image:url('{data_uri}'); background-size:contain; background-repeat:no-repeat; background-position:center; border-radius:10px; border:1px solid rgba(255,255,255,.18); box-shadow:0 12px 28px rgba(0,0,0,.35); overflow:hidden; }}
+  .zone {{ position:absolute; border:2px solid rgba(255,255,255,.95); border-radius:5px; box-sizing:border-box; cursor:pointer; display:flex; align-items:flex-start; justify-content:flex-start; padding:3px; color:#071014; font-size:11px; font-weight:800; text-shadow:0 1px 0 rgba(255,255,255,.4); opacity:.72; transition:all .12s ease-in-out; overflow:hidden; }}
+  .zone:hover {{ opacity:.95; transform:scale(1.015); z-index:50; box-shadow:0 0 0 3px rgba(37,99,235,.7); }}
+  .zone.selected {{ box-shadow:0 0 0 4px rgba(37,99,235,.9); opacity:.95; }}
+  .side {{ background:#0f172a; border:1px solid rgba(255,255,255,.12); border-radius:16px; padding:16px; overflow:auto; }}
+  .metricGrid {{ display:grid; grid-template-columns:1fr 1fr; gap:10px; margin:12px 0; }}
+  .metric {{ background:rgba(255,255,255,.06); border:1px solid rgba(255,255,255,.1); border-radius:12px; padding:10px; }}
+  .label {{ color:#94a3b8; font-size:11px; }}
+  .value {{ font-size:17px; font-weight:800; margin-top:3px; }}
+  .info {{ background:rgba(255,255,255,.06); border:1px solid rgba(255,255,255,.1); border-radius:12px; padding:12px; line-height:1.5; }}
+  .pill {{ display:inline-block; padding:4px 8px; border-radius:999px; background:rgba(255,255,255,.1); margin:3px 3px 3px 0; font-size:11px; }}
+  .legend {{ display:flex; flex-wrap:wrap; gap:8px; margin-top:8px; font-size:12px; color:#cbd5e1; }}
+  .dot {{ display:inline-block; width:12px; height:12px; border-radius:50%; margin-right:5px; vertical-align:-2px; }}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="drawingPanel">
+    <div class="title">Actual Plan / Elevation Progress Mapper</div>
+    <div class="hint">This uses the real uploaded drawing image as the background. Coloured zones are linked to take-off/progress sections.</div>
+    <div class="canvasOuter"><div class="canvas" id="canvas"></div></div>
+    <div class="legend"><span><span class="dot" style="background:#16a34a"></span>Complete</span><span><span class="dot" style="background:#f59e0b"></span>In progress</span><span><span class="dot" style="background:#60a5fa"></span>Not started / mapped</span></div>
+  </div>
+  <div class="side">
+    <div class="title">Selected zone</div>
+    <div class="hint">Click a coloured zone on the actual plan/elevation.</div>
+    <div class="metricGrid">
+      <div class="metric"><div class="label">Mapped zones</div><div class="value" id="count">0</div></div>
+      <div class="metric"><div class="label">Total m²</div><div class="value" id="totalM2">0</div></div>
+      <div class="metric"><div class="label">Total value</div><div class="value" id="totalValue">$0</div></div>
+      <div class="metric"><div class="label">Billable</div><div class="value" id="totalBillable">$0</div></div>
+    </div>
+    <div id="info" class="info"><strong>No zone selected</strong><br><span style="color:#94a3b8">Click an overlay zone to inspect m², labour, paint and billable value.</span></div>
+  </div>
+</div>
+<script>
+const zones = {zones_json};
+const canvas = document.getElementById('canvas');
+function money(v) {{ return '$' + Number(v || 0).toLocaleString(undefined, {{minimumFractionDigits:2, maximumFractionDigits:2}}); }}
+function num(v, d=1) {{ return Number(v || 0).toLocaleString(undefined, {{minimumFractionDigits:d, maximumFractionDigits:d}}); }}
+let totalM2 = 0, totalValue = 0, totalBillable = 0;
+zones.forEach(z => {{
+  totalM2 += z.m2 || 0; totalValue += z.value || 0; totalBillable += z.billable || 0;
+  const el = document.createElement('div');
+  el.className = 'zone';
+  el.style.left = z.x + '%';
+  el.style.top = z.y + '%';
+  el.style.width = z.w + '%';
+  el.style.height = z.h + '%';
+  el.style.background = z.colour || '#60a5fa';
+  el.title = z.name;
+  el.innerHTML = '<span>' + (z.section || z.id) + '</span>';
+  el.onclick = () => {{
+    document.querySelectorAll('.zone').forEach(x => x.classList.remove('selected'));
+    el.classList.add('selected');
+    document.getElementById('info').innerHTML = `
+      <strong>${{z.name}}</strong><br>
+      <span class="pill">${{z.substrate || 'Substrate'}}</span><span class="pill">${{z.status || 'Status'}}</span><br>
+      <div style="margin-top:8px;color:#cbd5e1">${{z.location || ''}}</div>
+      <hr style="border-color:rgba(255,255,255,.12)">
+      Area: <strong>${{num(z.m2,1)}} m²</strong><br>
+      Value: <strong>${{money(z.value)}}</strong><br>
+      Billable: <strong>${{money(z.billable)}}</strong><br>
+      Labour: <strong>${{num(z.labour,1)}} hrs</strong><br>
+      Paint: <strong>${{num(z.paint,1)}} L</strong><br>
+      Completion: <strong>${{num(z.pct,0)}}%</strong>
+    `;
+  }};
+  canvas.appendChild(el);
+}});
+document.getElementById('count').innerText = zones.length;
+document.getElementById('totalM2').innerText = num(totalM2,1);
+document.getElementById('totalValue').innerText = money(totalValue);
+document.getElementById('totalBillable').innerText = money(totalBillable);
+</script>
+</body>
+</html>
+"""
+    components.html(html_doc, height=760, scrolling=False)
+
+
+def create_grid_zones_from_progress_sections(job_id, package_id, document_id, view_name="Plan / Elevation", reset_existing=False):
+    if reset_existing:
+        execute("DELETE FROM drawing_progress_zones WHERE job_id = ? AND package_id = ? AND document_id = ?", (job_id, package_id, document_id))
+    sections = progress_sections_df(job_id, package_id)
+    if sections.empty:
+        ensure_progress_sections_for_package(package_id, reset_values=False)
+        sections = progress_sections_df(job_id, package_id)
+    if sections.empty:
+        return 0
+    existing = drawing_progress_zones_df(job_id, package_id, document_id)
+    existing_progress_ids = set()
+    if not existing.empty and "Progress Section ID" in existing.columns:
+        existing_progress_ids = {int(x) for x in existing["Progress Section ID"].dropna().astype(int).tolist() if int(x) > 0}
+    now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    created = 0
+    cols = 5
+    cell_w = 17.5
+    cell_h = 12.0
+    gap_x = 1.5
+    gap_y = 1.8
+    start_x = 4.0
+    start_y = 6.0
+    for idx, (_, row) in enumerate(sections.iterrows()):
+        progress_id = int(row.get("ID") or 0)
+        if progress_id in existing_progress_ids:
+            continue
+        grid_i = created
+        col = grid_i % cols
+        line = grid_i // cols
+        x = start_x + col * (cell_w + gap_x)
+        y = start_y + line * (cell_h + gap_y)
+        if y + cell_h > 96:
+            y = 6 + (line % 6) * (cell_h + gap_y)
+        zone_name = str(row.get("Location / Area") or row.get("Section Code") or f"Zone {created+1}")
+        execute("""
+            INSERT INTO drawing_progress_zones
+            (job_id, package_id, document_id, progress_section_id, takeoff_line_id, view_name, zone_name,
+             x_percent, y_percent, width_percent, height_percent, colour_hex, notes, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            job_id, package_id, document_id, progress_id,
+            int(row.get("Takeoff Line ID") or 0) if app_float(row.get("Takeoff Line ID")) else None,
+            view_name, zone_name, float(x), float(y), float(cell_w), float(cell_h),
+            building_surface_colour(row.get("Substrate"), row.get("Labour Category"), row.get("Area")),
+            "Auto-created grid zone. Drag by editing X/Y/Width/Height so it lines up with the actual drawing.",
+            now_text, now_text,
+        ))
+        created += 1
+    return created
+
+
+def building_progress_mapper_page(default_job_id=None):
+    pb_page_header("Actual Plan & Elevation Progress Mapper", "Use the real plan/elevation drawing as the background, then place clickable coloured zones over the actual building areas.", "Actual Drawing Overlay")
+    jobs_df = job_lookup_dataframe(include_archived=False)
+    selected_job_id = select_job_from_dataframe(jobs_df, "Select job", key=f"actual_mapper_job_select_{default_job_id or 'main'}", default_job_id=default_job_id or st.session_state.get("actual_mapper_selected_job_id"))
+    if not selected_job_id:
+        st.info("Create/select a job first.")
+        return
+    selected_job_id = int(selected_job_id)
+    st.session_state["actual_mapper_selected_job_id"] = selected_job_id
+
+    package_id = latest_takeoff_package_for_job(selected_job_id)
+    packages = takeoff_packages_for_job(selected_job_id)
+    if not packages.empty:
+        package_options = {f"{int(r['id'])} - {r['package_name']} ({r['status']})": int(r["id"]) for _, r in packages.iterrows()}
+        default_label = next((label for label, pid in package_options.items() if pid == package_id), list(package_options.keys())[0])
+        selected_label = st.selectbox("Take-off package / progress model", list(package_options.keys()), index=list(package_options.keys()).index(default_label), key=f"actual_mapper_package_select_{selected_job_id}")
+        package_id = package_options[selected_label]
+    else:
+        st.warning("Create or import a painting take-off first. The mapper links drawing zones to take-off/progress sections.")
+        if st.button("Open Painting Take-off Generator", key=f"actual_mapper_open_takeoff_{selected_job_id}"):
+            st.session_state["go_to_menu"] = "Painting Take-off Generator"
+            st.rerun()
+        return
+
+    st.markdown("### 1. Upload actual drawing page image")
+    st.caption("For the closest match to the plans, upload a screenshot/export of the actual floor plan or elevation page as PNG/JPG. PDFs can still be stored as references, but the clickable overlay works best on an image.")
+    render_quick_pdf_import_buttons(selected_job_id, categories=["Architectural Plans", "Specifications", "Colour Schedule", "Scope of Works"], title="Attach PDFs as reference", key_prefix=f"actual_mapper_reference_pdf_{selected_job_id}", expanded=False)
+    with st.expander("Upload plan/elevation image for clickable overlay", expanded=True):
+        c1, c2 = st.columns([1, 2])
+        view_name_upload = c1.selectbox("Drawing view", ["Front Elevation", "Rear Elevation", "Left Elevation", "Right Elevation", "Ground Floor Plan", "Level 1 Plan", "Roof / Soffit Plan", "Internal Areas", "Other"], key=f"actual_mapper_upload_view_{selected_job_id}")
+        uploaded_image = c2.file_uploader("Upload plan/elevation image", type=["png", "jpg", "jpeg", "webp"], key=f"actual_mapper_image_upload_{selected_job_id}")
+        if st.button("Upload Drawing Image", key=f"actual_mapper_upload_image_btn_{selected_job_id}"):
+            if not uploaded_image:
+                st.error("Choose a PNG/JPG/WEBP drawing image first.")
+            else:
+                try:
+                    save_uploaded_job_document(selected_job_id, uploaded_image, f"Drawing Mapper - {view_name_upload}", notes="Image background for Actual Plan & Elevation Progress Mapper")
+                    st.success("Drawing image uploaded. Select it below to place zones over it.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Could not upload drawing image: {e}")
+
+    image_docs = drawing_mapper_image_documents_df(selected_job_id)
+    if image_docs.empty:
+        pdf_docs = drawing_mapper_reference_pdfs_df(selected_job_id)
+        if not pdf_docs.empty:
+            st.info("PDF plans are attached, but to make the progress mapper resemble the plans you need a screenshot/image of the plan or elevation page. Open the PDF, screenshot the elevation/floor plan page, then upload it above.")
+            st.dataframe(pdf_docs[["Type", "File Name", "Uploaded"]], width="stretch", hide_index=True)
+        else:
+            st.info("No plan/elevation images are uploaded yet. Upload a screenshot/export of the plan or elevation page above.")
+        return
+
+    st.markdown("### 2. Select drawing background")
+    doc_options = {f"{int(r['ID'])} - {r['Type']} - {r['File Name']}": int(r["ID"]) for _, r in image_docs.iterrows()}
+    selected_doc_label = st.selectbox("Actual plan/elevation image", list(doc_options.keys()), key=f"actual_mapper_doc_select_{selected_job_id}_{package_id}")
+    document_id = doc_options[selected_doc_label]
+    selected_doc = image_docs[image_docs["ID"] == document_id].iloc[0]
+    image_path = str(selected_doc.get("File Path") or "")
+
+    st.markdown("### 3. Create and position mapped zones")
+    zc1, zc2, zc3 = st.columns(3)
+    if zc1.button("Auto-create zones from take-off", key=f"actual_mapper_auto_zones_{selected_job_id}_{package_id}_{document_id}", use_container_width=True):
+        created = create_grid_zones_from_progress_sections(selected_job_id, package_id, document_id, view_name=str(selected_doc.get("Type") or "Drawing"), reset_existing=False)
+        st.success(f"Created {created} new mapped zone(s). Move them into place using the zone schedule below.")
+        st.rerun()
+    if zc2.button("Reset zones for this drawing", key=f"actual_mapper_reset_zones_{selected_job_id}_{package_id}_{document_id}", use_container_width=True):
+        created = create_grid_zones_from_progress_sections(selected_job_id, package_id, document_id, view_name=str(selected_doc.get("Type") or "Drawing"), reset_existing=True)
+        st.success(f"Reset and created {created} mapped zone(s).")
+        st.rerun()
+    if zc3.button("Open Progress / Billing", key=f"actual_mapper_open_progress_{selected_job_id}_{package_id}", use_container_width=True):
+        st.session_state["go_to_menu"] = "Progress / Billing Model"
+        st.rerun()
+
+    zones = drawing_progress_zones_df(selected_job_id, package_id, document_id)
+    render_actual_drawing_progress_overlay(image_path, zones, key_prefix=f"actual_mapper_overlay_{selected_job_id}_{package_id}_{document_id}")
+
+    st.markdown("### 4. Move zones to match the drawing")
+    st.caption("Edit X%, Y%, Width% and Height% until each coloured zone sits over the matching part of the actual plan/elevation. This is what makes the model look nearly identical to the plans.")
+    if not zones.empty:
+        edit_cols = ["ID", "View", "Zone Name", "X %", "Y %", "Width %", "Height %", "Section Code", "Substrate", "Total m2", "Completed %", "Section Value Ex GST", "Status"]
+        edited = st.data_editor(zones[[c for c in edit_cols if c in zones.columns]].copy(), hide_index=True, width="stretch", key=f"actual_mapper_zone_editor_{selected_job_id}_{package_id}_{document_id}", disabled=["ID", "Section Code", "Substrate", "Total m2", "Completed %", "Section Value Ex GST", "Status"])
+        if st.button("Save zone positions", key=f"actual_mapper_save_zones_{selected_job_id}_{package_id}_{document_id}"):
+            for _, row in edited.iterrows():
+                execute("""
+                    UPDATE drawing_progress_zones
+                    SET view_name = ?, zone_name = ?, x_percent = ?, y_percent = ?, width_percent = ?, height_percent = ?, updated_at = ?
+                    WHERE id = ?
+                """, (str(row.get("View") or ""), str(row.get("Zone Name") or ""), max(0, min(100, app_float(row.get("X %")))), max(0, min(100, app_float(row.get("Y %")))), max(1, min(100, app_float(row.get("Width %")))), max(1, min(100, app_float(row.get("Height %")))), datetime.now().strftime("%Y-%m-%d %H:%M:%S"), int(row.get("ID"))))
+            st.success("Zone positions saved.")
+            st.rerun()
+
+        st.markdown("### 5. Mark selected drawing zones as complete / partly complete")
+        zone_options = {f"{int(row['ID'])} - {row['Zone Name']} | {row['Substrate']} | {app_float(row['Total m2']):.1f}m² | {app_float(row['Completed %']):.0f}%": int(row["Progress Section ID"] or 0) for _, row in zones.iterrows() if int(row.get("Progress Section ID") or 0) > 0}
+        selected_zone_labels = st.multiselect("Select mapped zones to update", list(zone_options.keys()), key=f"actual_mapper_select_zones_{selected_job_id}_{package_id}_{document_id}")
+        progress_percent = st.slider("Completion percentage for selected zones", min_value=0, max_value=100, value=100, step=5, key=f"actual_mapper_completion_pct_{selected_job_id}_{package_id}_{document_id}")
+        if st.button("Apply completion to selected zones", key=f"actual_mapper_apply_completion_{selected_job_id}_{package_id}_{document_id}"):
+            if not selected_zone_labels:
+                st.error("Select at least one mapped zone.")
+            else:
+                now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                updated = 0
+                for label in selected_zone_labels:
+                    progress_id = zone_options[label]
+                    row_df = zones[zones["Progress Section ID"] == progress_id]
+                    total_m2 = app_float(row_df.iloc[0].get("Total m2")) if not row_df.empty else 0
+                    completed_m2 = total_m2 * float(progress_percent) / 100.0
+                    status = "Complete" if progress_percent >= 100 else ("In Progress" if progress_percent > 0 else "Not Started")
+                    execute("""
+                        UPDATE painting_progress_sections
+                        SET completed_percent = ?, completed_m2 = ?, status = ?, updated_by = ?, updated_at = ?
+                        WHERE id = ?
+                    """, (float(progress_percent), float(completed_m2), status, current_username(), now_text, int(progress_id)))
+                    updated += 1
+                st.success(f"Updated {updated} mapped zone(s).")
+                st.rerun()
+    else:
+        st.info("No zones mapped yet. Press Auto-create zones from take-off, then move them over the real plan/elevation.")
+
+    with st.expander("Manually add one zone"):
+        sections = progress_sections_df(selected_job_id, package_id)
+        if sections.empty:
+            st.info("No progress sections found. Refresh the progress model from the take-off first.")
+        else:
+            labels = {progress_section_label(r): r for _, r in sections.iterrows()}
+            with st.form(f"actual_mapper_manual_zone_{selected_job_id}_{package_id}_{document_id}"):
+                selected_section_label = st.selectbox("Link to take-off/progress section", list(labels.keys()))
+                z1, z2, z3 = st.columns(3)
+                zone_name = z1.text_input("Zone name", "Mapped area")
+                view_name = z2.text_input("View name", str(selected_doc.get("Type") or "Drawing"))
+                zone_note = z3.text_input("Notes", "")
+                p1, p2, p3, p4 = st.columns(4)
+                x_percent = p1.number_input("X %", min_value=0.0, max_value=100.0, value=5.0, step=1.0)
+                y_percent = p2.number_input("Y %", min_value=0.0, max_value=100.0, value=5.0, step=1.0)
+                width_percent = p3.number_input("Width %", min_value=1.0, max_value=100.0, value=15.0, step=1.0)
+                height_percent = p4.number_input("Height %", min_value=1.0, max_value=100.0, value=10.0, step=1.0)
+                if st.form_submit_button("Add mapped drawing zone"):
+                    src_row = labels[selected_section_label]
+                    execute("""
+                        INSERT INTO drawing_progress_zones
+                        (job_id, package_id, document_id, progress_section_id, takeoff_line_id, view_name, zone_name,
+                         x_percent, y_percent, width_percent, height_percent, colour_hex, notes, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (selected_job_id, package_id, document_id, int(src_row.get("ID") or 0), int(src_row.get("Takeoff Line ID") or 0) if app_float(src_row.get("Takeoff Line ID")) else None, view_name, zone_name, x_percent, y_percent, width_percent, height_percent, building_surface_colour(src_row.get("Substrate"), src_row.get("Labour Category"), src_row.get("Area")), zone_note, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+                    st.success("Mapped zone added.")
+                    st.rerun()
+
+    with st.expander("Delete mapped zone"):
+        zones_for_delete = drawing_progress_zones_df(selected_job_id, package_id, document_id)
+        if zones_for_delete.empty:
+            st.info("No mapped zones to delete.")
+        else:
+            delete_options = {f"{int(row['ID'])} - {row['Zone Name']}": int(row["ID"]) for _, row in zones_for_delete.iterrows()}
+            selected_delete = st.selectbox("Select zone to delete", list(delete_options.keys()), key=f"actual_mapper_delete_zone_select_{selected_job_id}_{package_id}_{document_id}")
+            if st.button("Delete selected mapped zone", key=f"actual_mapper_delete_zone_btn_{selected_job_id}_{package_id}_{document_id}"):
+                execute("DELETE FROM drawing_progress_zones WHERE id = ?", (delete_options[selected_delete],))
+                st.success("Mapped zone deleted.")
+                st.rerun()
+
+
 def render_progress_billing_model(job_id, package_id=None, key_prefix="progress_model"):
     if not package_id:
         package_id = latest_takeoff_package_for_job(job_id)
@@ -10931,11 +11423,12 @@ def render_job_linked_info(job_id, expanded=True):
     m4.metric("Wages", f"${wage_total:,.2f}")
     m5.metric("Basic Position", f"${gross_position:,.2f}")
 
-    tab_summary, tab_documents, tab_takeoff, tab_progress, tab_mapper, tab_costs, tab_materials, tab_wages, tab_equipment, tab_control, tab_photos = st.tabs([
+    tab_summary, tab_documents, tab_takeoff, tab_progress, tab_plan_mapper, tab_mapper, tab_costs, tab_materials, tab_wages, tab_equipment, tab_control, tab_photos = st.tabs([
         "Summary",
         "Plans / Docs",
         "Painting Take-off",
         "Progress / Billing",
+        "Plan / Elevation Mapper",
         "3D Building Mapper",
         "Costs & Estimates",
         "Materials",
@@ -10963,6 +11456,9 @@ def render_job_linked_info(job_id, expanded=True):
 
     with tab_progress:
         progress_billing_model_page(default_job_id=job_id)
+
+    with tab_plan_mapper:
+        building_progress_mapper_page(default_job_id=job_id)
 
     with tab_mapper:
         building_mapper_page(default_job_id=job_id)
@@ -11386,6 +11882,7 @@ elif role == "manager":
         "Painting Take-off Generator": "Painting Take-off Generator",
         "Progress / Billing Model": "Progress / Billing Model",
         "3D Building Mapper": "3D Building Mapper",
+        "Building Progress Mapper": "Building Progress Mapper",
         "Estimate Working Sheet": "Estimate Working Sheet",
         "Job Costs / Forecasting": "Job Costs / Forecasting",
     }
@@ -11423,6 +11920,7 @@ else:
         "Painting Take-off Generator": "Painting Take-off Generator",
         "Progress / Billing Model": "Progress / Billing Model",
         "3D Building Mapper": "3D Building Mapper",
+        "Building Progress Mapper": "Building Progress Mapper",
         "Estimate Working Sheet": "Estimate Working Sheet",
         "Job Costs / Forecasting": "Job Costs / Forecasting",
     }
@@ -12115,6 +12613,9 @@ elif menu == "Progress / Billing Model":
 
 elif menu == "3D Building Mapper":
     building_mapper_page()
+
+elif menu == "Building Progress Mapper":
+    building_progress_mapper_page()
 
 
 elif menu == "Estimate Working Sheet":
