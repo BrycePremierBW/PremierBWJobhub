@@ -8797,6 +8797,34 @@ def latest_takeoff_package_for_job(job_id):
     return int(packages.iloc[0]["id"])
 
 
+def takeoff_packages_for_job(job_id):
+    """Return take-off packages for a job using the labels expected by mapper pages."""
+    packages = df_query("""
+        SELECT
+            id,
+            COALESCE(NULLIF(takeoff_no, ''), '') AS package_name,
+            COALESCE(NULLIF(status, ''), 'Draft') AS status,
+            takeoff_no,
+            takeoff_date,
+            generated_method,
+            interior_total_m2,
+            exterior_total_m2,
+            total_labour_hours,
+            total_paint_litres,
+            updated_at
+        FROM painting_takeoff_packages
+        WHERE job_id = ?
+        ORDER BY id DESC
+    """, (job_id,))
+    if not packages.empty:
+        packages["package_name"] = packages.apply(
+            lambda r: str(r.get("package_name") or f"Take-off {int(r.get('id') or 0)}"),
+            axis=1,
+        )
+        packages["status"] = packages["status"].fillna("Draft").replace("", "Draft")
+    return packages
+
+
 def run_twenty_point_takeoff_check(package_id, save_result=True):
     pkg, lines = takeoff_summary_data(package_id)
     if pkg.empty:
