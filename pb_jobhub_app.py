@@ -83,6 +83,7 @@ PB_MENU_ICONS = {
     "Reports": "📊",
     "Management": "⚙️",
     "AI Assistant": "🤖",
+    "3D Building Mapper": "🏗️",
     "Employee Portal": "👷",
 }
 
@@ -1126,6 +1127,59 @@ def init_db():
     cur.execute("CREATE INDEX IF NOT EXISTS idx_progress_sections_job_id ON painting_progress_sections(job_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_progress_sections_package_id ON painting_progress_sections(package_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_progress_sections_line_id ON painting_progress_sections(takeoff_line_id)")
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS building_model_surfaces (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_id INTEGER NOT NULL,
+        package_id INTEGER,
+        progress_section_id INTEGER,
+        takeoff_line_id INTEGER,
+        section_code TEXT,
+        surface_name TEXT,
+        surface_type TEXT,
+        elevation TEXT,
+        level_name TEXT,
+        x_pos REAL DEFAULT 0,
+        y_pos REAL DEFAULT 0,
+        z_pos REAL DEFAULT 0,
+        width REAL DEFAULT 1,
+        height REAL DEFAULT 1,
+        depth REAL DEFAULT 0.1,
+        rotation_y REAL DEFAULT 0,
+        colour_hex TEXT,
+        notes TEXT,
+        created_at TEXT,
+        updated_at TEXT,
+        FOREIGN KEY(job_id) REFERENCES jobs(id),
+        FOREIGN KEY(package_id) REFERENCES painting_takeoff_packages(id),
+        FOREIGN KEY(takeoff_line_id) REFERENCES painting_takeoff_lines(id)
+    )
+    """)
+    ensure_column("building_model_surfaces", "job_id", "INTEGER")
+    ensure_column("building_model_surfaces", "package_id", "INTEGER")
+    ensure_column("building_model_surfaces", "progress_section_id", "INTEGER")
+    ensure_column("building_model_surfaces", "takeoff_line_id", "INTEGER")
+    ensure_column("building_model_surfaces", "section_code", "TEXT")
+    ensure_column("building_model_surfaces", "surface_name", "TEXT")
+    ensure_column("building_model_surfaces", "surface_type", "TEXT")
+    ensure_column("building_model_surfaces", "elevation", "TEXT")
+    ensure_column("building_model_surfaces", "level_name", "TEXT")
+    ensure_column("building_model_surfaces", "x_pos", "REAL DEFAULT 0")
+    ensure_column("building_model_surfaces", "y_pos", "REAL DEFAULT 0")
+    ensure_column("building_model_surfaces", "z_pos", "REAL DEFAULT 0")
+    ensure_column("building_model_surfaces", "width", "REAL DEFAULT 1")
+    ensure_column("building_model_surfaces", "height", "REAL DEFAULT 1")
+    ensure_column("building_model_surfaces", "depth", "REAL DEFAULT 0.1")
+    ensure_column("building_model_surfaces", "rotation_y", "REAL DEFAULT 0")
+    ensure_column("building_model_surfaces", "colour_hex", "TEXT")
+    ensure_column("building_model_surfaces", "notes", "TEXT")
+    ensure_column("building_model_surfaces", "created_at", "TEXT")
+    ensure_column("building_model_surfaces", "updated_at", "TEXT")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_building_surfaces_job_id ON building_model_surfaces(job_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_building_surfaces_package_id ON building_model_surfaces(package_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_building_surfaces_progress_id ON building_model_surfaces(progress_section_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_building_surfaces_takeoff_line_id ON building_model_surfaces(takeoff_line_id)")
 
 
     cur.execute("CREATE INDEX IF NOT EXISTS idx_timesheet_entries_job_id ON timesheet_entries(job_id)")
@@ -8355,12 +8409,7 @@ def import_takeoff_csv_to_package(job_id, csv_file, source_name="CSV Import", no
 
 
 def delete_takeoff_line_safely(line_id):
-    """Delete a take-off line and any progress-model sections that were generated from it.
-
-    Progress sections keep a foreign-key reference back to painting_takeoff_lines.
-    Deleting the progress rows first prevents PostgreSQL foreign-key crashes while keeping
-    the progress model in sync with the take-off.
-    """
+    """Delete a take-off line and any progress/model sections generated from it."""
     line_df = df_query("SELECT package_id FROM painting_takeoff_lines WHERE id = ?", (line_id,))
     if line_df.empty:
         return 0, None
@@ -8369,7 +8418,11 @@ def delete_takeoff_line_safely(line_id):
     linked_df = df_query("SELECT COUNT(*) AS c FROM painting_progress_sections WHERE takeoff_line_id = ?", (line_id,))
     linked_count = int(linked_df.iloc[0]["c"] or 0) if not linked_df.empty else 0
 
-    # Delete dependent progress rows first. This fixes PostgreSQL ForeignKeyViolation errors.
+    # Delete dependent visual/progress rows first. This fixes PostgreSQL ForeignKeyViolation errors.
+    try:
+        execute("DELETE FROM building_model_surfaces WHERE takeoff_line_id = ?", (line_id,))
+    except Exception:
+        pass
     execute("DELETE FROM painting_progress_sections WHERE takeoff_line_id = ?", (line_id,))
     execute("DELETE FROM painting_takeoff_lines WHERE id = ?", (line_id,))
     recalc_takeoff_package(package_id)
@@ -9372,6 +9425,339 @@ animate();
     components.html(html_doc, height=660, scrolling=False)
 
 
+
+# =============================
+# 3D BUILDING MAPPER / PLAN TRACE MODEL
+# =============================
+
+def building_surface_colour(substrate="", labour_category="", area_type=""):
+    s = f"{substrate} {labour_category} {area_type}".lower()
+    if "ceiling" in s:
+        return "#f8fafc"
+    if "door" in s or "frame" in s or "wood" in s or "timber" in s or "skirting" in s:
+        return "#8b5e3c"
+    if "feature" in s or "dark" in s:
+        return "#475569"
+    if "render" in s or "hebel" in s:
+        return "#d6c8b8"
+    if "cladding" in s or "weatherboard" in s:
+        return "#cbd5e1"
+    if "soffit" in s or "eave" in s:
+        return "#e5e7eb"
+    if "external" in s:
+        return "#e7d7c7"
+    return "#fffaf2"
+
+
+def infer_building_elevation(area_type="", location_area="", substrate="", labour_category="", index=0):
+    text_value = f"{area_type} {location_area} {substrate} {labour_category}".lower()
+    if "front" in text_value or "north" in text_value:
+        return "Front"
+    if "rear" in text_value or "back" in text_value or "south" in text_value:
+        return "Rear"
+    if "left" in text_value or "west" in text_value:
+        return "Left"
+    if "right" in text_value or "east" in text_value:
+        return "Right"
+    if "ceiling" in text_value or "soffit" in text_value or "eave" in text_value or "roof" in text_value:
+        return "Ceiling / Roof"
+    if "external" in text_value:
+        return ["Front", "Right", "Rear", "Left"][index % 4]
+    return "Internal"
+
+
+def infer_surface_type(substrate="", labour_category="", area_type=""):
+    text_value = f"{substrate} {labour_category} {area_type}".lower()
+    if "ceiling" in text_value:
+        return "Ceiling"
+    if "soffit" in text_value or "eave" in text_value:
+        return "Soffit / Eave"
+    if "door" in text_value or "frame" in text_value or "window" in text_value or "wood" in text_value or "timber" in text_value or "skirting" in text_value:
+        return "Woodwork / Frames"
+    if "feature" in text_value:
+        return "Feature"
+    if "external" in text_value or "render" in text_value or "cladding" in text_value or "hebel" in text_value:
+        return "External Wall"
+    return "Internal Wall"
+
+
+def default_building_surface_dimensions(total_m2, surface_type):
+    m2_value = max(app_float(total_m2), 0.5)
+    stype = str(surface_type or "").lower()
+    if "ceiling" in stype or "soffit" in stype or "eave" in stype:
+        width = max(1.2, min(6.0, m2_value ** 0.5))
+        depth = max(1.2, min(5.5, m2_value / width if width else 1.5))
+        return round(width, 2), 0.12, round(depth, 2)
+    if "wood" in stype or "frame" in stype:
+        return max(0.45, min(1.3, (m2_value ** 0.5) * 0.32)), 2.1, 0.12
+    height = 3.0 if "external" in stype else 2.7
+    width = max(0.85, min(5.8, m2_value / height))
+    return round(width, 2), round(height, 2), 0.14
+
+
+def building_model_surfaces_df(job_id, package_id=None):
+    params = [job_id]
+    where = "WHERE b.job_id = ?"
+    if package_id:
+        where += " AND b.package_id = ?"
+        params.append(package_id)
+    df = df_query(f"""
+        SELECT b.id AS "ID",
+               b.job_id AS "Job ID",
+               b.package_id AS "Package ID",
+               b.progress_section_id AS "Progress Section ID",
+               b.takeoff_line_id AS "Takeoff Line ID",
+               b.section_code AS "Section Code",
+               b.surface_name AS "Surface Name",
+               b.surface_type AS "Surface Type",
+               b.elevation AS "Elevation",
+               b.level_name AS "Level",
+               b.x_pos AS "X",
+               b.y_pos AS "Y",
+               b.z_pos AS "Z",
+               b.width AS "Width",
+               b.height AS "Height",
+               b.depth AS "Depth",
+               b.rotation_y AS "Rotation Y",
+               b.colour_hex AS "Colour",
+               ps.area_type AS "Area",
+               ps.location_area AS "Location / Area",
+               ps.substrate AS "Substrate",
+               ps.labour_category AS "Labour Category",
+               ps.total_m2 AS "Total m2",
+               ps.completed_m2 AS "Completed m2",
+               ps.completed_percent AS "Completed %",
+               ps.allocated_value_ex_gst AS "Section Value Ex GST",
+               (ps.allocated_value_ex_gst * ps.completed_percent / 100.0) AS "Billable Value Ex GST",
+               tl.labour_hours AS "Total Labour Hours",
+               tl.paint_litres AS "Total Paint Litres",
+               ps.status AS "Status",
+               b.notes AS "Notes",
+               b.updated_at AS "Updated At"
+        FROM building_model_surfaces b
+        LEFT JOIN painting_progress_sections ps ON ps.id = b.progress_section_id
+        LEFT JOIN painting_takeoff_lines tl ON tl.id = b.takeoff_line_id
+        {where}
+        ORDER BY b.elevation, b.level_name, b.id
+    """, tuple(params))
+    numeric_cols = ["X", "Y", "Z", "Width", "Height", "Depth", "Rotation Y", "Total m2", "Completed m2", "Completed %", "Section Value Ex GST", "Billable Value Ex GST", "Total Labour Hours", "Total Paint Litres"]
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+    return df
+
+
+def generate_building_surfaces_from_takeoff(job_id, package_id=None, reset_existing=True):
+    if not package_id:
+        package_id = latest_takeoff_package_for_job(job_id)
+    if not package_id:
+        return 0
+    ensure_progress_sections_for_package(package_id, reset_values=False)
+    if reset_existing:
+        execute("DELETE FROM building_model_surfaces WHERE job_id = ? AND package_id = ?", (job_id, package_id))
+    else:
+        existing = building_model_surfaces_df(job_id, package_id)
+        if not existing.empty:
+            return len(existing)
+
+    sections = progress_sections_df(job_id, package_id)
+    if sections.empty:
+        return 0
+
+    elevation_counts = {"Front": 0, "Rear": 0, "Left": 0, "Right": 0, "Internal": 0, "Ceiling / Roof": 0}
+    now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    created_count = 0
+
+    for idx, (_, row) in enumerate(sections.iterrows()):
+        elevation = infer_building_elevation(row.get("Area"), row.get("Location / Area"), row.get("Substrate"), row.get("Labour Category"), idx)
+        surface_type = infer_surface_type(row.get("Substrate"), row.get("Labour Category"), row.get("Area"))
+        width, height, depth = default_building_surface_dimensions(row.get("Total m2"), surface_type)
+        count = elevation_counts.get(elevation, 0)
+        elevation_counts[elevation] = count + 1
+        level_index = count // 4
+        pos_index = count % 4
+        level_name = "Upper" if level_index else "Ground"
+        y_base = 0.05 + level_index * 3.2
+        rotation_y = 0.0
+
+        if elevation == "Front":
+            x_pos, z_pos, y_pos = -4.8 + pos_index * 3.2, -4.2, y_base + height / 2
+        elif elevation == "Rear":
+            x_pos, z_pos, y_pos = 4.8 - pos_index * 3.2, 4.2, y_base + height / 2
+        elif elevation == "Left":
+            x_pos, z_pos, y_pos, rotation_y = -6.2, -2.7 + pos_index * 2.0, y_base + height / 2, 1.5708
+        elif elevation == "Right":
+            x_pos, z_pos, y_pos, rotation_y = 6.2, 2.7 - pos_index * 2.0, y_base + height / 2, 1.5708
+        elif elevation == "Ceiling / Roof":
+            x_pos, z_pos, y_pos = -3.6 + pos_index * 2.4, -1.8 + level_index * 1.8, 2.85 + level_index * 3.2
+        else:
+            x_pos, z_pos, y_pos = -3.6 + pos_index * 2.4, -1.4 + level_index * 1.4, y_base + height / 2
+
+        execute("""
+            INSERT INTO building_model_surfaces
+            (job_id, package_id, progress_section_id, takeoff_line_id, section_code, surface_name,
+             surface_type, elevation, level_name, x_pos, y_pos, z_pos, width, height, depth,
+             rotation_y, colour_hex, notes, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            job_id, package_id, int(row.get("ID") or 0),
+            int(row.get("Takeoff Line ID") or 0) if app_float(row.get("Takeoff Line ID")) else None,
+            str(row.get("Section Code") or f"S-{idx+1:03d}"), str(row.get("Location / Area") or f"Section {idx+1}"),
+            surface_type, elevation, level_name, float(x_pos), float(y_pos), float(z_pos),
+            float(width), float(height), float(depth), float(rotation_y),
+            building_surface_colour(row.get("Substrate"), row.get("Labour Category"), row.get("Area")),
+            "Auto-generated from painting take-off/progress model. Adjust in 3D Building Mapper if required.",
+            now_text, now_text,
+        ))
+        created_count += 1
+    return created_count
+
+
+def render_building_mapper_3d(surface_df, selected_progress_ids=None, key_prefix="building_mapper_3d"):
+    if surface_df is None or surface_df.empty:
+        st.info("No 3D building surfaces have been mapped yet. Generate a building-shaped model from the take-off first.")
+        return
+    selected_set = {int(x) for x in (selected_progress_ids or []) if str(x).isdigit() or isinstance(x, int)}
+    rows = []
+    for idx, (_, row) in enumerate(surface_df.head(320).iterrows()):
+        progress_id = int(row.get("Progress Section ID") or 0)
+        status = str(row.get("Status") or "Not Started")
+        completed_pct = app_float(row.get("Completed %"))
+        rows.append({
+            "id": int(row.get("ID") or 0), "progress_id": progress_id,
+            "code": str(row.get("Section Code") or f"M-{idx+1:03d}"),
+            "name": str(row.get("Surface Name") or row.get("Location / Area") or "Surface"),
+            "surface_type": str(row.get("Surface Type") or "Surface"), "elevation": str(row.get("Elevation") or "Internal"),
+            "level": str(row.get("Level") or "Ground"), "area": str(row.get("Area") or ""),
+            "substrate": str(row.get("Substrate") or ""), "labour": str(row.get("Labour Category") or ""),
+            "x": round(app_float(row.get("X")), 3), "y": round(app_float(row.get("Y")), 3), "z": round(app_float(row.get("Z")), 3),
+            "w": max(round(app_float(row.get("Width")), 3), 0.08), "h": max(round(app_float(row.get("Height")), 3), 0.08),
+            "d": max(round(app_float(row.get("Depth")), 3), 0.04), "rotY": round(app_float(row.get("Rotation Y")), 4),
+            "colour": str(row.get("Colour") or "#fffaf2"), "m2": round(app_float(row.get("Total m2")), 2),
+            "completed_pct": round(completed_pct, 2), "value": round(app_float(row.get("Section Value Ex GST")), 2),
+            "billable": round(app_float(row.get("Billable Value Ex GST")), 2),
+            "labour_hours": round(app_float(row.get("Total Labour Hours")), 2), "paint_litres": round(app_float(row.get("Total Paint Litres")), 2),
+            "status": status, "selected": progress_id in selected_set,
+        })
+    data_json = json.dumps(rows)
+    st.markdown("### Building-Shaped 3D Progress Render")
+    st.caption("Drag to rotate, scroll to zoom and click a surface. Green is complete, orange is in progress and blue is selected in JobHub.")
+    html_doc = f"""
+<!DOCTYPE html><html><head><meta charset="utf-8" />
+<style>
+html,body{{margin:0;padding:0;overflow:hidden;font-family:Arial,Helvetica,sans-serif;background:#f6f1ea;}}
+#wrap{{display:flex;height:720px;width:100%;background:linear-gradient(180deg,#f7f2ec 0%,#ede4d9 100%);border-radius:18px;overflow:hidden;border:1px solid #d6c8b8;}}
+#viewer{{flex:1;position:relative;min-width:0;}}#side{{width:350px;background:rgba(255,255,255,.96);border-left:1px solid #d6c8b8;padding:14px;overflow:auto;box-sizing:border-box;}}
+.title{{font-weight:900;color:#111827;font-size:17px;line-height:1.2;margin-bottom:6px;}}.hint{{color:#4b5563;font-size:12px;line-height:1.35;margin-bottom:12px;}}
+.metricGrid{{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px;}}.metric{{background:#f8fafc;border:1px solid #e5e7eb;border-radius:12px;padding:8px;}}.metric .label{{color:#6b7280;font-size:11px;}}.metric .value{{color:#111827;font-size:16px;font-weight:900;margin-top:2px;}}
+#info{{background:#111827;color:#fff;border-radius:14px;padding:12px;margin-top:10px;min-height:160px;box-shadow:0 10px 25px rgba(17,24,39,.20);}}#info .small{{color:#d1d5db;font-size:12px;margin-top:4px;}}
+#legend{{position:absolute;left:14px;bottom:14px;background:rgba(255,255,255,.92);border:1px solid #e5e7eb;border-radius:13px;padding:8px 10px;font-size:12px;color:#111827;box-shadow:0 10px 30px rgba(0,0,0,.12);}}.dot{{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:5px;vertical-align:middle;}}
+#topbar{{position:absolute;left:14px;top:14px;background:rgba(17,24,39,.88);color:#fff;border-radius:14px;padding:10px 12px;font-size:12px;max-width:390px;box-shadow:0 10px 30px rgba(0,0,0,.22);}}.sectionRow{{border:1px solid #e5e7eb;border-radius:11px;padding:8px;margin-bottom:6px;cursor:pointer;background:#fff;}}.sectionRow:hover{{background:#eff6ff;border-color:#93c5fd;}}.sectionCode{{font-size:12px;font-weight:800;color:#111827;}}.sectionMeta{{font-size:11px;color:#4b5563;margin-top:2px;}}
+</style></head><body><div id="wrap"><div id="viewer"><div id="topbar"><strong>PB 3D Building Mapper</strong><br>Building-shaped model from take-off lines. Adjust positions in the mapper table below.</div><div id="legend"><span class="dot" style="background:#2563eb"></span>Selected&nbsp;&nbsp;<span class="dot" style="background:#16a34a"></span>Complete&nbsp;&nbsp;<span class="dot" style="background:#f59e0b"></span>In progress&nbsp;&nbsp;<span class="dot" style="background:#d1d5db"></span>Not started</div></div><div id="side"><div class="title">Building progress projection</div><div class="hint">Click a mapped surface to inspect m², value, labour and paint.</div><div class="metricGrid"><div class="metric"><div class="label">Surfaces</div><div class="value" id="metricSections">0</div></div><div class="metric"><div class="label">m²</div><div class="value" id="metricM2">0</div></div><div class="metric"><div class="label">Value</div><div class="value" id="metricValue">$0</div></div><div class="metric"><div class="label">Billable</div><div class="value" id="metricBillable">$0</div></div><div class="metric"><div class="label">Labour</div><div class="value" id="metricLabour">0h</div></div><div class="metric"><div class="label">Paint</div><div class="value" id="metricPaint">0L</div></div></div><div id="info"><strong>Click a mapped surface</strong><div class="small">Surface details will show here.</div></div><div class="title" style="margin-top:14px;font-size:14px;">Mapped surfaces</div><div id="sectionList"></div></div></div>
+<script src="https://cdn.jsdelivr.net/npm/three@0.124.0/build/three.min.js"></script><script src="https://cdn.jsdelivr.net/npm/three@0.124.0/examples/js/controls/OrbitControls.js"></script>
+<script>
+const surfaces={data_json};const container=document.getElementById('viewer');const scene=new THREE.Scene();scene.background=new THREE.Color(0xf6f1ea);const camera=new THREE.PerspectiveCamera(48,container.clientWidth/container.clientHeight,.1,1000);camera.position.set(13,8,14);const renderer=new THREE.WebGLRenderer({{antialias:true,alpha:false}});renderer.setPixelRatio(window.devicePixelRatio||1);renderer.setSize(container.clientWidth,container.clientHeight);renderer.shadowMap.enabled=true;container.appendChild(renderer.domElement);const controls=new THREE.OrbitControls(camera,renderer.domElement);controls.enableDamping=true;controls.dampingFactor=.07;controls.target.set(0,1.7,0);scene.add(new THREE.AmbientLight(0xffffff,.72));const sun=new THREE.DirectionalLight(0xffffff,.9);sun.position.set(8,14,10);sun.castShadow=true;scene.add(sun);const floor=new THREE.Mesh(new THREE.PlaneGeometry(20,16),new THREE.MeshStandardMaterial({{color:0xf1e8dd,roughness:.86}}));floor.rotation.x=-Math.PI/2;floor.receiveShadow=true;scene.add(floor);const grid=new THREE.GridHelper(20,20,0xcbbba8,0xe3d8ca);grid.position.y=.01;scene.add(grid);const base=new THREE.Mesh(new THREE.BoxGeometry(12,.18,8),new THREE.MeshStandardMaterial({{color:0xd9cbbd,transparent:true,opacity:.34}}));base.position.y=.09;base.receiveShadow=true;scene.add(base);const roof=new THREE.Mesh(new THREE.BoxGeometry(13,.18,9),new THREE.MeshStandardMaterial({{color:0x4b5563,transparent:true,opacity:.18}}));roof.position.y=6.35;roof.receiveShadow=true;scene.add(roof);
+function fmtMoney(n){{return '$'+Number(n||0).toLocaleString(undefined,{{maximumFractionDigits:0}})}}function hexToInt(h){{return parseInt(String(h||'#ffffff').replace('#',''),16)}}function colourFor(s){{const status=String(s.status||'').toLowerCase();if(s.selected)return 0x2563eb;if(status.includes('complete'))return 0x16a34a;if(status.includes('progress'))return 0xf59e0b;if(status.includes('hold')||status.includes('review'))return 0xfb923c;return hexToInt(s.colour||'#d1d5db')}}function opacityFor(s){{if(s.selected)return .96;const pct=Number(s.completed_pct||0);if(pct<=0)return .62;return .72+Math.min(pct,100)/100*.24}}const meshes=[];surfaces.forEach(s=>{{const geo=new THREE.BoxGeometry(Number(s.w||1),Number(s.h||1),Number(s.d||.1));const mat=new THREE.MeshStandardMaterial({{color:colourFor(s),transparent:true,opacity:opacityFor(s),roughness:.56,metalness:.02}});const mesh=new THREE.Mesh(geo,mat);mesh.position.set(Number(s.x||0),Number(s.y||0),Number(s.z||0));mesh.rotation.y=Number(s.rotY||0);mesh.castShadow=true;mesh.receiveShadow=true;mesh.userData=s;scene.add(mesh);const edge=new THREE.LineSegments(new THREE.EdgesGeometry(geo),new THREE.LineBasicMaterial({{color:0x111827,transparent:true,opacity:.26}}));edge.position.copy(mesh.position);edge.rotation.copy(mesh.rotation);scene.add(edge);meshes.push(mesh);}});
+function sourceRows(){{return surfaces.some(s=>s.selected)?surfaces.filter(s=>s.selected):surfaces}}function updateMetrics(){{const src=sourceRows();document.getElementById('metricSections').innerText=surfaces.some(s=>s.selected)?`${{src.length}} selected`:`${{surfaces.length}} mapped`;document.getElementById('metricM2').innerText=Number(src.reduce((a,b)=>a+Number(b.m2||0),0)).toLocaleString(undefined,{{maximumFractionDigits:1}});document.getElementById('metricValue').innerText=fmtMoney(src.reduce((a,b)=>a+Number(b.value||0),0));document.getElementById('metricBillable').innerText=fmtMoney(src.reduce((a,b)=>a+Number(b.billable||0),0));document.getElementById('metricLabour').innerText=Number(src.reduce((a,b)=>a+Number(b.labour_hours||0),0)).toFixed(1)+'h';document.getElementById('metricPaint').innerText=Number(src.reduce((a,b)=>a+Number(b.paint_litres||0),0)).toFixed(1)+'L';}}
+function showSurface(s){{document.getElementById('info').innerHTML=`<strong>${{s.code}} — ${{s.name}}</strong><div class="small">${{s.elevation}} • ${{s.level}} • ${{s.surface_type}}</div><div class="small">${{s.substrate}} • ${{s.labour}}</div><div style="margin-top:10px;display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:12px;"><div><b>${{Number(s.m2||0).toLocaleString(undefined,{{maximumFractionDigits:1}})}}m²</b><br><span class="small">substrate</span></div><div><b>${{Number(s.completed_pct||0).toFixed(1)}}%</b><br><span class="small">complete</span></div><div><b>${{fmtMoney(s.value)}}</b><br><span class="small">section value</span></div><div><b>${{fmtMoney(s.billable)}}</b><br><span class="small">billable now</span></div><div><b>${{Number(s.labour_hours||0).toFixed(1)}}h</b><br><span class="small">labour</span></div><div><b>${{Number(s.paint_litres||0).toFixed(1)}}L</b><br><span class="small">paint</span></div></div><div class="small" style="margin-top:10px;">Status: ${{s.status}}</div>`;}}
+function buildList(){{const list=document.getElementById('sectionList');list.innerHTML='';surfaces.slice(0,180).forEach(s=>{{const div=document.createElement('div');div.className='sectionRow';div.innerHTML=`<div class="sectionCode">${{s.selected?'🔵 ':''}}${{s.code}} — ${{s.name}}</div><div class="sectionMeta">${{s.elevation}} • ${{s.surface_type}} • ${{Number(s.m2||0).toFixed(1)}}m² • ${{fmtMoney(s.value)}} • ${{s.status}}</div>`;div.onclick=()=>showSurface(s);list.appendChild(div);}});}}updateMetrics();buildList();const raycaster=new THREE.Raycaster();const mouse=new THREE.Vector2();let lastClicked=null;renderer.domElement.addEventListener('click',event=>{{const rect=renderer.domElement.getBoundingClientRect();mouse.x=((event.clientX-rect.left)/rect.width)*2-1;mouse.y=-((event.clientY-rect.top)/rect.height)*2+1;raycaster.setFromCamera(mouse,camera);const hits=raycaster.intersectObjects(meshes,false);if(hits.length){{if(lastClicked)lastClicked.scale.set(1,1,1);const mesh=hits[0].object;mesh.scale.set(1.06,1.06,1.06);lastClicked=mesh;showSurface(mesh.userData);}}}});window.addEventListener('resize',()=>{{camera.aspect=container.clientWidth/container.clientHeight;camera.updateProjectionMatrix();renderer.setSize(container.clientWidth,container.clientHeight);}});function animate(){{requestAnimationFrame(animate);controls.update();renderer.render(scene,camera);}}animate();</script></body></html>
+"""
+    components.html(html_doc, height=740, scrolling=False)
+
+
+def building_mapper_page(default_job_id=None):
+    pb_page_header("3D Building Mapper", "Map take-off sections into a building-shaped 3D progress model for completion, claims and substrate tracking.", "Plan Trace Model")
+    jobs_df = job_lookup_dataframe(include_archived=True)
+    if jobs_df.empty:
+        st.info("Add a job first.")
+        return
+    selected_job_id = select_job_from_dataframe(jobs_df, "Select job", key=f"building_mapper_job_select_{default_job_id or 'main'}", default_job_id=default_job_id or st.session_state.get("building_mapper_selected_job_id"))
+    if not selected_job_id:
+        return
+    st.session_state["building_mapper_selected_job_id"] = int(selected_job_id)
+    package_options = progress_package_options(selected_job_id)
+    if not package_options:
+        st.warning("Create or import a painting take-off first. The 3D Building Mapper builds from take-off/progress sections.")
+        if st.button("Open Painting Take-off Generator", key=f"building_mapper_open_takeoff_{selected_job_id}"):
+            st.session_state["go_to_menu"] = "Painting Take-off Generator"
+            st.rerun()
+        return
+    package_label = st.selectbox("Take-off package / progress model", list(package_options.keys()), key=f"building_mapper_package_{selected_job_id}")
+    package_id = package_options[package_label]
+    render_quick_pdf_import_buttons(selected_job_id, categories=["Architectural Plans", "Specifications", "Colour Schedule", "Scope of Works"], title="Upload plans/elevations for mapping reference", key_prefix=f"building_mapper_pdf_{selected_job_id}", expanded=False)
+    cols = st.columns(3)
+    if cols[0].button("Generate building-shaped model from take-off", key=f"building_mapper_generate_{selected_job_id}_{package_id}", use_container_width=True):
+        count = generate_building_surfaces_from_takeoff(selected_job_id, package_id, reset_existing=False)
+        st.success(f"Building mapper has {count} mapped surface(s).")
+        st.rerun()
+    if cols[1].button("Rebuild / reset mapped model", key=f"building_mapper_rebuild_{selected_job_id}_{package_id}", use_container_width=True):
+        count = generate_building_surfaces_from_takeoff(selected_job_id, package_id, reset_existing=True)
+        st.success(f"Rebuilt {count} mapped surface(s) from the take-off.")
+        st.rerun()
+    if cols[2].button("Open Progress / Billing", key=f"building_mapper_open_progress_{selected_job_id}_{package_id}", use_container_width=True):
+        st.session_state["go_to_menu"] = "Progress / Billing Model"
+        st.rerun()
+    surfaces = building_model_surfaces_df(selected_job_id, package_id)
+    if surfaces.empty:
+        st.info("No building-shaped model is mapped yet. Press Generate building-shaped model from take-off.")
+        return
+    render_building_mapper_3d(surfaces, key_prefix=f"building_mapper_3d_{selected_job_id}_{package_id}")
+    st.markdown("### Mapped Surface Schedule")
+    st.caption("Adjust X/Y/Z and size values to make the model resemble the building more closely. Use Front/Rear/Left/Right/Internal/Ceiling elevations to organise the model.")
+    edit_cols = ["ID", "Section Code", "Surface Name", "Surface Type", "Elevation", "Level", "X", "Y", "Z", "Width", "Height", "Depth", "Rotation Y", "Substrate", "Total m2", "Completed %", "Status"]
+    edited = st.data_editor(surfaces[[c for c in edit_cols if c in surfaces.columns]].copy(), hide_index=True, width="stretch", key=f"building_mapper_editor_{selected_job_id}_{package_id}", disabled=["ID", "Section Code", "Substrate", "Total m2", "Completed %", "Status"])
+    if st.button("Save 3D mapper layout changes", key=f"building_mapper_save_{selected_job_id}_{package_id}"):
+        for _, row in edited.iterrows():
+            execute("""
+                UPDATE building_model_surfaces
+                SET surface_name = ?, surface_type = ?, elevation = ?, level_name = ?,
+                    x_pos = ?, y_pos = ?, z_pos = ?, width = ?, height = ?, depth = ?,
+                    rotation_y = ?, updated_at = ?
+                WHERE id = ?
+            """, (str(row.get("Surface Name") or ""), str(row.get("Surface Type") or ""), str(row.get("Elevation") or ""), str(row.get("Level") or ""), app_float(row.get("X")), app_float(row.get("Y")), app_float(row.get("Z")), max(app_float(row.get("Width")), 0.05), max(app_float(row.get("Height")), 0.05), max(app_float(row.get("Depth")), 0.03), app_float(row.get("Rotation Y")), datetime.now().strftime("%Y-%m-%d %H:%M:%S"), int(row.get("ID"))))
+        st.success("3D mapper layout saved.")
+        st.rerun()
+    with st.expander("Manually add one mapped surface"):
+        sections = progress_sections_df(selected_job_id, package_id)
+        if sections.empty:
+            st.info("No progress sections found for this take-off package.")
+        else:
+            labels = {progress_section_label(r): r for _, r in sections.iterrows()}
+            with st.form(f"manual_building_surface_{selected_job_id}_{package_id}"):
+                selected_label = st.selectbox("Link to take-off/progress section", list(labels.keys()))
+                c1, c2, c3 = st.columns(3)
+                surface_name = c1.text_input("Surface name", "Mapped surface")
+                surface_type = c2.selectbox("Surface type", ["Internal Wall", "External Wall", "Ceiling", "Soffit / Eave", "Woodwork / Frames", "Feature", "Other"])
+                elevation = c3.selectbox("Elevation / area", ["Front", "Rear", "Left", "Right", "Internal", "Ceiling / Roof"])
+                d1, d2, d3, d4 = st.columns(4)
+                x_pos = d1.number_input("X", value=0.0, step=0.25)
+                y_pos = d2.number_input("Y", value=1.35, step=0.25)
+                z_pos = d3.number_input("Z", value=0.0, step=0.25)
+                rotation_y = d4.number_input("Rotation Y", value=0.0, step=0.1)
+                e1, e2, e3 = st.columns(3)
+                width = e1.number_input("Width", min_value=0.05, value=2.0, step=0.25)
+                height = e2.number_input("Height", min_value=0.05, value=2.7, step=0.25)
+                depth = e3.number_input("Depth", min_value=0.03, value=0.12, step=0.05)
+                if st.form_submit_button("Add mapped surface"):
+                    src_row = labels[selected_label]
+                    execute("""
+                        INSERT INTO building_model_surfaces
+                        (job_id, package_id, progress_section_id, takeoff_line_id, section_code, surface_name,
+                         surface_type, elevation, level_name, x_pos, y_pos, z_pos, width, height, depth,
+                         rotation_y, colour_hex, notes, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (selected_job_id, package_id, int(src_row.get("ID") or 0), int(src_row.get("Takeoff Line ID") or 0) if app_float(src_row.get("Takeoff Line ID")) else None, str(src_row.get("Section Code") or ""), surface_name, surface_type, elevation, "Manual", x_pos, y_pos, z_pos, width, height, depth, rotation_y, building_surface_colour(src_row.get("Substrate"), src_row.get("Labour Category"), src_row.get("Area")), "Manually mapped surface.", datetime.now().strftime("%Y-%m-%d %H:%M:%S"), datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+                    st.success("Mapped surface added.")
+                    st.rerun()
+    with st.expander("Delete mapped surface"):
+        delete_options = {f"{row['ID']} - {row['Surface Name']} ({row['Elevation']})": int(row["ID"]) for _, row in surfaces.iterrows()}
+        if delete_options:
+            selected_delete = st.selectbox("Select mapped surface to delete", list(delete_options.keys()), key=f"building_mapper_delete_select_{selected_job_id}_{package_id}")
+            if st.button("Delete selected mapped surface", key=f"building_mapper_delete_btn_{selected_job_id}_{package_id}"):
+                execute("DELETE FROM building_model_surfaces WHERE id = ?", (delete_options[selected_delete],))
+                st.success("Mapped surface deleted.")
+                st.rerun()
+
 def render_progress_billing_model(job_id, package_id=None, key_prefix="progress_model"):
     if not package_id:
         package_id = latest_takeoff_package_for_job(job_id)
@@ -9558,7 +9944,19 @@ def render_progress_billing_model(job_id, package_id=None, key_prefix="progress_
             st.success(f"{capped_group_m2:,.1f} completed m² allocated across selected sections.")
             refresh()
 
-    render_progress_3d_model(display_sections, selected_ids, key_prefix=f"{key_prefix}_3d_{job_id}_{package_id}")
+    mapped_surfaces = building_model_surfaces_df(job_id, package_id)
+    if mapped_surfaces.empty:
+        st.info("No building-shaped 3D mapper surfaces found yet. Generate them to make the 3D render resemble the building more closely.")
+        if st.button("Generate Building-Shaped 3D Model", key=f"{key_prefix}_generate_building_mapper_{job_id}_{package_id}"):
+            generate_building_surfaces_from_takeoff(job_id, package_id, reset_existing=False)
+            st.success("Building-shaped 3D model generated from the take-off.")
+            st.rerun()
+        render_progress_3d_model(display_sections, selected_ids, key_prefix=f"{key_prefix}_3d_{job_id}_{package_id}")
+    else:
+        render_building_mapper_3d(mapped_surfaces, selected_progress_ids=selected_ids, key_prefix=f"{key_prefix}_building_3d_{job_id}_{package_id}")
+        if st.button("Open 3D Building Mapper to adjust shape", key=f"{key_prefix}_open_building_mapper_{job_id}_{package_id}"):
+            st.session_state["go_to_menu"] = "3D Building Mapper"
+            st.rerun()
 
     render_progress_visual_cards(display_sections, selected_ids, key_prefix=f"{key_prefix}_cards_{job_id}_{package_id}")
 
@@ -10369,11 +10767,12 @@ def render_job_linked_info(job_id, expanded=True):
     m4.metric("Wages", f"${wage_total:,.2f}")
     m5.metric("Basic Position", f"${gross_position:,.2f}")
 
-    tab_summary, tab_documents, tab_takeoff, tab_progress, tab_costs, tab_materials, tab_wages, tab_equipment, tab_control, tab_photos = st.tabs([
+    tab_summary, tab_documents, tab_takeoff, tab_progress, tab_mapper, tab_costs, tab_materials, tab_wages, tab_equipment, tab_control, tab_photos = st.tabs([
         "Summary",
         "Plans / Docs",
         "Painting Take-off",
         "Progress / Billing",
+        "3D Building Mapper",
         "Costs & Estimates",
         "Materials",
         "Wages & Timesheets",
@@ -10400,6 +10799,9 @@ def render_job_linked_info(job_id, expanded=True):
 
     with tab_progress:
         progress_billing_model_page(default_job_id=job_id)
+
+    with tab_mapper:
+        building_mapper_page(default_job_id=job_id)
 
     with tab_costs:
         c1, c2, c3 = st.columns(3)
@@ -10819,6 +11221,7 @@ elif role == "manager":
     estimating_menu_map = {
         "Painting Take-off Generator": "Painting Take-off Generator",
         "Progress / Billing Model": "Progress / Billing Model",
+        "3D Building Mapper": "3D Building Mapper",
         "Estimate Working Sheet": "Estimate Working Sheet",
         "Job Costs / Forecasting": "Job Costs / Forecasting",
     }
@@ -10855,6 +11258,7 @@ else:
     estimating_menu_map = {
         "Painting Take-off Generator": "Painting Take-off Generator",
         "Progress / Billing Model": "Progress / Billing Model",
+        "3D Building Mapper": "3D Building Mapper",
         "Estimate Working Sheet": "Estimate Working Sheet",
         "Job Costs / Forecasting": "Job Costs / Forecasting",
     }
@@ -11544,6 +11948,9 @@ elif menu == "Painting Take-off Generator":
 
 elif menu == "Progress / Billing Model":
     progress_billing_model_page()
+
+elif menu == "3D Building Mapper":
+    building_mapper_page()
 
 
 elif menu == "Estimate Working Sheet":
