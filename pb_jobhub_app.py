@@ -9648,24 +9648,28 @@ def generate_building_surfaces_from_takeoff(job_id, package_id=None, reset_exist
         width, height, depth = default_building_surface_dimensions(row.get("Total m2"), surface_type)
         count = elevation_counts.get(elevation, 0)
         elevation_counts[elevation] = count + 1
-        level_index = count // 4
-        pos_index = count % 4
-        level_name = "Upper" if level_index else "Ground"
-        y_base = 0.05 + level_index * 3.2
+        # Keep automatically generated sections in a horizontal row by default.
+        # Only the plan-shaped mapper should create upper levels based on real Level 1/Level 2 wording.
+        per_row = 10
+        level_index = 0
+        pos_index = count % per_row
+        row_index = count // per_row
+        level_name = "Ground"
+        y_base = 0.05
         rotation_y = 0.0
 
         if elevation == "Front":
-            x_pos, z_pos, y_pos = -4.8 + pos_index * 3.2, -4.2, y_base + height / 2
+            x_pos, z_pos, y_pos = -10.0 + pos_index * 2.25, -4.2 + row_index * 0.18, y_base + height / 2
         elif elevation == "Rear":
-            x_pos, z_pos, y_pos = 4.8 - pos_index * 3.2, 4.2, y_base + height / 2
+            x_pos, z_pos, y_pos = 10.0 - pos_index * 2.25, 4.2 - row_index * 0.18, y_base + height / 2
         elif elevation == "Left":
-            x_pos, z_pos, y_pos, rotation_y = -6.2, -2.7 + pos_index * 2.0, y_base + height / 2, 1.5708
+            x_pos, z_pos, y_pos, rotation_y = -6.2 - row_index * 0.18, -4.5 + pos_index * 1.0, y_base + height / 2, 1.5708
         elif elevation == "Right":
-            x_pos, z_pos, y_pos, rotation_y = 6.2, 2.7 - pos_index * 2.0, y_base + height / 2, 1.5708
+            x_pos, z_pos, y_pos, rotation_y = 6.2 + row_index * 0.18, 4.5 - pos_index * 1.0, y_base + height / 2, 1.5708
         elif elevation == "Ceiling / Roof":
-            x_pos, z_pos, y_pos = -3.6 + pos_index * 2.4, -1.8 + level_index * 1.8, 2.85 + level_index * 3.2
+            x_pos, z_pos, y_pos = -8.0 + pos_index * 1.8, -1.8 + row_index * 1.0, 2.85
         else:
-            x_pos, z_pos, y_pos = -3.6 + pos_index * 2.4, -1.4 + level_index * 1.4, y_base + height / 2
+            x_pos, z_pos, y_pos = -8.0 + pos_index * 1.8, -1.4 + row_index * 0.8, y_base + height / 2
 
         execute("""
             INSERT INTO building_model_surfaces
@@ -9690,11 +9694,29 @@ def generate_building_surfaces_from_takeoff(job_id, package_id=None, reset_exist
 
 def mapper_level_index_from_text(text_value, max_levels=2):
     t = str(text_value or "").lower()
-    if any(x in t for x in ["level 3", "lvl 3", "third", "upper 2"]):
+    # Important: do NOT treat townhouse/unit numbers as storeys.
+    # Previous versions saw text like "Unit 5" and pushed it upward as Level 1,
+    # which made the 3D mapper build a tower instead of a row.
+    if any(x in t for x in ["level 3", "lvl 3", "third floor", "3rd floor", "upper 2"]):
         return min(2, max_levels - 1)
-    if any(x in t for x in ["level 2", "lvl 2", "upper", "first", "1st", "unit 2", "unit 3", "unit 4", "unit 5", "unit 6", "unit 7", "unit 8", "unit 9"]):
+    if any(x in t for x in ["level 2", "lvl 2", "second floor", "2nd floor"]):
+        return min(1, max_levels - 1)
+    if any(x in t for x in ["level 1", "lvl 1", "first floor", "1st floor", "upper floor"]):
         return min(1, max_levels - 1)
     return 0
+
+
+def mapper_unit_index_from_text(text_value):
+    """Return a zero-based townhouse/unit index if the section name contains Unit/Villa/Dwelling text."""
+    import re
+    t = str(text_value or "").lower()
+    match = re.search(r"\b(?:unit|villa|dwelling|townhouse|lot)\s*([0-9]{1,2})\b", t)
+    if not match:
+        return None
+    try:
+        return max(int(match.group(1)) - 1, 0)
+    except Exception:
+        return None
 
 
 def mapper_level_name(level_index):
@@ -9807,8 +9829,17 @@ def generate_plan_shape_surfaces_from_takeoff(job_id, package_id=None, building_
         # Plan templates add slight realistic offsets so the model doesn't look like a single flat box.
         template_lower = str(template or "").lower()
         if "townhouse" in template_lower and elevation in ["Front", "Rear"]:
-            bay_width = building_length / max(1, min(9, max(3, int(building_length // 5) or 3)))
-            bay = int((x_pos + building_length / 2) // max(bay_width, 0.1))
+            # If a section name contains Unit/Villa/Dwelling numbers, place those units
+            # horizontally across the frontage instead of letting them stack upward.
+            unit_index = mapper_unit_index_from_text(text_value)
+            likely_units = max(3, min(12, int(building_length // 4.5) or 3))
+            bay_width = building_length / max(likely_units, 1)
+            if unit_index is not None:
+                bay = min(unit_index, likely_units - 1)
+                x_pos = -building_length / 2 + bay_width * bay + bay_width / 2
+                width = min(max(width, 0.45), max(bay_width * 0.84, 0.45))
+            else:
+                bay = int((x_pos + building_length / 2) // max(bay_width, 0.1))
             z_pos += (-0.25 if bay % 2 else 0.25) if elevation == "Front" else (0.25 if bay % 2 else -0.25)
         if "l-shape" in template_lower and x_pos > building_length * 0.10 and z_pos > 0:
             z_pos -= building_depth * 0.18
@@ -10310,20 +10341,82 @@ def building_progress_mapper_page(default_job_id=None):
     st.markdown("### 1. Upload actual drawing page image")
     st.caption("For the closest match to the plans, upload a screenshot/export of the actual floor plan or elevation page as PNG/JPG. PDFs can still be stored as references, but the clickable overlay works best on an image.")
     render_quick_pdf_import_buttons(selected_job_id, categories=["Architectural Plans", "Specifications", "Colour Schedule", "Scope of Works"], title="Attach PDFs as reference", key_prefix=f"actual_mapper_reference_pdf_{selected_job_id}", expanded=False)
-    with st.expander("Upload plan/elevation image for clickable overlay", expanded=True):
+    with st.expander("Upload plan/elevation image(s) for clickable overlay", expanded=True):
         c1, c2 = st.columns([1, 2])
-        view_name_upload = c1.selectbox("Drawing view", ["Front Elevation", "Rear Elevation", "Left Elevation", "Right Elevation", "Ground Floor Plan", "Level 1 Plan", "Roof / Soffit Plan", "Internal Areas", "Other"], key=f"actual_mapper_upload_view_{selected_job_id}")
-        uploaded_image = c2.file_uploader("Upload plan/elevation image", type=["png", "jpg", "jpeg", "webp"], key=f"actual_mapper_image_upload_{selected_job_id}")
-        if st.button("Upload Drawing Image", key=f"actual_mapper_upload_image_btn_{selected_job_id}"):
-            if not uploaded_image:
-                st.error("Choose a PNG/JPG/WEBP drawing image first.")
+        view_name_upload = c1.selectbox(
+            "Drawing view",
+            [
+                "Auto-detect from file name",
+                "Front Elevation",
+                "Rear Elevation",
+                "Left Elevation",
+                "Right Elevation",
+                "Ground Floor Plan",
+                "Level 1 Plan",
+                "Level 2 Plan",
+                "Roof / Soffit Plan",
+                "Internal Areas",
+                "Other",
+            ],
+            key=f"actual_mapper_upload_view_{selected_job_id}",
+        )
+        uploaded_images = c2.file_uploader(
+            "Upload one or more plan/elevation images",
+            type=["png", "jpg", "jpeg", "webp"],
+            accept_multiple_files=True,
+            key=f"actual_mapper_image_upload_{selected_job_id}",
+        )
+        st.caption("You can select multiple drawing screenshots at once. Use clear file names like Front Elevation, Rear Elevation, Ground Floor Plan or Roof Plan so JobHub can label them automatically.")
+
+        def guess_drawing_view_from_filename(file_name, fallback_view):
+            if fallback_view and fallback_view != "Auto-detect from file name":
+                return fallback_view
+            name = str(file_name or "").lower().replace("_", " ").replace("-", " ")
+            checks = [
+                (["front", "north"], "Front Elevation"),
+                (["rear", "back", "south"], "Rear Elevation"),
+                (["left", "west"], "Left Elevation"),
+                (["right", "east"], "Right Elevation"),
+                (["ground", "gf", "floor plan", "floorplan"], "Ground Floor Plan"),
+                (["level 1", "lvl 1", "first floor", "l1"], "Level 1 Plan"),
+                (["level 2", "lvl 2", "second floor", "l2"], "Level 2 Plan"),
+                (["roof", "soffit", "eaves"], "Roof / Soffit Plan"),
+                (["internal", "room", "rooms"], "Internal Areas"),
+            ]
+            for keywords, label in checks:
+                if any(keyword in name for keyword in keywords):
+                    return label
+            return "Other"
+
+        if st.button("Upload Drawing Image(s)", key=f"actual_mapper_upload_image_btn_{selected_job_id}"):
+            if not uploaded_images:
+                st.error("Choose at least one PNG/JPG/WEBP drawing image first.")
             else:
-                try:
-                    save_uploaded_job_document(selected_job_id, uploaded_image, f"Drawing Mapper - {view_name_upload}", notes="Image background for Actual Plan & Elevation Progress Mapper")
-                    st.success("Drawing image uploaded. Select it below to place zones over it.")
+                saved_count = 0
+                failed_count = 0
+                saved_labels = []
+                for uploaded_image in uploaded_images:
+                    try:
+                        guessed_view = guess_drawing_view_from_filename(uploaded_image.name, view_name_upload)
+                        save_uploaded_job_document(
+                            selected_job_id,
+                            uploaded_image,
+                            f"Drawing Mapper - {guessed_view}",
+                            notes="Image background for Actual Plan & Elevation Progress Mapper",
+                        )
+                        saved_count += 1
+                        saved_labels.append(f"{uploaded_image.name} → {guessed_view}")
+                    except Exception as e:
+                        failed_count += 1
+                        st.error(f"Could not upload {uploaded_image.name}: {e}")
+                if saved_count:
+                    st.success(f"Uploaded {saved_count} drawing image(s). Select any uploaded drawing below to place zones over it.")
+                    with st.expander("Uploaded drawing labels", expanded=False):
+                        for label in saved_labels:
+                            st.write(label)
                     st.rerun()
-                except Exception as e:
-                    st.error(f"Could not upload drawing image: {e}")
+                elif failed_count:
+                    st.error("No drawing images were uploaded successfully.")
 
     image_docs = drawing_mapper_image_documents_df(selected_job_id)
     if image_docs.empty:
@@ -10336,6 +10429,17 @@ def building_progress_mapper_page(default_job_id=None):
         return
 
     st.markdown("### 2. Select drawing background")
+    with st.expander("Uploaded drawing gallery", expanded=True):
+        gallery_cols = st.columns(3)
+        for gallery_index, (_, doc_row) in enumerate(image_docs.iterrows()):
+            file_path = str(doc_row.get("File Path") or "")
+            with gallery_cols[gallery_index % 3]:
+                st.markdown(f"**{doc_row.get('Type', 'Drawing')}**")
+                st.caption(str(doc_row.get("File Name") or ""))
+                if file_path and os.path.exists(file_path):
+                    st.image(file_path, use_container_width=True)
+                else:
+                    st.warning("Image file missing")
     doc_options = {f"{int(r['ID'])} - {r['Type']} - {r['File Name']}": int(r["ID"]) for _, r in image_docs.iterrows()}
     selected_doc_label = st.selectbox("Actual plan/elevation image", list(doc_options.keys()), key=f"actual_mapper_doc_select_{selected_job_id}_{package_id}")
     document_id = doc_options[selected_doc_label]
