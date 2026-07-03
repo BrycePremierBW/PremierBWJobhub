@@ -1,0 +1,6 @@
+services:
+  - type: web
+    name: pb-planreader
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: streamlit run pb_jobhub_app.py --server.port=$PORT --server.address=0.0.0.0
