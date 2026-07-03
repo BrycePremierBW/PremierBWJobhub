@@ -9613,6 +9613,155 @@ def generate_building_surfaces_from_takeoff(job_id, package_id=None, reset_exist
     return created_count
 
 
+
+def mapper_level_index_from_text(text_value, max_levels=2):
+    t = str(text_value or "").lower()
+    if any(x in t for x in ["level 3", "lvl 3", "third", "upper 2"]):
+        return min(2, max_levels - 1)
+    if any(x in t for x in ["level 2", "lvl 2", "upper", "first", "1st", "unit 2", "unit 3", "unit 4", "unit 5", "unit 6", "unit 7", "unit 8", "unit 9"]):
+        return min(1, max_levels - 1)
+    return 0
+
+
+def mapper_level_name(level_index):
+    if int(level_index or 0) <= 0:
+        return "Ground"
+    if int(level_index or 0) == 1:
+        return "Level 1"
+    return f"Level {int(level_index or 0)}"
+
+
+def mapper_wall_position(elevation, cursor, width, building_length, building_depth, level_index, level_height):
+    """Return x, y, z, rotation for a wall segment along the selected elevation."""
+    building_length = max(float(building_length or 12), 2.0)
+    building_depth = max(float(building_depth or 8), 2.0)
+    level_height = max(float(level_height or 2.7), 2.1)
+    usable_front = building_length * 0.92
+    usable_side = building_depth * 0.92
+    width = max(float(width or 1.0), 0.2)
+    row_gap = 0.18
+    stack = int(cursor // 1) if cursor > 99999 else 0
+    # cursor is actual running length; wrap if a facade row is filled
+    elev = str(elevation or "Internal")
+    if elev in ["Front", "Rear"]:
+        usable = usable_front
+        wrap_index = int(cursor // max(usable, 1))
+        local_cursor = cursor % max(usable, 1)
+        x = -usable / 2 + min(local_cursor + width / 2, usable - width / 2)
+        z = -building_depth / 2 if elev == "Front" else building_depth / 2
+        y = level_index * level_height + level_height / 2 + wrap_index * row_gap
+        rot = 0.0
+        return x, y, z, rot
+    if elev in ["Left", "Right"]:
+        usable = usable_side
+        wrap_index = int(cursor // max(usable, 1))
+        local_cursor = cursor % max(usable, 1)
+        z = -usable / 2 + min(local_cursor + width / 2, usable - width / 2)
+        x = -building_length / 2 if elev == "Left" else building_length / 2
+        y = level_index * level_height + level_height / 2 + wrap_index * row_gap
+        rot = 1.5708
+        return x, y, z, rot
+    if elev == "Ceiling / Roof":
+        usable = building_length * 0.82
+        local_cursor = cursor % max(usable, 1)
+        x = -usable / 2 + min(local_cursor + width / 2, usable - width / 2)
+        z = -building_depth * 0.22 + (int(cursor // max(usable, 1)) * max(0.7, building_depth * 0.18))
+        y = (level_index + 1) * level_height + 0.08
+        rot = 0.0
+        return x, y, z, rot
+    # Internal surfaces are placed as internal partitions inside the footprint.
+    usable = building_length * 0.72
+    local_cursor = cursor % max(usable, 1)
+    row = int(cursor // max(usable, 1))
+    x = -usable / 2 + min(local_cursor + width / 2, usable - width / 2)
+    z = -building_depth * 0.25 + row * max(0.75, building_depth * 0.16)
+    y = level_index * level_height + level_height / 2
+    rot = 0.0 if row % 2 == 0 else 1.5708
+    return x, y, z, rot
+
+
+def generate_plan_shape_surfaces_from_takeoff(job_id, package_id=None, building_length=18.0, building_depth=9.0, level_count=2, level_height=2.7, template="Rectangular building", roof_style="Flat roof", reset_existing=True):
+    """Create a more plan-faithful 3D progress model by placing take-off sections around a real footprint size."""
+    if not package_id:
+        package_id = latest_takeoff_package_for_job(job_id)
+    if not package_id:
+        return 0
+    ensure_progress_sections_for_package(package_id, reset_values=False)
+    if reset_existing:
+        execute("DELETE FROM building_model_surfaces WHERE job_id = ? AND package_id = ?", (job_id, package_id))
+    sections = progress_sections_df(job_id, package_id)
+    if sections.empty:
+        return 0
+
+    building_length = max(app_float(building_length), 2.0)
+    building_depth = max(app_float(building_depth), 2.0)
+    level_count = max(int(app_float(level_count) or 1), 1)
+    level_height = max(app_float(level_height), 2.1)
+    now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    cursors = {}
+    created = 0
+
+    for idx, (_, row) in enumerate(sections.iterrows()):
+        text_value = " ".join([str(row.get(c) or "") for c in ["Area", "Location / Area", "Substrate", "Labour Category", "Section Code"]])
+        elevation = infer_building_elevation(row.get("Area"), row.get("Location / Area"), row.get("Substrate"), row.get("Labour Category"), idx)
+        surface_type = infer_surface_type(row.get("Substrate"), row.get("Labour Category"), row.get("Area"))
+        level_index = mapper_level_index_from_text(text_value, level_count)
+        level_name = mapper_level_name(level_index)
+        m2_value = max(app_float(row.get("Total m2")), 0.25)
+
+        if "Ceiling" in surface_type or "Soffit" in surface_type:
+            height = 0.10
+            width = min(max((m2_value ** 0.5), 1.0), max(building_length * 0.75, 1.0))
+            depth = min(max(m2_value / max(width, 0.1), 0.55), max(building_depth * 0.55, 0.55))
+            elevation = "Ceiling / Roof"
+        elif "Woodwork" in surface_type:
+            height = min(level_height * 0.82, 2.2)
+            width = min(max(m2_value / max(height, 0.1), 0.35), 1.2)
+            depth = 0.10
+        else:
+            height = min(max(default_building_surface_dimensions(m2_value, surface_type)[1], 2.4), level_height * 0.96)
+            width = max(m2_value / max(height, 0.1), 0.45)
+            max_width = building_length * 0.92 if elevation in ["Front", "Rear", "Internal", "Ceiling / Roof"] else building_depth * 0.92
+            width = min(width, max(max_width, 0.6))
+            depth = 0.12
+
+        key = (elevation, level_index)
+        cursor = cursors.get(key, 0.0)
+        x_pos, y_pos, z_pos, rotation_y = mapper_wall_position(elevation, cursor, width, building_length, building_depth, level_index, level_height)
+        cursors[key] = cursor + max(width, 0.4) + 0.12
+
+        # Plan templates add slight realistic offsets so the model doesn't look like a single flat box.
+        template_lower = str(template or "").lower()
+        if "townhouse" in template_lower and elevation in ["Front", "Rear"]:
+            bay_width = building_length / max(1, min(9, max(3, int(building_length // 5) or 3)))
+            bay = int((x_pos + building_length / 2) // max(bay_width, 0.1))
+            z_pos += (-0.25 if bay % 2 else 0.25) if elevation == "Front" else (0.25 if bay % 2 else -0.25)
+        if "l-shape" in template_lower and x_pos > building_length * 0.10 and z_pos > 0:
+            z_pos -= building_depth * 0.18
+        if "switchgear" in template_lower:
+            # Long simple service building: keep roof low, make frontage long and clean.
+            if elevation == "Ceiling / Roof":
+                y_pos = level_height + 0.10
+
+        execute("""
+            INSERT INTO building_model_surfaces
+            (job_id, package_id, progress_section_id, takeoff_line_id, section_code, surface_name,
+             surface_type, elevation, level_name, x_pos, y_pos, z_pos, width, height, depth,
+             rotation_y, colour_hex, notes, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            job_id, package_id, int(row.get("ID") or 0),
+            int(row.get("Takeoff Line ID") or 0) if app_float(row.get("Takeoff Line ID")) else None,
+            str(row.get("Section Code") or f"S-{idx+1:03d}"), str(row.get("Location / Area") or f"Section {idx+1}"),
+            surface_type, elevation, level_name, float(x_pos), float(y_pos), float(z_pos),
+            float(max(width, 0.08)), float(max(height, 0.08)), float(max(depth, 0.04)), float(rotation_y),
+            building_surface_colour(row.get("Substrate"), row.get("Labour Category"), row.get("Area")),
+            f"Plan-shaped model generated using {template}; approx footprint {building_length:g}m x {building_depth:g}m, {level_count} level(s), {roof_style}.",
+            now_text, now_text,
+        ))
+        created += 1
+    return created
+
 def render_building_mapper_3d(surface_df, selected_progress_ids=None, key_prefix="building_mapper_3d"):
     if surface_df is None or surface_df.empty:
         st.info("No 3D building surfaces have been mapped yet. Generate a building-shaped model from the take-off first.")
@@ -9653,10 +9802,10 @@ html,body{{margin:0;padding:0;overflow:hidden;font-family:Arial,Helvetica,sans-s
 #info{{background:#111827;color:#fff;border-radius:14px;padding:12px;margin-top:10px;min-height:160px;box-shadow:0 10px 25px rgba(17,24,39,.20);}}#info .small{{color:#d1d5db;font-size:12px;margin-top:4px;}}
 #legend{{position:absolute;left:14px;bottom:14px;background:rgba(255,255,255,.92);border:1px solid #e5e7eb;border-radius:13px;padding:8px 10px;font-size:12px;color:#111827;box-shadow:0 10px 30px rgba(0,0,0,.12);}}.dot{{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:5px;vertical-align:middle;}}
 #topbar{{position:absolute;left:14px;top:14px;background:rgba(17,24,39,.88);color:#fff;border-radius:14px;padding:10px 12px;font-size:12px;max-width:390px;box-shadow:0 10px 30px rgba(0,0,0,.22);}}.sectionRow{{border:1px solid #e5e7eb;border-radius:11px;padding:8px;margin-bottom:6px;cursor:pointer;background:#fff;}}.sectionRow:hover{{background:#eff6ff;border-color:#93c5fd;}}.sectionCode{{font-size:12px;font-weight:800;color:#111827;}}.sectionMeta{{font-size:11px;color:#4b5563;margin-top:2px;}}
-</style></head><body><div id="wrap"><div id="viewer"><div id="topbar"><strong>PB 3D Building Mapper</strong><br>Building-shaped model from take-off lines. Adjust positions in the mapper table below.</div><div id="legend"><span class="dot" style="background:#2563eb"></span>Selected&nbsp;&nbsp;<span class="dot" style="background:#16a34a"></span>Complete&nbsp;&nbsp;<span class="dot" style="background:#f59e0b"></span>In progress&nbsp;&nbsp;<span class="dot" style="background:#d1d5db"></span>Not started</div></div><div id="side"><div class="title">Building progress projection</div><div class="hint">Click a mapped surface to inspect m², value, labour and paint.</div><div class="metricGrid"><div class="metric"><div class="label">Surfaces</div><div class="value" id="metricSections">0</div></div><div class="metric"><div class="label">m²</div><div class="value" id="metricM2">0</div></div><div class="metric"><div class="label">Value</div><div class="value" id="metricValue">$0</div></div><div class="metric"><div class="label">Billable</div><div class="value" id="metricBillable">$0</div></div><div class="metric"><div class="label">Labour</div><div class="value" id="metricLabour">0h</div></div><div class="metric"><div class="label">Paint</div><div class="value" id="metricPaint">0L</div></div></div><div id="info"><strong>Click a mapped surface</strong><div class="small">Surface details will show here.</div></div><div class="title" style="margin-top:14px;font-size:14px;">Mapped surfaces</div><div id="sectionList"></div></div></div>
+</style></head><body><div id="wrap"><div id="viewer"><div id="topbar"><strong>PB 3D Building Mapper</strong><br>Plan-shaped progress model. Enter the plan footprint size, then adjust surfaces to match the drawings.</div><div id="legend"><span class="dot" style="background:#2563eb"></span>Selected&nbsp;&nbsp;<span class="dot" style="background:#16a34a"></span>Complete&nbsp;&nbsp;<span class="dot" style="background:#f59e0b"></span>In progress&nbsp;&nbsp;<span class="dot" style="background:#d1d5db"></span>Not started</div></div><div id="side"><div class="title">Building progress projection</div><div class="hint">Click a mapped surface to inspect m², value, labour and paint.</div><div class="metricGrid"><div class="metric"><div class="label">Surfaces</div><div class="value" id="metricSections">0</div></div><div class="metric"><div class="label">m²</div><div class="value" id="metricM2">0</div></div><div class="metric"><div class="label">Value</div><div class="value" id="metricValue">$0</div></div><div class="metric"><div class="label">Billable</div><div class="value" id="metricBillable">$0</div></div><div class="metric"><div class="label">Labour</div><div class="value" id="metricLabour">0h</div></div><div class="metric"><div class="label">Paint</div><div class="value" id="metricPaint">0L</div></div></div><div id="info"><strong>Click a mapped surface</strong><div class="small">Surface details will show here.</div></div><div class="title" style="margin-top:14px;font-size:14px;">Mapped surfaces</div><div id="sectionList"></div></div></div>
 <script src="https://cdn.jsdelivr.net/npm/three@0.124.0/build/three.min.js"></script><script src="https://cdn.jsdelivr.net/npm/three@0.124.0/examples/js/controls/OrbitControls.js"></script>
 <script>
-const surfaces={data_json};const container=document.getElementById('viewer');const scene=new THREE.Scene();scene.background=new THREE.Color(0xf6f1ea);const camera=new THREE.PerspectiveCamera(48,container.clientWidth/container.clientHeight,.1,1000);camera.position.set(13,8,14);const renderer=new THREE.WebGLRenderer({{antialias:true,alpha:false}});renderer.setPixelRatio(window.devicePixelRatio||1);renderer.setSize(container.clientWidth,container.clientHeight);renderer.shadowMap.enabled=true;container.appendChild(renderer.domElement);const controls=new THREE.OrbitControls(camera,renderer.domElement);controls.enableDamping=true;controls.dampingFactor=.07;controls.target.set(0,1.7,0);scene.add(new THREE.AmbientLight(0xffffff,.72));const sun=new THREE.DirectionalLight(0xffffff,.9);sun.position.set(8,14,10);sun.castShadow=true;scene.add(sun);const floor=new THREE.Mesh(new THREE.PlaneGeometry(20,16),new THREE.MeshStandardMaterial({{color:0xf1e8dd,roughness:.86}}));floor.rotation.x=-Math.PI/2;floor.receiveShadow=true;scene.add(floor);const grid=new THREE.GridHelper(20,20,0xcbbba8,0xe3d8ca);grid.position.y=.01;scene.add(grid);const base=new THREE.Mesh(new THREE.BoxGeometry(12,.18,8),new THREE.MeshStandardMaterial({{color:0xd9cbbd,transparent:true,opacity:.34}}));base.position.y=.09;base.receiveShadow=true;scene.add(base);const roof=new THREE.Mesh(new THREE.BoxGeometry(13,.18,9),new THREE.MeshStandardMaterial({{color:0x4b5563,transparent:true,opacity:.18}}));roof.position.y=6.35;roof.receiveShadow=true;scene.add(roof);
+const surfaces={data_json};const container=document.getElementById('viewer');const scene=new THREE.Scene();scene.background=new THREE.Color(0xf6f1ea);const maxX=Math.max(8,...surfaces.map(s=>Math.abs(Number(s.x||0))+Number(s.w||1)/2));const maxZ=Math.max(5,...surfaces.map(s=>Math.abs(Number(s.z||0))+Number(s.d||1)/2));const maxY=Math.max(3,...surfaces.map(s=>Number(s.y||0)+Number(s.h||1)/2));const camera=new THREE.PerspectiveCamera(48,container.clientWidth/container.clientHeight,.1,1000);camera.position.set(maxX*1.35,maxY+4,maxZ*1.75);const renderer=new THREE.WebGLRenderer({{antialias:true,alpha:false}});renderer.setPixelRatio(window.devicePixelRatio||1);renderer.setSize(container.clientWidth,container.clientHeight);renderer.shadowMap.enabled=true;container.appendChild(renderer.domElement);const controls=new THREE.OrbitControls(camera,renderer.domElement);controls.enableDamping=true;controls.dampingFactor=.07;controls.target.set(0,Math.min(maxY/2,3.5),0);scene.add(new THREE.AmbientLight(0xffffff,.72));const sun=new THREE.DirectionalLight(0xffffff,.9);sun.position.set(maxX,maxY+8,maxZ);sun.castShadow=true;scene.add(sun);const floor=new THREE.Mesh(new THREE.PlaneGeometry(maxX*2.8,maxZ*2.8),new THREE.MeshStandardMaterial({{color:0xf1e8dd,roughness:.86}}));floor.rotation.x=-Math.PI/2;floor.receiveShadow=true;scene.add(floor);const grid=new THREE.GridHelper(Math.max(maxX*2.6,maxZ*2.6),24,0xcbbba8,0xe3d8ca);grid.position.y=.01;scene.add(grid);const base=new THREE.Mesh(new THREE.BoxGeometry(maxX*2+.6,.18,maxZ*2+.6),new THREE.MeshStandardMaterial({{color:0xd9cbbd,transparent:true,opacity:.28}}));base.position.y=.09;base.receiveShadow=true;scene.add(base);const roof=new THREE.Mesh(new THREE.BoxGeometry(maxX*2+.9,.12,maxZ*2+.9),new THREE.MeshStandardMaterial({{color:0x4b5563,transparent:true,opacity:.13}}));roof.position.y=maxY+.08;roof.receiveShadow=true;scene.add(roof);
 function fmtMoney(n){{return '$'+Number(n||0).toLocaleString(undefined,{{maximumFractionDigits:0}})}}function hexToInt(h){{return parseInt(String(h||'#ffffff').replace('#',''),16)}}function colourFor(s){{const status=String(s.status||'').toLowerCase();if(s.selected)return 0x2563eb;if(status.includes('complete'))return 0x16a34a;if(status.includes('progress'))return 0xf59e0b;if(status.includes('hold')||status.includes('review'))return 0xfb923c;return hexToInt(s.colour||'#d1d5db')}}function opacityFor(s){{if(s.selected)return .96;const pct=Number(s.completed_pct||0);if(pct<=0)return .62;return .72+Math.min(pct,100)/100*.24}}const meshes=[];surfaces.forEach(s=>{{const geo=new THREE.BoxGeometry(Number(s.w||1),Number(s.h||1),Number(s.d||.1));const mat=new THREE.MeshStandardMaterial({{color:colourFor(s),transparent:true,opacity:opacityFor(s),roughness:.56,metalness:.02}});const mesh=new THREE.Mesh(geo,mat);mesh.position.set(Number(s.x||0),Number(s.y||0),Number(s.z||0));mesh.rotation.y=Number(s.rotY||0);mesh.castShadow=true;mesh.receiveShadow=true;mesh.userData=s;scene.add(mesh);const edge=new THREE.LineSegments(new THREE.EdgesGeometry(geo),new THREE.LineBasicMaterial({{color:0x111827,transparent:true,opacity:.26}}));edge.position.copy(mesh.position);edge.rotation.copy(mesh.rotation);scene.add(edge);meshes.push(mesh);}});
 function sourceRows(){{return surfaces.some(s=>s.selected)?surfaces.filter(s=>s.selected):surfaces}}function updateMetrics(){{const src=sourceRows();document.getElementById('metricSections').innerText=surfaces.some(s=>s.selected)?`${{src.length}} selected`:`${{surfaces.length}} mapped`;document.getElementById('metricM2').innerText=Number(src.reduce((a,b)=>a+Number(b.m2||0),0)).toLocaleString(undefined,{{maximumFractionDigits:1}});document.getElementById('metricValue').innerText=fmtMoney(src.reduce((a,b)=>a+Number(b.value||0),0));document.getElementById('metricBillable').innerText=fmtMoney(src.reduce((a,b)=>a+Number(b.billable||0),0));document.getElementById('metricLabour').innerText=Number(src.reduce((a,b)=>a+Number(b.labour_hours||0),0)).toFixed(1)+'h';document.getElementById('metricPaint').innerText=Number(src.reduce((a,b)=>a+Number(b.paint_litres||0),0)).toFixed(1)+'L';}}
 function showSurface(s){{document.getElementById('info').innerHTML=`<strong>${{s.code}} — ${{s.name}}</strong><div class="small">${{s.elevation}} • ${{s.level}} • ${{s.surface_type}}</div><div class="small">${{s.substrate}} • ${{s.labour}}</div><div style="margin-top:10px;display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:12px;"><div><b>${{Number(s.m2||0).toLocaleString(undefined,{{maximumFractionDigits:1}})}}m²</b><br><span class="small">substrate</span></div><div><b>${{Number(s.completed_pct||0).toFixed(1)}}%</b><br><span class="small">complete</span></div><div><b>${{fmtMoney(s.value)}}</b><br><span class="small">section value</span></div><div><b>${{fmtMoney(s.billable)}}</b><br><span class="small">billable now</span></div><div><b>${{Number(s.labour_hours||0).toFixed(1)}}h</b><br><span class="small">labour</span></div><div><b>${{Number(s.paint_litres||0).toFixed(1)}}L</b><br><span class="small">paint</span></div></div><div class="small" style="margin-top:10px;">Status: ${{s.status}}</div>`;}}
@@ -9666,7 +9815,7 @@ function buildList(){{const list=document.getElementById('sectionList');list.inn
 
 
 def building_mapper_page(default_job_id=None):
-    pb_page_header("3D Building Mapper", "Map take-off sections into a building-shaped 3D progress model for completion, claims and substrate tracking.", "Plan Trace Model")
+    pb_page_header("3D Building Mapper", "Map take-off sections into a plan-shaped 3D progress model that can be adjusted to closely match the building drawings.", "Plan Trace Model")
     jobs_df = job_lookup_dataframe(include_archived=True)
     if jobs_df.empty:
         st.info("Add a job first.")
@@ -9685,6 +9834,21 @@ def building_mapper_page(default_job_id=None):
     package_label = st.selectbox("Take-off package / progress model", list(package_options.keys()), key=f"building_mapper_package_{selected_job_id}")
     package_id = package_options[package_label]
     render_quick_pdf_import_buttons(selected_job_id, categories=["Architectural Plans", "Specifications", "Colour Schedule", "Scope of Works"], title="Upload plans/elevations for mapping reference", key_prefix=f"building_mapper_pdf_{selected_job_id}", expanded=False)
+    with st.expander("Make the 3D shape match the plans", expanded=True):
+        st.caption("Enter the main dimensions from the floor plan/elevations. This rebuilds the selectable model around that footprint so it resembles the actual building instead of a generic block.")
+        p1, p2, p3, p4 = st.columns(4)
+        mapper_template = p1.selectbox("Building shape template", ["Rectangular building", "Townhouse row", "Switchgear / service building", "L-shape building"], key=f"building_mapper_template_{selected_job_id}_{package_id}")
+        plan_length = p2.number_input("Plan length / frontage m", min_value=2.0, value=18.0, step=0.5, key=f"building_mapper_plan_length_{selected_job_id}_{package_id}")
+        plan_depth = p3.number_input("Plan depth m", min_value=2.0, value=9.0, step=0.5, key=f"building_mapper_plan_depth_{selected_job_id}_{package_id}")
+        level_count = p4.number_input("Number of levels", min_value=1, max_value=5, value=2, step=1, key=f"building_mapper_levels_{selected_job_id}_{package_id}")
+        q1, q2, q3 = st.columns(3)
+        level_height = q1.number_input("Typical level height m", min_value=2.1, value=2.7, step=0.1, key=f"building_mapper_level_height_{selected_job_id}_{package_id}")
+        roof_style = q2.selectbox("Roof style", ["Flat roof", "Skillion roof", "Gable roof"], key=f"building_mapper_roof_style_{selected_job_id}_{package_id}")
+        if q3.button("Rebuild to plan shape", key=f"building_mapper_rebuild_plan_shape_{selected_job_id}_{package_id}", use_container_width=True):
+            count = generate_plan_shape_surfaces_from_takeoff(selected_job_id, package_id, plan_length, plan_depth, int(level_count), level_height, mapper_template, roof_style, reset_existing=True)
+            st.success(f"Plan-shaped model rebuilt with {count} mapped surface(s).")
+            st.rerun()
+        st.info("For best results, use dimensions straight from the plan: overall building length, overall depth, number of levels and typical wall height. Then fine-tune each surface in the mapped surface schedule below.")
     cols = st.columns(3)
     if cols[0].button("Generate building-shaped model from take-off", key=f"building_mapper_generate_{selected_job_id}_{package_id}", use_container_width=True):
         count = generate_building_surfaces_from_takeoff(selected_job_id, package_id, reset_existing=False)
