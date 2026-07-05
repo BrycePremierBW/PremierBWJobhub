@@ -8,6 +8,7 @@ import hashlib
 import html
 import re
 import json
+import zipfile
 from pathlib import Path
 from datetime import date, datetime, timedelta
 from io import BytesIO
@@ -9624,48 +9625,79 @@ def render_progress_visual_cards(display_sections, selected_ids, key_prefix="pro
 
 
 def render_progress_3d_model(display_sections, selected_ids, key_prefix="progress_3d_model"):
-    """Render a browser-based 3D progress block model from the take-off/progress sections.
+    """Render a polished dark-dashboard 3D progress model from the progress/take-off sections.
 
-    This is a lightweight model generated from the take-off rows. It is not a true CAD/BIM extraction,
-    but it gives a full 3D selectable visual model for progress, billable value, labour and materials.
+    This keeps the practical JobHub data model but presents it in a cleaner dashboard style:
+    large central 3D view, right selected-section panel, progress summary, legend, floor selector,
+    quick actions and model controls.
     """
     if display_sections is None or display_sections.empty:
+        st.info("No progress sections to render yet. Create/import take-off lines, then generate the progress model.")
         return
 
     model_rows = []
-    model_df = display_sections.copy().head(240)
+    model_df = display_sections.copy().head(260)
     selected_set = {int(x) for x in selected_ids if str(x).isdigit() or isinstance(x, int)}
 
     for idx, (_, row) in enumerate(model_df.iterrows()):
         section_id = int(row.get("ID") or 0)
         total_m2 = app_float(row.get("Total m2"))
+        completed_m2 = app_float(row.get("Completed m2"))
+        remaining_m2 = app_float(row.get("Remaining m2"))
         completed_pct = app_float(row.get("Completed %"))
         value = app_float(row.get("Section Value Ex GST"))
         billable_value = app_float(row.get("Billable Value Ex GST"))
         remaining_value = app_float(row.get("Remaining Value Ex GST"))
         labour_hours = app_float(row.get("Total Labour Hours"))
+        remaining_labour = app_float(row.get("Remaining Labour Hours"))
         paint_litres = app_float(row.get("Total Paint Litres"))
+        remaining_paint = app_float(row.get("Remaining Paint Litres"))
+        status = str(row.get("Status") or "Not Started")
+        area = str(row.get("Area") or "")
+        location = str(row.get("Location / Area") or "")
+        substrate = str(row.get("Substrate") or "")
+        labour = str(row.get("Labour Category") or "")
+        lower_text = f"{area} {location} {substrate} {labour}".lower()
+        if "roof" in lower_text or "ceiling" in lower_text or "soffit" in lower_text or "eave" in lower_text:
+            floor = "Roof"
+        elif "level 2" in lower_text or "upper" in lower_text or "first" in lower_text or "level 1" in lower_text:
+            floor = "Level 2"
+        elif "ground" in lower_text or "external" in lower_text or "front" in lower_text or "rear" in lower_text:
+            floor = "Ground"
+        else:
+            floor = "Level 1"
         model_rows.append({
             "id": section_id,
             "index": idx,
             "code": str(row.get("Section Code") or f"S-{section_id}"),
-            "area": str(row.get("Area") or ""),
-            "location": str(row.get("Location / Area") or ""),
-            "substrate": str(row.get("Substrate") or ""),
-            "labour": str(row.get("Labour Category") or ""),
-            "status": str(row.get("Status") or "Not Started"),
+            "area": area,
+            "location": location,
+            "substrate": substrate,
+            "labour": labour,
+            "status": status,
+            "floor": floor,
             "m2": round(total_m2, 2),
+            "completed_m2": round(completed_m2, 2),
+            "remaining_m2": round(remaining_m2, 2),
             "completed_pct": round(completed_pct, 2),
             "value": round(value, 2),
             "billable_value": round(billable_value, 2),
             "remaining_value": round(remaining_value, 2),
             "labour_hours": round(labour_hours, 2),
+            "remaining_labour": round(remaining_labour, 2),
             "paint_litres": round(paint_litres, 2),
+            "remaining_paint": round(remaining_paint, 2),
             "selected": section_id in selected_set,
         })
 
     selected_rows = [r for r in model_rows if r["selected"]]
     source_for_summary = selected_rows if selected_rows else model_rows
+    total_area = sum(r["m2"] for r in model_rows)
+    total_completed_area = sum(r["completed_m2"] for r in model_rows)
+    overall_completion = (total_completed_area / total_area * 100) if total_area else 0
+    complete_rows = [r for r in model_rows if r["completed_pct"] >= 99.5 or "complete" in r["status"].lower()]
+    progress_rows = [r for r in model_rows if 0 < r["completed_pct"] < 99.5 or "progress" in r["status"].lower()]
+    not_started_rows = [r for r in model_rows if r not in complete_rows and r not in progress_rows]
     summary = {
         "selected_count": len(selected_rows),
         "shown_count": len(model_rows),
@@ -9674,235 +9706,225 @@ def render_progress_3d_model(display_sections, selected_ids, key_prefix="progres
         "billable": round(sum(r["billable_value"] for r in source_for_summary), 2),
         "labour": round(sum(r["labour_hours"] for r in source_for_summary), 2),
         "paint": round(sum(r["paint_litres"] for r in source_for_summary), 2),
+        "total_area": round(total_area, 2),
+        "total_value": round(sum(r["value"] for r in model_rows), 2),
+        "total_billable": round(sum(r["billable_value"] for r in model_rows), 2),
+        "total_labour": round(sum(r["labour_hours"] for r in model_rows), 2),
+        "total_paint": round(sum(r["paint_litres"] for r in model_rows), 2),
+        "overall_completion": round(overall_completion, 1),
+        "complete_count": len(complete_rows),
+        "progress_count": len(progress_rows),
+        "not_started_count": len(not_started_rows),
     }
 
     data_json = json.dumps(model_rows)
     selected_json = json.dumps(list(selected_set))
     summary_json = json.dumps(summary)
 
-    st.markdown("### Full 3D Progress Render")
-    st.caption(
-        "This generates a 3D block model from the painting take-off sections. Drag to orbit, scroll to zoom and click any section to view its m², value, labour and paint. Use the JobHub selectors/buttons above to permanently mark selected sections as complete."
-    )
+    st.markdown("### 3D Progress Model")
+    st.caption("Dark dashboard style: click sections, rotate/zoom the model, and use the JobHub controls above to save progress changes.")
 
-    html_doc = f"""
+    html_template = """
 <!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8" />
 <style>
-  html, body {{ margin:0; padding:0; overflow:hidden; font-family: Arial, Helvetica, sans-serif; background:#f6f1ea; }}
-  #wrap {{ display:flex; height:640px; width:100%; background:linear-gradient(180deg,#f7f2ec 0%,#ede4d9 100%); border-radius:18px; overflow:hidden; border:1px solid #d6c8b8; }}
-  #viewer {{ flex:1; position:relative; min-width:0; }}
-  #side {{ width:330px; background:rgba(255,255,255,0.94); border-left:1px solid #d6c8b8; padding:14px; overflow:auto; box-sizing:border-box; }}
-  .title {{ font-weight:900; color:#111827; font-size:17px; line-height:1.2; margin-bottom:6px; }}
-  .hint {{ color:#4b5563; font-size:12px; line-height:1.35; margin-bottom:12px; }}
-  .metricGrid {{ display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:12px; }}
-  .metric {{ background:#f8fafc; border:1px solid #e5e7eb; border-radius:12px; padding:8px; }}
-  .metric .label {{ color:#6b7280; font-size:11px; }}
-  .metric .value {{ color:#111827; font-size:16px; font-weight:900; margin-top:2px; }}
-  #info {{ background:#111827; color:#fff; border-radius:14px; padding:12px; margin-top:10px; min-height:145px; box-shadow:0 10px 25px rgba(17,24,39,.20); }}
-  #info .small {{ color:#d1d5db; font-size:12px; margin-top:4px; }}
-  #legend {{ position:absolute; left:14px; bottom:14px; background:rgba(255,255,255,.92); border:1px solid #e5e7eb; border-radius:13px; padding:8px 10px; font-size:12px; color:#111827; box-shadow:0 10px 30px rgba(0,0,0,.12); }}
-  .dot {{ display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:5px; vertical-align:middle; }}
-  #topbar {{ position:absolute; left:14px; top:14px; background:rgba(17,24,39,.88); color:#fff; border-radius:14px; padding:10px 12px; font-size:12px; max-width:420px; box-shadow:0 10px 30px rgba(0,0,0,.20); }}
-  .sectionRow {{ border-bottom:1px solid #e5e7eb; padding:8px 0; cursor:pointer; }}
-  .sectionRow:hover {{ background:#f3f4f6; }}
-  .sectionCode {{ font-weight:800; color:#111827; font-size:12px; }}
-  .sectionMeta {{ color:#4b5563; font-size:11px; margin-top:2px; }}
+  * { box-sizing:border-box; }
+  html, body { margin:0; padding:0; overflow:hidden; font-family: Inter, Arial, Helvetica, sans-serif; background:#05070a; color:#f8fafc; }
+  #app { height:900px; width:100%; background: radial-gradient(circle at 40% 12%, #1f2937 0%, #0b1118 42%, #05070a 100%); border-radius:20px; overflow:hidden; border:1px solid rgba(148,163,184,.18); display:grid; grid-template-columns: 184px 1fr; }
+  #nav { background:linear-gradient(180deg,#0b1118,#05070a); border-right:1px solid rgba(148,163,184,.18); padding:18px 12px; position:relative; }
+  #brand { display:flex; align-items:center; gap:10px; margin-bottom:22px; }
+  #pb { width:36px; height:36px; border-radius:50%; display:grid; place-items:center; font-weight:900; color:#fff; background:#2563eb; box-shadow:0 0 0 4px rgba(37,99,235,.18); }
+  #brandText strong { font-size:17px; display:block; line-height:1; }
+  #brandText span { font-size:10px; color:#94a3b8; }
+  .navItem { display:flex; align-items:center; gap:10px; padding:10px 10px; border-radius:9px; color:#dbeafe; font-size:12px; margin:2px 0; }
+  .navItem.active { background:#2563eb; color:#fff; box-shadow:0 8px 24px rgba(37,99,235,.30); }
+  .navDivider { height:1px; background:rgba(148,163,184,.14); margin:12px 6px; }
+  #navFoot { position:absolute; left:14px; right:14px; bottom:16px; display:flex; align-items:center; gap:10px; font-size:11px; color:#cbd5e1; }
+  #main { display:grid; grid-template-rows:52px 1fr; min-width:0; }
+  #top { height:52px; display:flex; align-items:center; justify-content:space-between; padding:0 20px; background:#05070a; border-bottom:1px solid rgba(148,163,184,.14); }
+  #jobTitle { font-size:15px; letter-spacing:.1px; color:#e5e7eb; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  #backBtn { border:1px solid rgba(148,163,184,.24); background:#0b1118; color:#e5e7eb; padding:8px 12px; border-radius:8px; font-size:12px; }
+  #content { padding:18px 18px 16px; display:grid; grid-template-columns:minmax(560px, 1fr) 280px; gap:16px; min-height:0; }
+  #leftCol { display:grid; grid-template-rows: 42px 1fr 230px; gap:14px; min-width:0; min-height:0; }
+  #toolbar { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+  #toolbar h2 { margin:0; font-size:18px; line-height:1; }
+  #toolbar small { color:#94a3b8; font-size:11px; display:block; margin-top:6px; }
+  .tabs { display:flex; border:1px solid rgba(148,163,184,.22); border-radius:9px; overflow:hidden; background:#0b1118; }
+  .tab { padding:10px 13px; font-size:11px; color:#e5e7eb; border-right:1px solid rgba(148,163,184,.18); }
+  .tab.active { background:#2563eb; color:#fff; }
+  #viewerCard { position:relative; min-height:0; border-radius:14px; overflow:hidden; background:linear-gradient(145deg,#202936,#0f1720); border:1px solid rgba(148,163,184,.20); box-shadow:0 24px 70px rgba(0,0,0,.34); }
+  #viewer { position:absolute; inset:0; }
+  #help { position:absolute; bottom:14px; left:50%; transform:translateX(-50%); display:flex; gap:12px; align-items:center; background:rgba(5,7,10,.72); backdrop-filter:blur(12px); border:1px solid rgba(148,163,184,.18); border-radius:10px; padding:9px 14px; color:#e5e7eb; font-size:11px; box-shadow:0 12px 30px rgba(0,0,0,.28); }
+  #viewerControls { position:absolute; top:14px; right:14px; display:flex; flex-direction:column; gap:8px; }
+  .miniBtn { width:34px; height:34px; border-radius:9px; display:grid; place-items:center; background:rgba(5,7,10,.70); border:1px solid rgba(148,163,184,.18); color:#e5e7eb; cursor:pointer; }
+  #sectionNumbersToggle { position:absolute; left:14px; top:14px; background:rgba(5,7,10,.70); border:1px solid rgba(148,163,184,.18); border-radius:9px; padding:8px 10px; font-size:11px; color:#cbd5e1; }
+  #bottomCards { display:grid; grid-template-columns: 1fr 1.75fr 1.55fr 1.35fr; gap:14px; min-height:0; }
+  .card { background:linear-gradient(180deg,rgba(15,23,32,.92),rgba(8,13,18,.96)); border:1px solid rgba(148,163,184,.18); border-radius:13px; padding:14px; box-shadow:0 16px 40px rgba(0,0,0,.20); min-height:0; }
+  .card h3 { margin:0 0 13px; font-size:14px; }
+  .legendRow { display:flex; align-items:center; gap:10px; margin:13px 0; font-size:12px; color:#e5e7eb; }
+  .swatch { width:21px; height:21px; border-radius:5px; display:inline-block; box-shadow:inset 0 0 0 1px rgba(255,255,255,.16); }
+  #floorGrid { display:grid; grid-template-columns:130px 1fr; gap:12px; align-items:center; }
+  #floorStack { height:150px; position:relative; perspective:420px; }
+  .floorPlate { position:absolute; left:16px; width:90px; height:55px; background:rgba(148,163,184,.30); border:1px solid rgba(226,232,240,.18); transform:rotateX(62deg) rotateZ(-25deg); border-radius:7px; }
+  .floorPlate.roof { top:8px; background:rgba(22,163,74,.65); }
+  .floorPlate.l2 { top:43px; background:rgba(37,99,235,.60); }
+  .floorPlate.l1 { top:77px; background:rgba(245,158,11,.48); }
+  .floorPlate.ground { top:111px; background:rgba(148,163,184,.40); }
+  .floorBtn { display:block; width:100%; padding:10px; margin:6px 0; border-radius:9px; border:1px solid rgba(148,163,184,.16); background:rgba(255,255,255,.05); color:#e5e7eb; text-align:left; font-size:12px; cursor:pointer; }
+  .floorBtn.active { background:rgba(37,99,235,.38); border-color:rgba(59,130,246,.75); }
+  .action { display:block; width:100%; padding:10px 12px; margin:7px 0; border-radius:9px; background:rgba(255,255,255,.06); border:1px solid rgba(148,163,184,.14); color:#e5e7eb; font-size:12px; text-align:left; }
+  .toggleRow { display:flex; justify-content:space-between; align-items:center; margin:15px 0; font-size:12px; color:#e5e7eb; }
+  .toggle { width:36px; height:18px; border-radius:999px; background:#2563eb; position:relative; box-shadow:0 0 0 3px rgba(37,99,235,.15); }
+  .toggle:after { content:''; position:absolute; right:2px; top:2px; width:14px; height:14px; border-radius:50%; background:white; }
+  #rightCol { display:grid; grid-template-rows: 346px 1fr; gap:16px; min-height:0; }
+  #selectedCard { overflow:auto; }
+  #selectedSwatch { width:42px; height:42px; border-radius:9px; background:linear-gradient(135deg,#3b82f6,#2563eb); box-shadow:0 10px 26px rgba(37,99,235,.32); flex:0 0 auto; }
+  .selectedHeader { display:flex; align-items:center; gap:11px; padding-bottom:12px; border-bottom:1px solid rgba(148,163,184,.16); }
+  #selectedTitle { font-size:13px; font-weight:800; line-height:1.25; color:#fff; }
+  #selectedSub { font-size:11px; color:#94a3b8; margin-top:3px; }
+  .detailRow { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:9px 0; border-bottom:1px solid rgba(148,163,184,.10); font-size:12px; }
+  .detailRow span:first-child { color:#cbd5e1; }
+  .detailRow span:last-child { color:#fff; font-weight:700; text-align:right; }
+  .primaryBtn { width:100%; margin-top:12px; padding:11px 12px; border:0; border-radius:9px; background:#2563eb; color:#fff; font-size:12px; font-weight:800; }
+  #donutWrap { display:grid; grid-template-columns:82px 1fr; gap:12px; align-items:center; margin-bottom:14px; }
+  #donut { width:82px; height:82px; border-radius:50%; background:conic-gradient(#16a34a 0deg, #16a34a var(--completeDeg), #f59e0b var(--completeDeg), #f59e0b var(--progressDeg), #d1d5db var(--progressDeg), #d1d5db 360deg); position:relative; }
+  #donut:after { content:''; position:absolute; inset:24px; border-radius:50%; background:#0b1118; }
+  .progressItem { font-size:11px; color:#cbd5e1; margin:7px 0; }
+  .totals { border-top:1px solid rgba(148,163,184,.16); padding-top:12px; margin-top:10px; }
+  .totalRow { display:flex; justify-content:space-between; font-size:12px; padding:6px 0; color:#e5e7eb; }
+  #bar { height:9px; background:rgba(148,163,184,.16); border-radius:999px; overflow:hidden; margin-top:8px; }
+  #bar > div { height:100%; background:#16a34a; width:0%; border-radius:999px; transition:.25s; }
+  .numLabel { position:absolute; padding:2px 6px; border-radius:999px; background:rgba(5,7,10,.82); color:#fff; font-weight:900; font-size:10px; pointer-events:none; transform:translate(-50%,-50%); border:1px solid rgba(255,255,255,.14); }
 </style>
 </head>
 <body>
-<div id="wrap">
-  <div id="viewer">
-    <div id="topbar"><strong>PB 3D Progress Model</strong><br>Mouse: drag to rotate • scroll to zoom • click a substrate section to inspect.</div>
-    <div id="legend">
-      <span class="dot" style="background:#2563eb"></span>Selected&nbsp;&nbsp;
-      <span class="dot" style="background:#16a34a"></span>Complete&nbsp;&nbsp;
-      <span class="dot" style="background:#f59e0b"></span>In progress&nbsp;&nbsp;
-      <span class="dot" style="background:#d1d5db"></span>Not started
-    </div>
-  </div>
-  <div id="side">
-    <div class="title">Selected / visible projection</div>
-    <div class="hint">Blue pieces are selected in JobHub. Green pieces are completed and stay highlighted. Click any 3D piece to inspect that substrate section.</div>
-    <div class="metricGrid">
-      <div class="metric"><div class="label">Sections</div><div class="value" id="metricSections">0</div></div>
-      <div class="metric"><div class="label">m²</div><div class="value" id="metricM2">0</div></div>
-      <div class="metric"><div class="label">Value</div><div class="value" id="metricValue">$0</div></div>
-      <div class="metric"><div class="label">Billable</div><div class="value" id="metricBillable">$0</div></div>
-      <div class="metric"><div class="label">Labour</div><div class="value" id="metricLabour">0h</div></div>
-      <div class="metric"><div class="label">Paint</div><div class="value" id="metricPaint">0L</div></div>
-    </div>
-    <div id="info"><strong>Click a section</strong><div class="small">The selected section details will show here.</div></div>
-    <div class="title" style="margin-top:14px; font-size:14px;">Itemised sections</div>
-    <div id="sectionList"></div>
-  </div>
+<div id="app">
+  <aside id="nav">
+    <div id="brand"><div id="pb">PB</div><div id="brandText"><strong>JobHub</strong><span>Painting Progress</span></div></div>
+    <div class="navItem">⌂ Dashboard</div>
+    <div class="navItem">▣ Job Folders</div>
+    <div class="navItem active">◇ 3D Progress Model</div>
+    <div class="navItem">▦ Take-off</div>
+    <div class="navItem">▤ Areas & Quantities</div>
+    <div class="navItem">◉ Paint System</div>
+    <div class="navItem">▱ Progress / Billing</div>
+    <div class="navDivider"></div>
+    <div class="navItem">◷ Scheduling</div>
+    <div class="navItem">◴ Timesheets</div>
+    <div class="navItem">♙ Wages</div>
+    <div class="navItem">□ Photos</div>
+    <div class="navItem">▧ Forms</div>
+    <div class="navItem">▥ Reports</div>
+    <div class="navDivider"></div>
+    <div class="navItem">⚙ Settings</div>
+    <div id="navFoot"><div id="pb" style="width:31px;height:31px;font-size:12px;">PB</div><div><b>Premier Brushworks</b><br>QBCC 15592041</div></div>
+  </aside>
+  <main id="main">
+    <div id="top"><div id="jobTitle">Job: <b>Current Job</b> &nbsp; | &nbsp; 3D Painting Progress Model</div><button id="backBtn">↩ Back to Job</button></div>
+    <section id="content">
+      <div id="leftCol">
+        <div id="toolbar"><div><h2>3D Progress Model <span style="font-size:12px;color:#64748b;">ⓘ</span></h2><small>Interactive 3D model showing painting progress by substrate/area. Click sections to see details.</small></div><div class="tabs"><div class="tab active">◇ 3D View</div><div class="tab">▣ Floor Plan</div><div class="tab">⬡ Isometric</div></div></div>
+        <div id="viewerCard"><div id="viewer"></div><div id="sectionNumbersToggle">Section numbers: on</div><div id="viewerControls"><div class="miniBtn" id="resetCamera">☷</div><div class="miniBtn" id="zoomAll">⤢</div></div><div id="help"><span>🖱 Left click: Select</span><span>⟲ Drag: Rotate</span><span>☌ Scroll: Zoom</span><span>✋ Right click: Pan</span></div></div>
+        <div id="bottomCards">
+          <div class="card"><h3>Progress Legend</h3><div class="legendRow"><span class="swatch" style="background:#16a34a"></span>Complete</div><div class="legendRow"><span class="swatch" style="background:#f59e0b"></span>In Progress</div><div class="legendRow"><span class="swatch" style="background:#3b82f6"></span>Selected</div><div class="legendRow"><span class="swatch" style="background:#d1d5db"></span>Not Started</div></div>
+          <div class="card"><h3 style="text-align:center;">Floor Selector</h3><div id="floorGrid"><div id="floorStack"><div class="floorPlate roof"></div><div class="floorPlate l2"></div><div class="floorPlate l1"></div><div class="floorPlate ground"></div></div><div><button class="floorBtn" data-floor="Roof">● Roof</button><button class="floorBtn active" data-floor="All">● All Levels</button><button class="floorBtn" data-floor="Level 2">● Level 2</button><button class="floorBtn" data-floor="Level 1">● Level 1</button><button class="floorBtn" data-floor="Ground">● Ground</button></div></div></div>
+          <div class="card"><h3>Quick Actions</h3><button class="action">✓ Select All Complete</button><button class="action">⊗ Clear Selection</button><button class="action">▤ Generate Progress Claim</button><button class="action">⇩ Export 3D View</button></div>
+          <div class="card"><h3>Model Controls</h3><div class="toggleRow"><span>Show Section Numbers</span><span class="toggle"></span></div><div class="toggleRow"><span>Show Area Labels</span><span class="toggle"></span></div><div class="toggleRow"><span>Show Substrate Colours</span><span class="toggle"></span></div><button class="action" id="resetViewAction" style="text-align:center;">↻ Reset View</button></div>
+        </div>
+      </div>
+      <aside id="rightCol">
+        <div class="card" id="selectedCard">
+          <div class="selectedHeader"><div id="selectedSwatch"></div><div><div id="selectedTitle">Selected Section</div><div id="selectedSub">Click a section in the model</div></div></div>
+          <div id="selectedDetails"></div>
+          <button class="primaryBtn">↗ View Section Take-off</button>
+        </div>
+        <div class="card" id="summaryCard"><h3>Progress Summary</h3><div id="donutWrap"><div id="donut"></div><div><div class="progressItem"><span style="color:#16a34a">●</span> Complete: <b id="completeLabel">0%</b></div><div class="progressItem"><span style="color:#f59e0b">●</span> In Progress: <b id="progressLabel">0 sections</b></div><div class="progressItem"><span style="color:#d1d5db">●</span> Not Started: <b id="notStartedLabel">0 sections</b></div></div></div><div class="totals"><div class="totalRow"><span>Total Area</span><b id="totalArea">0m²</b></div><div class="totalRow"><span>Total Billable</span><b id="totalBillable">$0</b></div><div class="totalRow"><span>Total Labour</span><b id="totalLabour">0h</b></div><div class="totalRow"><span>Total Paint</span><b id="totalPaint">0L</b></div><div style="margin-top:12px;font-size:12px;color:#e5e7eb;">Overall Completion <span style="float:right" id="overallText">0%</span></div><div id="bar"><div></div></div></div></div>
+      </aside>
+    </section>
+  </main>
 </div>
 <script src="https://cdn.jsdelivr.net/npm/three@0.124.0/build/three.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.124.0/examples/js/controls/OrbitControls.js"></script>
 <script>
-const sections = {data_json};
-const selectedIds = new Set({selected_json});
-const summary = {summary_json};
-const container = document.getElementById('viewer');
+const sections = __DATA_JSON__;
+const selectedIds = new Set(__SELECTED_JSON__);
+const summary = __SUMMARY_JSON__;
+let activeFloor = 'All';
+let showNumbers = true;
+const viewer = document.getElementById('viewer');
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0xf6f1ea);
-const camera = new THREE.PerspectiveCamera(48, container.clientWidth / container.clientHeight, 0.1, 1000);
-camera.position.set(14, 11, 18);
-const renderer = new THREE.WebGLRenderer({{ antialias:true, alpha:false }});
-renderer.setPixelRatio(window.devicePixelRatio || 1);
-renderer.setSize(container.clientWidth, container.clientHeight);
+scene.background = new THREE.Color(0x222b36);
+const camera = new THREE.PerspectiveCamera(42, viewer.clientWidth / viewer.clientHeight, 0.1, 1200);
+camera.position.set(15, 11, 18);
+const renderer = new THREE.WebGLRenderer({ antialias:true, alpha:false });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+renderer.setSize(viewer.clientWidth, viewer.clientHeight);
 renderer.shadowMap.enabled = true;
-container.appendChild(renderer.domElement);
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+viewer.appendChild(renderer.domElement);
 const controls = new THREE.OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
-controls.dampingFactor = 0.07;
-controls.target.set(0, 1.4, 0);
-const ambient = new THREE.AmbientLight(0xffffff, 0.72);
-scene.add(ambient);
-const sun = new THREE.DirectionalLight(0xffffff, 0.85);
-sun.position.set(8, 15, 10);
-sun.castShadow = true;
-scene.add(sun);
-const grid = new THREE.GridHelper(42, 42, 0xcbbba8, 0xe3d8ca);
-grid.position.y = -0.01;
-scene.add(grid);
-const floorGeo = new THREE.PlaneGeometry(44, 44);
-const floorMat = new THREE.MeshStandardMaterial({{ color:0xf1e8dd, roughness:0.85, metalness:0.0 }});
-const floor = new THREE.Mesh(floorGeo, floorMat);
-floor.rotation.x = -Math.PI/2;
-floor.receiveShadow = true;
-scene.add(floor);
-function fmtMoney(n) {{ return '$' + Number(n||0).toLocaleString(undefined, {{maximumFractionDigits:0}}); }}
-function colourFor(s) {{
-  const status = String(s.status || '').toLowerCase();
-  if (s.selected) return 0x2563eb;
-  if (status.includes('complete')) return 0x16a34a;
-  if (status.includes('progress')) return 0xf59e0b;
-  if (status.includes('hold') || status.includes('review')) return 0xfb923c;
-  return 0xd1d5db;
-}}
-function opacityFor(s) {{
-  const pct = Number(s.completed_pct || 0);
-  if (s.selected) return 0.94;
-  if (pct <= 0) return 0.58;
-  return 0.72 + Math.min(pct, 100) / 100 * 0.24;
-}}
-function dimsFor(s) {{
-  const m2 = Math.max(Number(s.m2 || 0), 1);
-  const substrate = String(s.substrate || '').toLowerCase();
-  const labour = String(s.labour || '').toLowerCase();
-  let w = Math.max(0.9, Math.min(5.6, Math.sqrt(m2) * 0.55));
-  let h = 2.7;
-  let d = 0.16;
-  if (labour.includes('ceiling') || substrate.includes('ceiling')) {{
-    w = Math.max(1.2, Math.min(6.6, Math.sqrt(m2) * 0.62));
-    d = Math.max(1.2, Math.min(6.6, Math.sqrt(m2) * 0.62));
-    h = 0.12;
-  }} else if (labour.includes('wood') || substrate.includes('door') || substrate.includes('frame') || substrate.includes('skirting') || substrate.includes('timber')) {{
-    w = Math.max(0.35, Math.min(1.4, Math.sqrt(m2) * 0.28));
-    h = substrate.includes('skirting') ? 0.18 : 2.1;
-    d = 0.18;
-  }} else if (String(s.area || '').toLowerCase().includes('external')) {{
-    h = 3.1;
-    w = Math.max(1.0, Math.min(6.0, Math.sqrt(m2) * 0.60));
-  }}
-  return {{ w, h, d }};
-}}
+controls.dampingFactor = 0.06;
+controls.target.set(0, 2, 0);
+controls.minDistance = 6;
+controls.maxDistance = 55;
+const hemi = new THREE.HemisphereLight(0xffffff, 0x1f2937, 0.72);
+scene.add(hemi);
+const key = new THREE.DirectionalLight(0xffffff, 1.05);
+key.position.set(9, 18, 13);
+key.castShadow = true;
+key.shadow.mapSize.width = 2048; key.shadow.mapSize.height = 2048;
+scene.add(key);
+const fill = new THREE.DirectionalLight(0x93c5fd, 0.32); fill.position.set(-9,8,-10); scene.add(fill);
+const baseGeo = new THREE.BoxGeometry(19, .22, 14);
+const baseMat = new THREE.MeshStandardMaterial({ color:0x6b7280, roughness:.78, metalness:.02 });
+const base = new THREE.Mesh(baseGeo, baseMat); base.position.set(0,-.13,0); base.receiveShadow = true; scene.add(base);
+const pathMat = new THREE.MeshStandardMaterial({ color:0x9ca3af, roughness:.9 });
+function addBox(name,x,y,z,w,h,d, color, opacity=1) { const mat = new THREE.MeshStandardMaterial({ color, transparent: opacity<1, opacity, roughness:.58, metalness:.03 }); const geo = new THREE.BoxGeometry(w,h,d); const mesh = new THREE.Mesh(geo, mat); mesh.position.set(x,y,z); mesh.castShadow=true; mesh.receiveShadow=true; mesh.name=name; scene.add(mesh); return mesh; }
+addBox('concrete pad',0,0.03,0,18.2,.12,13.2,0xa3a3a3,.50);
+addBox('glazing front',-2,2.0,-6.65,5.4,3.6,.12,0x111827,.42);
+addBox('glazing corner',4.9,2.0,-4.7,.12,3.6,3.5,0x111827,.42);
+addBox('entry path',0,0.03,-8.0,4,.08,2.2,0x71717a,.72);
+addBox('landscape l',-9.3,0.05,0,0.9,.1,13.3,0x166534,.65);
+addBox('landscape f',0,0.05,-7.35,18.5,.1,.6,0x166534,.65);
 const meshes = [];
-const cols = Math.ceil(Math.sqrt(Math.max(sections.length, 1)));
-const spacing = 4.2;
-sections.forEach((s, i) => {{
-  const dim = dimsFor(s);
-  const geo = new THREE.BoxGeometry(dim.w, dim.h, dim.d);
-  const mat = new THREE.MeshStandardMaterial({{ color: colourFor(s), transparent:true, opacity: opacityFor(s), roughness:0.55, metalness:0.02 }});
-  const mesh = new THREE.Mesh(geo, mat);
-  const row = Math.floor(i / cols);
-  const col = i % cols;
-  mesh.position.x = (col - cols/2) * spacing;
-  mesh.position.z = (row - Math.floor(sections.length/cols)/2) * spacing;
-  mesh.position.y = dim.h / 2;
-  if (String(s.labour || '').toLowerCase().includes('ceiling') || String(s.substrate || '').toLowerCase().includes('ceiling')) mesh.position.y = 2.75;
-  mesh.castShadow = true;
-  mesh.receiveShadow = true;
-  mesh.userData = s;
-  scene.add(mesh);
-  const edges = new THREE.LineSegments(new THREE.EdgesGeometry(geo), new THREE.LineBasicMaterial({{ color:0x111827, transparent:true, opacity:0.22 }}));
-  edges.position.copy(mesh.position);
-  scene.add(edges);
-  meshes.push(mesh);
-}});
-function showSection(s) {{
-  document.getElementById('info').innerHTML = `<strong>${{s.code}} — ${{s.location || 'Section'}}</strong>
-    <div class="small">${{s.area}} • ${{s.substrate}} • ${{s.labour}}</div>
-    <div style="margin-top:10px; display:grid; grid-template-columns:1fr 1fr; gap:6px; font-size:12px;">
-      <div><b>${{Number(s.m2||0).toLocaleString(undefined, {{maximumFractionDigits:1}})}}m²</b><br><span class="small">substrate</span></div>
-      <div><b>${{Number(s.completed_pct||0).toFixed(1)}}%</b><br><span class="small">complete</span></div>
-      <div><b>${{fmtMoney(s.value)}}</b><br><span class="small">section value</span></div>
-      <div><b>${{fmtMoney(s.billable_value)}}</b><br><span class="small">billable now</span></div>
-      <div><b>${{Number(s.labour_hours||0).toFixed(1)}}h</b><br><span class="small">labour</span></div>
-      <div><b>${{Number(s.paint_litres||0).toFixed(1)}}L</b><br><span class="small">paint</span></div>
-    </div>
-    <div class="small" style="margin-top:10px;">Status: ${{s.status}}</div>`;
-}}
-function updateMetrics() {{
-  const src = selectedIds.size ? sections.filter(s => selectedIds.has(s.id)) : sections;
-  document.getElementById('metricSections').innerText = selectedIds.size ? `${{selectedIds.size}} selected` : `${{sections.length}} shown`;
-  document.getElementById('metricM2').innerText = Number(src.reduce((a,b)=>a+Number(b.m2||0),0)).toLocaleString(undefined, {{maximumFractionDigits:1}});
-  document.getElementById('metricValue').innerText = fmtMoney(src.reduce((a,b)=>a+Number(b.value||0),0));
-  document.getElementById('metricBillable').innerText = fmtMoney(src.reduce((a,b)=>a+Number(b.billable_value||0),0));
-  document.getElementById('metricLabour').innerText = Number(src.reduce((a,b)=>a+Number(b.labour_hours||0),0)).toFixed(1) + 'h';
-  document.getElementById('metricPaint').innerText = Number(src.reduce((a,b)=>a+Number(b.paint_litres||0),0)).toFixed(1) + 'L';
-}}
-function buildList() {{
-  const list = document.getElementById('sectionList');
-  list.innerHTML = '';
-  sections.slice(0,140).forEach(s => {{
-    const div = document.createElement('div');
-    div.className = 'sectionRow';
-    div.innerHTML = `<div class="sectionCode">${{s.selected ? '🔵 ' : ''}}${{s.code}} — ${{s.location || 'Section'}}</div>
-      <div class="sectionMeta">${{s.substrate}} • ${{Number(s.m2||0).toFixed(1)}}m² • ${{fmtMoney(s.value)}} • ${{s.status}}</div>`;
-    div.onclick = () => showSection(s);
-    list.appendChild(div);
-  }});
-}}
-updateMetrics();
-buildList();
-const raycaster = new THREE.Raycaster();
-const mouse = new THREE.Vector2();
-let lastClicked = null;
-function onClick(event) {{
-  const rect = renderer.domElement.getBoundingClientRect();
-  mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
-  mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
-  raycaster.setFromCamera(mouse, camera);
-  const hits = raycaster.intersectObjects(meshes, false);
-  if (hits.length) {{
-    if (lastClicked) lastClicked.scale.set(1,1,1);
-    const mesh = hits[0].object;
-    mesh.scale.set(1.08,1.08,1.08);
-    lastClicked = mesh;
-    showSection(mesh.userData);
-  }}
-}}
-renderer.domElement.addEventListener('click', onClick);
-window.addEventListener('resize', () => {{
-  camera.aspect = container.clientWidth / container.clientHeight;
-  camera.updateProjectionMatrix();
-  renderer.setSize(container.clientWidth, container.clientHeight);
-}});
-function animate() {{
-  requestAnimationFrame(animate);
-  controls.update();
-  renderer.render(scene, camera);
-}}
-animate();
+const labelEls = [];
+function fmtMoney(n){ return '$' + Number(n||0).toLocaleString(undefined,{maximumFractionDigits:0}); }
+function pct(n){ return Number(n||0).toFixed(0) + '%'; }
+function statusColor(s){ const status=String(s.status||'').toLowerCase(); if(s.selected)return 0x3b82f6; if(Number(s.completed_pct||0)>=99.5 || status.includes('complete')) return 0x16a34a; if(Number(s.completed_pct||0)>0 || status.includes('progress')) return 0xf59e0b; return 0xd1d5db; }
+function statusTextColor(s){ const status=String(s.status||'').toLowerCase(); if(s.selected)return '#3b82f6'; if(Number(s.completed_pct||0)>=99.5 || status.includes('complete')) return '#16a34a'; if(Number(s.completed_pct||0)>0 || status.includes('progress')) return '#f59e0b'; return '#d1d5db'; }
+function dimsFor(s){ const m2=Math.max(Number(s.m2||0),1); const t=String((s.substrate||'')+' '+(s.labour||'')+' '+(s.area||'')+' '+(s.location||'')).toLowerCase(); let w=Math.max(1.2, Math.min(4.2, Math.sqrt(m2)*0.46)); let h=2.7; let d=.20; if(t.includes('ceiling')||t.includes('roof')||t.includes('soffit')||t.includes('eave')){ w=Math.max(2.0, Math.min(5.4, Math.sqrt(m2)*0.58)); d=Math.max(1.6, Math.min(4.8, Math.sqrt(m2)*0.45)); h=.16; } else if(t.includes('door')||t.includes('frame')||t.includes('skirting')||t.includes('wood')||t.includes('timber')){ w=Math.max(.45, Math.min(1.2, Math.sqrt(m2)*0.22)); h=t.includes('skirting')?.22:2.1; d=.16; } return {w,h,d}; }
+function positionFor(s,i){ const t=String((s.area||'')+' '+(s.location||'')+' '+(s.substrate||'')+' '+(s.labour||'')).toLowerCase(); const external=t.includes('external')||t.includes('front')||t.includes('rear')||t.includes('left')||t.includes('right')||t.includes('elevation'); const roof=s.floor==='Roof'; const level2=s.floor==='Level 2'; const level1=s.floor==='Level 1'; const ground=s.floor==='Ground'; const floorY = roof ? 6.3 : level2 ? 4.15 : level1 ? 2.05 : 1.15; const dim=dimsFor(s); let x=0,z=0,rot=0; const faceIndex=i%18; if(roof){ x=(faceIndex%4-1.5)*3.7; z=(Math.floor(faceIndex/4)-1)*3.2; return {x,y:6.05,z,rotX:0,rotY:0,rotZ:0}; } if(external){ const side=i%4; const slot=Math.floor(i/4)%5 - 2; if(side===0){ x=slot*3.1; z=-6.6; rot=0; } if(side===1){ x=slot*3.1; z=6.6; rot=0; } if(side===2){ x=-8.9; z=slot*2.6; rot=Math.PI/2; } if(side===3){ x=8.9; z=slot*2.6; rot=Math.PI/2; } return {x,y:floorY,z,rotX:0,rotY:rot,rotZ:0}; }
+ const cols=4; x=((i%cols)-1.5)*3.2; z=(Math.floor(i/cols)%3-1)*2.35; return {x,y:floorY,z,rotX:0,rotY:(i%2)*Math.PI/2,rotZ:0}; }
+function createLabel(text){ const el=document.createElement('div'); el.className='numLabel'; el.innerText=text; document.getElementById('viewerCard').appendChild(el); return el; }
+sections.forEach((s,i)=>{ const dim=dimsFor(s); const geo=new THREE.BoxGeometry(dim.w,dim.h,dim.d); const mat=new THREE.MeshStandardMaterial({ color:statusColor(s), transparent:true, opacity:s.selected?.94:.82, roughness:.52, metalness:.02 }); const mesh=new THREE.Mesh(geo,mat); const p=positionFor(s,i); mesh.position.set(p.x,p.y,p.z); mesh.rotation.y=p.rotY||0; mesh.castShadow=true; mesh.receiveShadow=true; mesh.userData=s; scene.add(mesh); const edge=new THREE.LineSegments(new THREE.EdgesGeometry(geo), new THREE.LineBasicMaterial({color:0x020617,transparent:true,opacity:.35})); edge.position.copy(mesh.position); edge.rotation.copy(mesh.rotation); scene.add(edge); mesh.userData.edge=edge; meshes.push(mesh); const label=createLabel(String(i+1)); mesh.userData.label=label; labelEls.push(label); });
+function sectionTitle(s){ return (s.location || s.code || 'Selected Section'); }
+function showSection(s){ document.getElementById('selectedSwatch').style.background = s.selected ? 'linear-gradient(135deg,#60a5fa,#2563eb)' : statusTextColor(s); document.getElementById('selectedTitle').innerText = sectionTitle(s); document.getElementById('selectedSub').innerText = `${s.substrate || 'Substrate'} — ${s.labour || 'Paint System'}`; document.getElementById('selectedDetails').innerHTML = `<div class="detailRow"><span>Area</span><span>${Number(s.m2||0).toLocaleString(undefined,{maximumFractionDigits:2})} m²</span></div><div class="detailRow"><span>Billable Value</span><span>${fmtMoney(s.billable_value)}</span></div><div class="detailRow"><span>Section Value</span><span>${fmtMoney(s.value)}</span></div><div class="detailRow"><span>Labour Hours</span><span>${Number(s.labour_hours||0).toFixed(2)} hrs</span></div><div class="detailRow"><span>Paint Required</span><span>${Number(s.paint_litres||0).toFixed(1)} L</span></div><div class="detailRow"><span>Completion</span><span>${pct(s.completed_pct)}</span></div><div class="detailRow"><span>Status</span><span style="color:${statusTextColor(s)}">● ${s.status || 'Not Started'}</span></div><div class="detailRow"><span>Floor</span><span>${s.floor || 'All'}</span></div>`; }
+function updateSummary(){ const c=summary.complete_count||0, p=summary.progress_count||0, n=summary.not_started_count||0, total=Math.max(c+p+n,1); const cDeg=(c/total*360); const pDeg=((c+p)/total*360); document.getElementById('donut').style.setProperty('--completeDeg', cDeg+'deg'); document.getElementById('donut').style.setProperty('--progressDeg', pDeg+'deg'); document.getElementById('completeLabel').innerText = `${Math.round(c/total*100)}% (${c} sections)`; document.getElementById('progressLabel').innerText = `${p} sections`; document.getElementById('notStartedLabel').innerText = `${n} sections`; document.getElementById('totalArea').innerText = Number(summary.total_area||0).toLocaleString(undefined,{maximumFractionDigits:2}) + ' m²'; document.getElementById('totalBillable').innerText = fmtMoney(summary.total_billable); document.getElementById('totalLabour').innerText = Number(summary.total_labour||0).toLocaleString(undefined,{maximumFractionDigits:2}) + ' hrs'; document.getElementById('totalPaint').innerText = Number(summary.total_paint||0).toLocaleString(undefined,{maximumFractionDigits:1}) + ' L'; document.getElementById('overallText').innerText = pct(summary.overall_completion); document.querySelector('#bar > div').style.width = Math.max(0,Math.min(100,Number(summary.overall_completion||0))) + '%'; }
+function setFloor(floor){ activeFloor=floor; document.querySelectorAll('.floorBtn').forEach(b=>b.classList.toggle('active', b.dataset.floor===floor)); meshes.forEach(m=>{ const show=floor==='All' || m.userData.floor===floor; m.visible=show; if(m.userData.edge)m.userData.edge.visible=show; if(m.userData.label)m.userData.label.style.display=(show && showNumbers)?'block':'none'; }); }
+document.querySelectorAll('.floorBtn').forEach(b=>b.onclick=()=>setFloor(b.dataset.floor));
+document.getElementById('sectionNumbersToggle').onclick=()=>{ showNumbers=!showNumbers; document.getElementById('sectionNumbersToggle').innerText='Section numbers: '+(showNumbers?'on':'off'); meshes.forEach(m=>{ if(m.userData.label)m.userData.label.style.display=(m.visible&&showNumbers)?'block':'none'; }); };
+const raycaster=new THREE.Raycaster(); const mouse=new THREE.Vector2(); let last=null;
+renderer.domElement.addEventListener('click',(ev)=>{ const rect=renderer.domElement.getBoundingClientRect(); mouse.x=((ev.clientX-rect.left)/rect.width)*2-1; mouse.y=-((ev.clientY-rect.top)/rect.height)*2+1; raycaster.setFromCamera(mouse,camera); const hits=raycaster.intersectObjects(meshes.filter(m=>m.visible),false); if(hits.length){ if(last){ last.scale.set(1,1,1); } const m=hits[0].object; m.scale.set(1.06,1.06,1.06); last=m; showSection(m.userData); }});
+function resetView(){ camera.position.set(15,11,18); controls.target.set(0,2,0); controls.update(); }
+document.getElementById('resetCamera').onclick=resetView; document.getElementById('resetViewAction').onclick=resetView; document.getElementById('zoomAll').onclick=()=>{ camera.position.set(20,15,24); controls.target.set(0,2,0); controls.update(); };
+function updateLabels(){ meshes.forEach((m,i)=>{ const el=m.userData.label; if(!el) return; if(!m.visible || !showNumbers){ el.style.display='none'; return; } const v=m.position.clone(); v.y += dimsFor(m.userData).h/2 + .15; v.project(camera); const x=(v.x*.5+.5)*viewer.clientWidth + 184 + 18; const y=(-v.y*.5+.5)*viewer.clientHeight + 52 + 18; el.style.left=x+'px'; el.style.top=y+'px'; }); }
+window.addEventListener('resize',()=>{ camera.aspect=viewer.clientWidth/viewer.clientHeight; camera.updateProjectionMatrix(); renderer.setSize(viewer.clientWidth,viewer.clientHeight); });
+updateSummary(); if(sections.length) showSection(sections.find(s=>s.selected)||sections[0]); setFloor('All');
+function animate(){ requestAnimationFrame(animate); controls.update(); updateLabels(); renderer.render(scene,camera); } animate();
 </script>
 </body>
 </html>
 """
-    components.html(html_doc, height=660, scrolling=False)
+    html_doc = (
+        html_template
+        .replace("__DATA_JSON__", data_json)
+        .replace("__SELECTED_JSON__", selected_json)
+        .replace("__SUMMARY_JSON__", summary_json)
+    )
+    components.html(html_doc, height=930, scrolling=False)
 
 
 
@@ -11194,7 +11216,7 @@ def render_progress_billing_model(job_id, package_id=None, key_prefix="progress_
     else:
         render_building_mapper_3d(mapped_surfaces, selected_progress_ids=selected_ids, key_prefix=f"{key_prefix}_building_3d_{job_id}_{package_id}")
         if st.button("Open 3D Building Mapper to adjust shape", key=f"{key_prefix}_open_building_mapper_{job_id}_{package_id}"):
-            st.session_state["go_to_menu"] = "3D Building Mapper"
+            st.session_state["go_to_menu"] = "3D Model Viewer"
             st.rerun()
 
     render_progress_visual_cards(display_sections, selected_ids, key_prefix=f"{key_prefix}_cards_{job_id}_{package_id}")
@@ -11291,6 +11313,84 @@ def render_progress_billing_model(job_id, package_id=None, key_prefix="progress_
         key=f"{key_prefix}_export_{job_id}_{package_id}",
     )
 
+
+
+def takeoff_import_page(default_job_id=None):
+    pb_page_header(
+        "Import Take-off / Model File",
+        "Import the CSV or ZIP created by MeasureTakeoff Studio and create the JobHub progress model.",
+        "Estimating"
+    )
+    st.info("Use this page for files created by PB MeasureTakeoff Studio. It creates the take-off package, progress sections and 3D model source data for JobHub.")
+    job_options = get_job_options()
+    if not job_options:
+        st.warning("Create or link a job in JobHub first, then come back here to import the take-off/model file.")
+        return
+
+    labels = list(job_options.keys())
+    index = 0
+    if default_job_id:
+        for i, label in enumerate(labels):
+            if int(job_options[label]) == int(default_job_id):
+                index = i
+                break
+    selected_job = st.selectbox("Select Job", labels, index=index, key=f"clean_import_job_select_{default_job_id or 'main'}")
+    job_id = int(job_options[selected_job])
+
+    uploaded = st.file_uploader(
+        "Upload MeasureTakeoff Studio export ZIP or takeoff CSV",
+        type=["zip", "csv"],
+        key=f"clean_takeoff_import_file_{job_id}",
+        help="Use the JobHub import ZIP from MeasureTakeoff Studio, or upload takeoff_lines.csv directly."
+    )
+    notes = st.text_area("Import notes", value="Imported from MeasureTakeoff Studio.", key=f"clean_takeoff_import_notes_{job_id}")
+
+    st.markdown("#### What this import will create")
+    st.write("• Painting take-off package")
+    st.write("• Take-off lines")
+    st.write("• Progress / billing sections")
+    st.write("• Source data for the 3D progress model")
+
+    if st.button("Import and create progress model", disabled=uploaded is None, key=f"clean_takeoff_import_button_{job_id}"):
+        try:
+            file_name = getattr(uploaded, "name", "uploaded_file")
+            raw = uploaded.getvalue()
+            csv_bytes = None
+            csv_name = file_name
+
+            if file_name.lower().endswith(".zip"):
+                with zipfile.ZipFile(BytesIO(raw)) as zf:
+                    names = [n for n in zf.namelist() if not n.endswith("/")]
+                    preferred = [n for n in names if n.lower().endswith("takeoff_lines.csv")]
+                    fallback = [n for n in names if n.lower().endswith(".csv")]
+                    if preferred:
+                        csv_name = preferred[0]
+                    elif fallback:
+                        csv_name = fallback[0]
+                    else:
+                        raise ValueError("The ZIP did not contain a CSV. Export again from MeasureTakeoff Studio and include takeoff_lines.csv.")
+                    csv_bytes = zf.read(csv_name)
+            else:
+                csv_bytes = raw
+
+            csv_file = BytesIO(csv_bytes)
+            csv_file.name = csv_name
+            package_id, imported_count = import_takeoff_csv_to_package(
+                job_id,
+                csv_file,
+                source_name=csv_name,
+                notes=notes,
+            )
+            try:
+                generate_building_surfaces_from_takeoff(job_id, package_id, reset_existing=True)
+            except Exception:
+                pass
+            st.session_state["go_to_menu"] = "Progress / Billing Model"
+            st.success(f"Imported {imported_count} take-off line(s). Progress model created for {selected_job}.")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Could not import take-off/model file: {e}")
+
 def progress_billing_model_page(default_job_id=None):
     pb_page_header(
         "Progress / Billing Model",
@@ -11319,15 +11419,95 @@ def progress_billing_model_page(default_job_id=None):
     )
     packages = progress_package_options(job_id)
     if not packages:
-        st.info("No painting take-off package has been created for this job yet. Upload plans and generate the take-off first.")
-        if st.button("Open Painting Take-off Generator", key=f"progress_open_takeoff_{job_id}"):
-            st.session_state["go_to_menu"] = "Painting Take-off Generator"
+        st.info("No painting take-off package has been created for this job yet. Import the MeasureTakeoff Studio file first.")
+        if st.button("Open Import Take-off / Model File", key=f"progress_open_takeoff_{job_id}"):
+            st.session_state["go_to_menu"] = "Import Take-off / Model File"
             st.rerun()
         return
     selected_package = st.selectbox("Select Take-off Package / Model Source", list(packages.keys()), key=f"progress_package_select_{job_id}")
     package_id = int(packages[selected_package])
     render_progress_billing_model(job_id, package_id, key_prefix=f"progress_page_{job_id}")
 
+
+def three_d_model_viewer_page(default_job_id=None):
+    pb_page_header(
+        "3D Model Viewer",
+        "View the imported MeasureTakeoff Studio 3D/progress model. Generation and plan mapping are handled in the separate MeasureTakeoff app.",
+        "Estimating"
+    )
+    st.info("This page is view-only for JobHub. Build or edit the model in PB MeasureTakeoff Studio, then import the export ZIP here using Estimating → Import Take-off / Model File.")
+
+    job_options = get_job_options()
+    if not job_options:
+        st.warning("Create or link a job first, then import a model file.")
+        return
+
+    labels = list(job_options.keys())
+    index = 0
+    if default_job_id:
+        for i, label in enumerate(labels):
+            if int(job_options[label]) == int(default_job_id):
+                index = i
+                break
+    selected_job = st.selectbox("Select Job", labels, index=index, key=f"three_d_viewer_job_select_{default_job_id or 'main'}")
+    job_id = int(job_options[selected_job])
+
+    packages = progress_package_options(job_id)
+    if not packages:
+        st.info("No imported take-off/model package exists for this job yet.")
+        if st.button("Open Import Take-off / Model File", key=f"three_d_viewer_open_import_{job_id}"):
+            st.session_state["go_to_menu"] = "Import Take-off / Model File"
+            st.rerun()
+        return
+
+    selected_package = st.selectbox(
+        "Select imported package / model source",
+        list(packages.keys()),
+        key=f"three_d_viewer_package_select_{job_id}",
+    )
+    package_id = int(packages[selected_package])
+
+    surfaces = pd.DataFrame()
+    try:
+        surfaces = building_model_surfaces_df(job_id, package_id)
+    except Exception:
+        surfaces = pd.DataFrame()
+
+    sections = progress_sections_df(job_id, package_id)
+    if sections.empty:
+        try:
+            ensure_progress_sections_for_package(package_id, reset_values=False)
+            sections = progress_sections_df(job_id, package_id)
+        except Exception:
+            pass
+
+    c1, c2, c3, c4 = st.columns(4)
+    if sections is not None and not sections.empty:
+        c1.metric("Total m²", f"{float(sections['Total m2'].sum()):,.1f}")
+        c2.metric("Completed m²", f"{float(sections['Completed m2'].sum()):,.1f}")
+        total_val = float(sections['Section Value Ex GST'].sum()) if 'Section Value Ex GST' in sections.columns else 0
+        billable_val = float(sections['Billable Value Ex GST'].sum()) if 'Billable Value Ex GST' in sections.columns else 0
+        c3.metric("Total Value", pb_money(total_val))
+        c4.metric("Billable", pb_money(billable_val))
+    else:
+        c1.metric("Total m²", "0")
+        c2.metric("Completed m²", "0")
+        c3.metric("Total Value", "$0")
+        c4.metric("Billable", "$0")
+
+    st.markdown("### Imported 3D / Progress View")
+    if surfaces is not None and not surfaces.empty:
+        render_building_mapper_3d(surfaces, selected_progress_ids=[], key_prefix=f"three_d_viewer_surface_{job_id}_{package_id}")
+    elif sections is not None and not sections.empty:
+        render_progress_3d_model(sections, selected_ids=[], key_prefix=f"three_d_viewer_progress_{job_id}_{package_id}")
+    else:
+        st.warning("This package has no model sections yet. Import a MeasureTakeoff Studio export ZIP or a takeoff_lines.csv file first.")
+
+    st.markdown("### Model Sections")
+    if sections is not None and not sections.empty:
+        st.dataframe(sections.drop(columns=["ID", "Package ID", "Takeoff Line ID"], errors="ignore"), width="stretch", hide_index=True)
+    else:
+        st.info("No sections to show.")
 
 def render_takeoff_package(package_id, key_prefix="takeoff"):
     try:
@@ -12007,13 +12187,12 @@ def render_job_linked_info(job_id, expanded=True):
     m4.metric("Wages", f"${wage_total:,.2f}")
     m5.metric("Basic Position", f"${gross_position:,.2f}")
 
-    tab_summary, tab_documents, tab_takeoff, tab_progress, tab_plan_mapper, tab_mapper, tab_costs, tab_materials, tab_wages, tab_equipment, tab_control, tab_photos = st.tabs([
+    tab_summary, tab_documents, tab_import, tab_progress, tab_3d_model, tab_costs, tab_materials, tab_wages, tab_equipment, tab_control, tab_photos = st.tabs([
         "Summary",
         "Plans / Docs",
-        "Painting Take-off",
+        "Import Take-off / Model",
         "Progress / Billing",
-        "Plan / Elevation Mapper",
-        "3D Building Mapper",
+        "3D Model",
         "Costs & Estimates",
         "Materials",
         "Wages & Timesheets",
@@ -12035,17 +12214,14 @@ def render_job_linked_info(job_id, expanded=True):
     with tab_documents:
         render_job_documents_panel(job_id, allow_upload=True, allow_delete=True, key_prefix="linked_job_docs")
 
-    with tab_takeoff:
-        painting_takeoff_generator_page(default_job_id=job_id)
+    with tab_import:
+        takeoff_import_page(default_job_id=job_id)
 
     with tab_progress:
         progress_billing_model_page(default_job_id=job_id)
 
-    with tab_plan_mapper:
-        building_progress_mapper_page(default_job_id=job_id)
-
-    with tab_mapper:
-        building_mapper_page(default_job_id=job_id)
+    with tab_3d_model:
+        three_d_model_viewer_page(default_job_id=job_id)
 
     with tab_costs:
         c1, c2, c3 = st.columns(3)
@@ -12430,7 +12606,7 @@ require_login()
 
 pb_page_header(
     "JobHub",
-    "A central job management system for Premier Brushworks operations, site teams, estimating and reporting.",
+    "A central job management system for Premier Brushworks operations, site teams, estimating, progress claims and reporting.",
     "Internal System"
 )
 pb_sidebar_header()
@@ -12438,6 +12614,10 @@ logout_button()
 
 role = current_role()
 
+# Restored JobHub navigation.
+# The heavy plan measurement/take-off/3D model generation workflow now belongs in the separate
+# PB MeasureTakeoff Studio app. JobHub keeps normal operations plus a clean importer, progress model,
+# and 3D model viewer for imported model data.
 if role == "employee":
     main_menu_options = ["Employee Portal"]
     management_menu_map = {}
@@ -12463,10 +12643,9 @@ elif role == "manager":
         "Equipment": "Equipment",
     }
     estimating_menu_map = {
-        "Painting Take-off Generator": "Painting Take-off Generator",
+        "Import Take-off / Model File": "Import Take-off / Model File",
         "Progress / Billing Model": "Progress / Billing Model",
-        "3D Building Mapper": "3D Building Mapper",
-        "Building Progress Mapper": "Building Progress Mapper",
+        "3D Model Viewer": "3D Model Viewer",
         "Estimate Working Sheet": "Estimate Working Sheet",
         "Job Costs / Forecasting": "Job Costs / Forecasting",
     }
@@ -12501,10 +12680,9 @@ else:
         "Equipment": "Equipment",
     }
     estimating_menu_map = {
-        "Painting Take-off Generator": "Painting Take-off Generator",
+        "Import Take-off / Model File": "Import Take-off / Model File",
         "Progress / Billing Model": "Progress / Billing Model",
-        "3D Building Mapper": "3D Building Mapper",
-        "Building Progress Mapper": "Building Progress Mapper",
+        "3D Model Viewer": "3D Model Viewer",
         "Estimate Working Sheet": "Estimate Working Sheet",
         "Job Costs / Forecasting": "Job Costs / Forecasting",
     }
@@ -13188,18 +13366,23 @@ elif menu == "Jobs":
 # =============================
 # ESTIMATE WORKING SHEET
 # =============================
+elif menu == "Import Take-off / Model File":
+    takeoff_import_page()
+
 elif menu == "Painting Take-off Generator":
     painting_takeoff_generator_page()
-
 
 elif menu == "Progress / Billing Model":
     progress_billing_model_page()
 
+elif menu == "3D Model Viewer":
+    three_d_model_viewer_page()
+
 elif menu == "3D Building Mapper":
-    building_mapper_page()
+    three_d_model_viewer_page()
 
 elif menu == "Building Progress Mapper":
-    building_progress_mapper_page()
+    three_d_model_viewer_page()
 
 
 elif menu == "Estimate Working Sheet":
