@@ -495,7 +495,7 @@ def get_postgres_pool():
 
     return ThreadedConnectionPool(
         minconn=1,
-        maxconn=15,
+        maxconn=5,
         dsn=DATABASE_URL,
         sslmode="require",
     )
@@ -1400,16 +1400,19 @@ def execute_many(sql, rows):
 def refresh():
     st.rerun()
 
+
 @st.cache_data(ttl=15, show_spinner=False)
 def get_builder_options():
     df = df_query("SELECT id, name FROM builders_clients ORDER BY name")
     return {str(row["name"]): int(row["id"]) for _, row in df.iterrows()}
+
 
 @st.cache_data(ttl=15, show_spinner=False)
 def get_employee_options(active_only=False):
     where = "WHERE status = 'Active'" if active_only else ""
     df = df_query(f"SELECT id, name FROM employees {where} ORDER BY name")
     return {str(row["name"]): int(row["id"]) for _, row in df.iterrows()}
+
 
 @st.cache_data(ttl=15, show_spinner=False)
 def get_job_options():
@@ -1420,10 +1423,12 @@ def get_job_options():
     """)
     return {str(row["label"]): int(row["id"]) for _, row in df.iterrows()}
 
+
 @st.cache_data(ttl=15, show_spinner=False)
 def get_product_options():
     df = df_query("SELECT id, product_code FROM products ORDER BY product_code")
     return {str(row["product_code"]): int(row["id"]) for _, row in df.iterrows()}
+
 
 @st.cache_data(ttl=15, show_spinner=False)
 def get_product_name_options():
@@ -12617,6 +12622,7 @@ def job_folders_page():
 
 @st.cache_resource(show_spinner="Starting JobHub...")
 def initialise_jobhub():
+    """Initialise database tables and starter accounts once per app process."""
     init_db()
     set_app_setting("starter_jobs_disabled", "yes")
     set_app_setting("starter_data_seeded", "yes")
@@ -12629,12 +12635,9 @@ def initialise_jobhub():
 initialise_jobhub()
 require_login()
 
-pb_page_header()
-    "JobHub"
-    
 pb_sidebar_header()
 logout_button()
-    
+
 role = current_role()
 
 
