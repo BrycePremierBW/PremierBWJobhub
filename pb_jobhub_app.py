@@ -118,329 +118,273 @@ def pb_money(value):
         return "$0"
 
 
+
 def apply_pb_branding():
-    logo_data_uri = pb_logo_data_uri()
-    logo_background_css = ""
-    if logo_data_uri:
-        logo_background_css = f"""
-    .stApp {{
-        background-image:
-            linear-gradient(rgba(247, 243, 238, 0.89), rgba(247, 243, 238, 0.89)),
-            url("{logo_data_uri}");
-        background-size: cover, min(72vw, 760px) auto;
-        background-position: center center;
-        background-repeat: no-repeat;
-        background-attachment: fixed;
-        background-color: var(--pb-bg);
-    }}
-
-    [data-testid="stAppViewContainer"] {{
-        background: transparent !important;
-    }}
+    """Apply a clean, consistent Premier Brushworks interface theme."""
+    st.markdown(
         """
+        <style>
+        :root {
+            --pb-bg: #f5f3ef;
+            --pb-surface: #ffffff;
+            --pb-soft: #faf9f7;
+            --pb-text: #242321;
+            --pb-muted: #706d68;
+            --pb-border: #ded9d1;
+            --pb-sidebar: #181817;
+            --pb-sidebar-hover: #292826;
+            --pb-accent: #9a8067;
+            --pb-success: #47735b;
+            --pb-warning: #a06f2f;
+            --pb-danger: #9b4c48;
+            --pb-radius: 12px;
+            --pb-shadow: 0 6px 22px rgba(29, 27, 24, 0.06);
+        }
 
-    st.markdown("""
-    <style>
-    @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700;800&display=swap');
+        html, body, [class*="css"] {
+            font-family: "Poppins", "Segoe UI", Arial, sans-serif;
+        }
 
-    :root {
-        --pb-bg: #f7f3ee;
-        --pb-card: #ffffff;
-        --pb-charcoal: #1f1f1f;
-        --pb-muted: #6f6a63;
-        --pb-border: #e8ded3;
-        --pb-accent: #d8c8b8;
-        --pb-accent-dark: #7a6856;
-        --pb-success: #1f7a4d;
-        --pb-warning: #b7791f;
-        --pb-danger: #b42318;
-        --pb-info: #2f5f8f;
-    }
+        .stApp, [data-testid="stAppViewContainer"] {
+            background: var(--pb-bg) !important;
+            color: var(--pb-text);
+        }
 
-    html, body, [class*="css"] {
-        font-family: 'Poppins', sans-serif;
-    }
+        [data-testid="stHeader"] { background: transparent; }
 
-    .stApp {
-        background:
-            radial-gradient(circle at top left, rgba(216, 200, 184, 0.36), rgba(247, 243, 238, 0) 34rem),
-            var(--pb-bg);
-    }
+        .block-container {
+            max-width: 1560px;
+            padding-top: 1.15rem;
+            padding-bottom: 2.5rem;
+        }
 
-    """ + logo_background_css + """
+        section[data-testid="stSidebar"] {
+            background: var(--pb-sidebar);
+            border-right: 1px solid #34322f;
+        }
 
-    section[data-testid="stSidebar"] {
-        background: linear-gradient(180deg, #171717 0%, #29231f 100%);
-        border-right: 1px solid rgba(255,255,255,0.08);
-    }
+        section[data-testid="stSidebar"] label,
+        section[data-testid="stSidebar"] p,
+        section[data-testid="stSidebar"] span,
+        section[data-testid="stSidebar"] h1,
+        section[data-testid="stSidebar"] h2,
+        section[data-testid="stSidebar"] h3 {
+            color: #f5f2ec !important;
+        }
 
-    section[data-testid="stSidebar"] * {
-        color: #f6efe7;
-    }
+        section[data-testid="stSidebar"] [role="radiogroup"] label {
+            border-radius: 9px;
+            padding: 0.38rem 0.5rem;
+        }
 
-    section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p,
-    section[data-testid="stSidebar"] label,
-    section[data-testid="stSidebar"] span {
-        color: #f6efe7;
-    }
+        section[data-testid="stSidebar"] [role="radiogroup"] label:hover {
+            background: var(--pb-sidebar-hover);
+        }
 
-    /* Keep the left sidebar dropdown/selectbox text black for readability. */
-    section[data-testid="stSidebar"] div[data-baseweb="select"],
-    section[data-testid="stSidebar"] div[data-baseweb="select"] > div,
-    section[data-testid="stSidebar"] div[data-baseweb="select"] *,
-    section[data-testid="stSidebar"] div[data-baseweb="select"] input,
-    section[data-testid="stSidebar"] div[data-baseweb="select"] span,
-    section[data-testid="stSidebar"] div[data-baseweb="select"] svg {
-        color: #111111 !important;
-        -webkit-text-fill-color: #111111 !important;
-        fill: #111111 !important;
-    }
+        section[data-testid="stSidebar"] div[data-baseweb="select"] > div {
+            background: #ffffff !important;
+        }
 
-    section[data-testid="stSidebar"] [role="listbox"],
-    section[data-testid="stSidebar"] [role="listbox"] *,
-    section[data-testid="stSidebar"] [data-baseweb="popover"],
-    section[data-testid="stSidebar"] [data-baseweb="popover"] * {
-        color: #111111 !important;
-        -webkit-text-fill-color: #111111 !important;
-    }
+        section[data-testid="stSidebar"] div[data-baseweb="select"] * {
+            color: #151515 !important;
+            -webkit-text-fill-color: #151515 !important;
+        }
 
-    section[data-testid="stSidebar"] .stSelectbox div[data-baseweb="select"] div {
-        background-color: #ffffff !important;
-    }
+        h1 { font-size: 2rem !important; letter-spacing: -0.035em; }
+        h2 { font-size: 1.42rem !important; letter-spacing: -0.02em; }
+        h3 { font-size: 1.08rem !important; }
 
-    section[data-testid="stSidebar"] [data-testid="stSelectbox"] label {
-        color: #f6efe7 !important;
-        -webkit-text-fill-color: #f6efe7 !important;
-    }
+        div[data-testid="stMetric"],
+        div[data-testid="stVerticalBlockBorderWrapper"] {
+            background: var(--pb-surface);
+            border: 1px solid var(--pb-border);
+            border-radius: var(--pb-radius);
+            box-shadow: var(--pb-shadow);
+        }
 
-    h1, h2, h3, h4 {
-        color: var(--pb-charcoal);
-        letter-spacing: -0.02em;
-    }
+        div[data-testid="stMetric"] { padding: 1rem 1.05rem; }
+        div[data-testid="stMetricLabel"] { color: var(--pb-muted); }
 
-    div[data-testid="stMetric"] {
-        background: var(--pb-card);
-        border: 1px solid var(--pb-border);
-        border-radius: 18px;
-        padding: 16px 18px;
-        box-shadow: 0 10px 28px rgba(31,31,31,0.06);
-    }
+        .stButton > button, .stDownloadButton > button {
+            min-height: 2.55rem;
+            border-radius: 9px !important;
+            border: 1px solid var(--pb-border) !important;
+            background: var(--pb-surface) !important;
+            color: var(--pb-text) !important;
+            font-weight: 600 !important;
+            box-shadow: none !important;
+        }
 
-    div[data-testid="stMetric"] label {
-        color: var(--pb-muted) !important;
-        font-weight: 600;
-    }
+        .stButton > button:hover, .stDownloadButton > button:hover {
+            border-color: var(--pb-accent) !important;
+            background: #f0ebe5 !important;
+            transform: none !important;
+        }
 
-    .pb-sidebar-logo {
-        background: rgba(255,255,255,0.08);
-        border: 1px solid rgba(255,255,255,0.12);
-        border-radius: 22px;
-        padding: 18px 16px;
-        margin: 0 0 18px 0;
-        text-align: left;
-    }
+        button[kind="primary"] {
+            background: var(--pb-sidebar) !important;
+            color: white !important;
+            border-color: var(--pb-sidebar) !important;
+        }
 
-    .pb-logo-mark {
-        width: 48px;
-        height: 48px;
-        border-radius: 15px;
-        background: #f6efe7;
-        color: #1f1f1f;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-weight: 800;
-        font-size: 20px;
-        margin-bottom: 10px;
-    }
+        [data-baseweb="tab-list"] {
+            gap: 0.3rem;
+            border-bottom: 1px solid var(--pb-border);
+        }
 
-    .pb-sidebar-title {
-        font-size: 17px;
-        font-weight: 700;
-        line-height: 1.15;
-        color: #ffffff;
-    }
+        [data-baseweb="tab"] {
+            border-radius: 8px 8px 0 0;
+            padding-left: 0.85rem;
+            padding-right: 0.85rem;
+        }
 
-    .pb-sidebar-subtitle {
-        font-size: 12px;
-        color: #d8c8b8;
-        margin-top: 4px;
-    }
+        [data-baseweb="input"] > div,
+        [data-baseweb="select"] > div,
+        textarea { border-radius: 9px !important; }
 
-    .pb-page-hero {
-        background: linear-gradient(135deg, #1f1f1f 0%, #463a30 62%, #d8c8b8 140%);
-        color: white;
-        border-radius: 26px;
-        padding: 26px 30px;
-        margin: 8px 0 22px 0;
-        box-shadow: 0 16px 34px rgba(31,31,31,0.16);
-    }
+        [data-testid="stDataFrame"], [data-testid="stTable"] {
+            border: 1px solid var(--pb-border);
+            border-radius: 10px;
+            overflow: hidden;
+            background: var(--pb-surface);
+        }
 
-    .pb-page-eyebrow {
-        color: #d8c8b8;
-        text-transform: uppercase;
-        letter-spacing: 0.16em;
-        font-size: 12px;
-        font-weight: 700;
-        margin-bottom: 8px;
-    }
+        .pb-page-hero {
+            background: var(--pb-surface);
+            border: 1px solid var(--pb-border);
+            border-radius: 14px;
+            padding: 1.05rem 1.2rem;
+            margin: 0.25rem 0 1rem;
+            box-shadow: var(--pb-shadow);
+        }
 
-    .pb-page-title {
-        font-size: 34px;
-        font-weight: 800;
-        line-height: 1.1;
-        margin-bottom: 8px;
-        color: #ffffff;
-    }
+        .pb-page-eyebrow {
+            color: var(--pb-accent);
+            font-size: 0.72rem;
+            font-weight: 700;
+            letter-spacing: 0.12em;
+            text-transform: uppercase;
+            margin-bottom: 0.25rem;
+        }
 
-    .pb-page-subtitle {
-        color: #f4ebe1;
-        font-size: 15px;
-        max-width: 920px;
-    }
+        .pb-page-title {
+            color: var(--pb-text);
+            font-size: 1.65rem;
+            font-weight: 700;
+            letter-spacing: -0.035em;
+            line-height: 1.15;
+        }
 
-    .pb-card {
-        background: var(--pb-card);
-        border: 1px solid var(--pb-border);
-        border-radius: 20px;
-        padding: 18px 18px;
-        box-shadow: 0 10px 26px rgba(31,31,31,0.06);
-        min-height: 120px;
-        margin-bottom: 12px;
-    }
+        .pb-page-subtitle {
+            color: var(--pb-muted);
+            margin-top: 0.35rem;
+            line-height: 1.45;
+        }
 
-    .pb-card-label {
-        color: var(--pb-muted);
-        font-size: 12px;
-        font-weight: 700;
-        text-transform: uppercase;
-        letter-spacing: 0.08em;
-        margin-bottom: 8px;
-    }
+        .pb-card {
+            background: var(--pb-surface);
+            border: 1px solid var(--pb-border);
+            border-radius: var(--pb-radius);
+            padding: 1rem 1.05rem;
+            min-height: 116px;
+            margin-bottom: 0.7rem;
+            box-shadow: var(--pb-shadow);
+        }
 
-    .pb-card-value {
-        color: var(--pb-charcoal);
-        font-size: 31px;
-        font-weight: 800;
-        line-height: 1;
-        margin-bottom: 8px;
-    }
+        .pb-card-label {
+            color: var(--pb-muted);
+            font-size: 0.77rem;
+            font-weight: 650;
+            text-transform: uppercase;
+            letter-spacing: 0.055em;
+        }
 
-    .pb-card-subtitle {
-        color: var(--pb-muted);
-        font-size: 13px;
-        line-height: 1.35;
-    }
+        .pb-card-value {
+            color: var(--pb-text);
+            font-size: 1.65rem;
+            font-weight: 750;
+            line-height: 1.15;
+            margin-top: 0.3rem;
+        }
 
-    .pb-card.green { border-left: 7px solid var(--pb-success); }
-    .pb-card.orange { border-left: 7px solid var(--pb-warning); }
-    .pb-card.red { border-left: 7px solid var(--pb-danger); }
-    .pb-card.blue { border-left: 7px solid var(--pb-info); }
-    .pb-card.taupe { border-left: 7px solid var(--pb-accent-dark); }
+        .pb-card-subtitle {
+            color: var(--pb-muted);
+            font-size: 0.82rem;
+            margin-top: 0.3rem;
+        }
 
-    .pb-job-header {
-        background: linear-gradient(135deg, #ffffff 0%, #fffaf4 100%);
-        border: 1px solid var(--pb-border);
-        border-radius: 24px;
-        padding: 22px 24px;
-        box-shadow: 0 12px 28px rgba(31,31,31,0.07);
-        margin: 10px 0 20px 0;
-    }
+        .pb-card.green { border-left: 5px solid var(--pb-success); }
+        .pb-card.orange { border-left: 5px solid var(--pb-warning); }
+        .pb-card.red { border-left: 5px solid var(--pb-danger); }
+        .pb-card.blue, .pb-card.taupe { border-left: 5px solid var(--pb-accent); }
 
-    .pb-job-no {
-        color: var(--pb-accent-dark);
-        font-size: 13px;
-        font-weight: 800;
-        letter-spacing: 0.12em;
-        text-transform: uppercase;
-        margin-bottom: 4px;
-    }
+        .pb-sidebar-logo {
+            padding: 0.55rem 0.2rem 0.4rem;
+            margin-bottom: 0.45rem;
+        }
 
-    .pb-job-title {
-        color: var(--pb-charcoal);
-        font-size: 30px;
-        font-weight: 800;
-        line-height: 1.12;
-        margin-bottom: 10px;
-    }
+        .pb-logo-mark {
+            display: inline-flex;
+            width: 38px;
+            height: 38px;
+            align-items: center;
+            justify-content: center;
+            border-radius: 10px;
+            background: #f5f2ec;
+            color: #181817;
+            font-weight: 800;
+            margin-bottom: 0.6rem;
+        }
 
-    .pb-job-meta {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 8px;
-        margin-top: 10px;
-    }
+        .pb-sidebar-title { color: #ffffff; font-size: 1rem; font-weight: 700; }
+        .pb-sidebar-subtitle { color: #aaa69f; font-size: 0.76rem; margin-top: 0.15rem; }
 
-    .pb-chip {
-        display: inline-flex;
-        align-items: center;
-        gap: 6px;
-        border-radius: 999px;
-        border: 1px solid var(--pb-border);
-        background: #f7f3ee;
-        padding: 7px 11px;
-        color: var(--pb-muted);
-        font-size: 12px;
-        font-weight: 600;
-    }
+        .pb-job-header {
+            background: var(--pb-surface);
+            border: 1px solid var(--pb-border);
+            border-radius: 14px;
+            padding: 1.1rem 1.2rem;
+            box-shadow: var(--pb-shadow);
+            margin: 0.4rem 0 1rem;
+        }
 
-    .pb-status {
-        display: inline-flex;
-        border-radius: 999px;
-        padding: 7px 12px;
-        font-size: 12px;
-        font-weight: 800;
-        margin-left: 4px;
-    }
+        .pb-job-title { color: var(--pb-text); font-size: 1.5rem; font-weight: 700; }
+        .pb-job-no { color: var(--pb-accent); font-size: 0.72rem; font-weight: 700; text-transform: uppercase; }
+        .pb-job-meta { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.7rem; }
+        .pb-chip, .pb-status {
+            display: inline-flex;
+            border: 1px solid var(--pb-border);
+            border-radius: 999px;
+            background: var(--pb-soft);
+            color: var(--pb-muted);
+            padding: 0.28rem 0.58rem;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
 
-    .pb-status.green { background: rgba(31,122,77,0.12); color: var(--pb-success); }
-    .pb-status.orange { background: rgba(183,121,31,0.14); color: var(--pb-warning); }
-    .pb-status.red { background: rgba(180,35,24,0.12); color: var(--pb-danger); }
-    .pb-status.grey { background: rgba(111,106,99,0.14); color: var(--pb-muted); }
-    .pb-status.taupe { background: rgba(122,104,86,0.12); color: var(--pb-accent-dark); }
+        @media (max-width: 900px) {
+            .block-container { padding-left: 0.85rem; padding-right: 0.85rem; }
+            .pb-page-title { font-size: 1.4rem; }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
-    .stButton > button, .stDownloadButton > button {
-        border-radius: 999px !important;
-        border: 1px solid var(--pb-accent) !important;
-        background: #ffffff !important;
-        color: #1f1f1f !important;
-        font-weight: 700 !important;
-        padding: 0.55rem 1rem !important;
-        box-shadow: 0 6px 14px rgba(31,31,31,0.05);
-    }
-
-    .stButton > button:hover, .stDownloadButton > button:hover {
-        border-color: var(--pb-accent-dark) !important;
-        color: #000000 !important;
-        transform: translateY(-1px);
-    }
-
-    .stDataFrame, div[data-testid="stDataFrame"] {
-        border-radius: 18px;
-        overflow: hidden;
-    }
-
-    div[data-testid="stTabs"] button {
-        font-weight: 700;
-    }
-
-    @media (max-width: 760px) {
-        .pb-page-title { font-size: 26px; }
-        .pb-job-title { font-size: 24px; }
-        .pb-card { min-height: auto; }
-    }
-    </style>
-    """, unsafe_allow_html=True)
 
 
 def pb_sidebar_header():
-    st.sidebar.markdown("""
-    <div class="pb-sidebar-logo">
-        <div class="pb-logo-mark">PB</div>
-        <div class="pb-sidebar-title">Premier Brushworks<br>JobHub</div>
-        <div class="pb-sidebar-subtitle">Commercial painting operations</div>
-    </div>
-    """, unsafe_allow_html=True)
+    st.sidebar.markdown(
+        """
+        <div class="pb-sidebar-logo">
+            <div class="pb-logo-mark">PB</div>
+            <div class="pb-sidebar-title">Premier Brushworks JobHub</div>
+            <div class="pb-sidebar-subtitle">Jobs, site operations and estimating</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.sidebar.divider()
 
 
 def pb_page_header(title, subtitle="", eyebrow="Premier Brushworks"):
@@ -8434,22 +8378,27 @@ def control_centre_page():
         st.info("Create your first job to start using the Control Centre.")
         return
 
-    section = st.radio(
-        "Control Centre Section",
-        [
-            "Daily Dashboard",
-            "Job Health Score",
-            "Job Budget Lock-In",
-            "Variations Register",
-            "Invoice / Claim Tracker",
-            "Staff Scheduling Board",
-            "Timesheet Approval",
-            "Job Lookup / Links",
-            "AI Job Review",
-            "Export Control Centre"
-        ],
-        horizontal=False,
-        key="control_centre_section"
+
+    section_options = [
+        "Daily Dashboard",
+        "Job Health Score",
+        "Job Budget Lock-In",
+        "Variations Register",
+        "Invoice / Claim Tracker",
+        "Staff Scheduling Board",
+        "Timesheet Approval",
+        "Job Lookup / Links",
+        "AI Job Review",
+        "Export Control Centre",
+    ]
+
+    if st.session_state.get("control_centre_section") not in section_options:
+        st.session_state["control_centre_section"] = section_options[0]
+
+    section = st.selectbox(
+        "Choose planning, finance or review area",
+        section_options,
+        key="control_centre_section",
     )
 
     if section == "Daily Dashboard":
@@ -12674,212 +12623,129 @@ mark_seeded_if_existing_data_present()
 seed_data()
 require_login()
 
-pb_page_header(
-    "JobHub",
-    "A central job management system for Premier Brushworks operations, site teams, estimating, progress claims and reporting.",
-    "Internal System"
-)
 pb_sidebar_header()
 logout_button()
 
 role = current_role()
 
-# Restored JobHub navigation.
-# The heavy plan measurement/take-off/3D model generation workflow now belongs in the separate
-# PB MeasureTakeoff Studio app. JobHub keeps normal operations plus a clean importer, progress model,
-# and 3D model viewer for imported model data.
+
+# Clean grouped navigation.
 if role == "employee":
-    main_menu_options = ["Employee Portal"]
-    management_menu_map = {}
-    estimating_menu_map = {}
-    site_operations_menu_map = {}
-    ai_menu_map = {}
-elif role == "manager":
-    main_menu_options = [
-        "Dashboard",
-        "Control Centre",
-        "Jobs",
-        "Job Folders",
-        "Estimating",
-        "Site Operations",
-        "Reports",
-        "Management",
-        "AI Assistant",
-    ]
-    management_menu_map = {
-        "Builders & Clients": "Builders & Clients",
-        "Employees": "Employees",
-        "Products": "Products",
-        "Equipment": "Equipment",
-    }
-    estimating_menu_map = {
-        "Import Take-off / Model File": "Import Take-off / Model File",
-        "Progress / Billing Model": "Progress / Billing Model",
-        "3D Model Viewer": "3D Model Viewer",
-        "Estimate Working Sheet": "Estimate Working Sheet",
-        "Job Costs / Forecasting": "Job Costs / Forecasting",
-    }
-    site_operations_menu_map = {
-        "PDF Import Centre": "PDF Import Centre",
-        "Material Costs": "Material Costs",
-        "Wages": "Wages",
-        "Timesheets": "Timesheets",
-        "Job Photos": "Job Photos",
-    }
-    ai_menu_map = {
-        "JobHub AI Assistant": "JobHub AI Assistant",
-        "App Builder AI": "App Builder AI",
+    nav_groups = {
+        "My Work": {
+            "Employee Portal": "Employee Portal",
+        },
     }
 else:
-    main_menu_options = [
-        "Dashboard",
-        "Control Centre",
-        "Jobs",
-        "Job Folders",
-        "Estimating",
-        "Site Operations",
-        "Reports",
-        "Management",
-        "AI Assistant",
-    ]
-    management_menu_map = {
-        "User Accounts": "User Access",
-        "Builders & Clients": "Builders & Clients",
-        "Employees": "Employees",
-        "Products": "Products",
-        "Equipment": "Equipment",
-    }
-    estimating_menu_map = {
-        "Import Take-off / Model File": "Import Take-off / Model File",
-        "Progress / Billing Model": "Progress / Billing Model",
-        "3D Model Viewer": "3D Model Viewer",
-        "Estimate Working Sheet": "Estimate Working Sheet",
-        "Job Costs / Forecasting": "Job Costs / Forecasting",
-    }
-    site_operations_menu_map = {
-        "PDF Import Centre": "PDF Import Centre",
-        "Material Costs": "Material Costs",
-        "Wages": "Wages",
-        "Timesheets": "Timesheets",
-        "Job Photos": "Job Photos",
-    }
-    ai_menu_map = {
-        "JobHub AI Assistant": "JobHub AI Assistant",
-        "App Builder AI": "App Builder AI",
+    nav_groups = {
+        "Home": {
+            "Dashboard": "Dashboard",
+        },
+        "Jobs": {
+            "Job Folders": "Job Folders",
+            "Job Register": "Jobs",
+            "Planning & Claims": "Control Centre",
+        },
+        "Site & Team": {
+            "Timesheets": "Timesheets",
+            "Materials": "Material Costs",
+            "Wages": "Wages",
+            "Equipment": "Equipment",
+            "Job Photos": "Job Photos",
+            "PDF Import": "PDF Import Centre",
+        },
+        "Estimating": {
+            "Estimate Worksheet": "Estimate Working Sheet",
+            "Job Costs & Forecasting": "Job Costs / Forecasting",
+            "Import Take-off / Model": "Import Take-off / Model File",
+            "Progress & Billing": "Progress / Billing Model",
+            "3D Model Viewer": "3D Model Viewer",
+        },
+        "Reports": {
+            "Reports & Export": "Reports / Export",
+        },
+        "Administration": {
+            "Builders & Clients": "Builders & Clients",
+            "Employees": "Employees",
+            "Products": "Products",
+            "JobHub AI": "JobHub AI Assistant",
+            "Developer Tools": "App Builder AI",
+        },
     }
 
-reports_menu_map = {"Reports / Export": "Reports / Export"}
+    if role != "manager":
+        admin_pages = nav_groups["Administration"]
+        nav_groups["Administration"] = {
+            "User Accounts": "User Access",
+            **admin_pages,
+        }
 
-hidden_route_options = (
-    list(management_menu_map.values()) +
-    list(estimating_menu_map.values()) +
-    list(site_operations_menu_map.values()) +
-    list(ai_menu_map.values()) +
-    list(reports_menu_map.values()) +
-    ["Job Lookup / Links"]
-)
-allowed_menu = main_menu_options + hidden_route_options
+route_aliases = {
+    "Reports": "Reports / Export",
+    "Management": "Builders & Clients",
+    "Site Operations": "Timesheets",
+    "Estimating": "Estimate Working Sheet",
+    "AI Assistant": "JobHub AI Assistant",
+    "Job Lookup / Links": "Control Centre",
+    "Painting Take-off Generator": "Import Take-off / Model File",
+}
 
-# Navigation from buttons must be stored in pending keys and applied before sidebar widgets are created.
-# This prevents Streamlit errors such as modifying st.session_state.main_menu after the main_menu widget exists.
+route_lookup = {}
+for group_name, pages in nav_groups.items():
+    for page_label, route_name in pages.items():
+        route_lookup[route_name] = (group_name, page_label)
+
 requested_control_section = st.session_state.pop("go_to_control_centre_section", None)
 requested_menu = st.session_state.pop("go_to_menu", None)
 
 if requested_control_section:
     requested_menu = "Control Centre"
-if requested_menu in main_menu_options:
-    st.session_state["main_menu"] = requested_menu
-    if requested_menu == "Control Centre" and requested_control_section:
-        st.session_state["control_centre_section"] = requested_control_section
-elif requested_menu in hidden_route_options:
-    if requested_menu == "Job Lookup / Links":
-        st.session_state["main_menu"] = "Control Centre"
-        st.session_state["control_centre_section"] = "Job Lookup / Links"
-    elif requested_menu in management_menu_map.values():
-        st.session_state["main_menu"] = "Management"
-        for label, target in management_menu_map.items():
-            if target == requested_menu:
-                st.session_state["management_menu"] = label
-                break
-    elif requested_menu in estimating_menu_map.values():
-        st.session_state["main_menu"] = "Estimating"
-        for label, target in estimating_menu_map.items():
-            if target == requested_menu:
-                st.session_state["estimating_menu"] = label
-                break
-    elif requested_menu in site_operations_menu_map.values():
-        st.session_state["main_menu"] = "Site Operations"
-        for label, target in site_operations_menu_map.items():
-            if target == requested_menu:
-                st.session_state["site_operations_menu"] = label
-                break
-    elif requested_menu in ai_menu_map.values():
-        st.session_state["main_menu"] = "AI Assistant"
-        for label, target in ai_menu_map.items():
-            if target == requested_menu:
-                st.session_state["ai_menu"] = label
-                break
-    elif requested_menu == "Reports / Export":
-        st.session_state["main_menu"] = "Reports"
+    st.session_state["control_centre_section"] = requested_control_section
 
-if st.session_state.get("main_menu") not in main_menu_options:
-    st.session_state["main_menu"] = main_menu_options[0]
+requested_menu = route_aliases.get(requested_menu, requested_menu)
+if requested_menu in route_lookup:
+    requested_group, requested_page = route_lookup[requested_menu]
+    st.session_state["pb_nav_group"] = requested_group
+    st.session_state["pb_nav_page"] = requested_page
 
-main_menu_choice = st.sidebar.radio(
-    "Menu",
-    main_menu_options,
-    key="main_menu",
-    format_func=lambda item: f"{PB_MENU_ICONS.get(item, '•')} {item}",
+group_names = list(nav_groups.keys())
+if st.session_state.get("pb_nav_group") not in group_names:
+    st.session_state["pb_nav_group"] = group_names[0]
+
+nav_icons = {
+    "Home": "⌂",
+    "Jobs": "▣",
+    "Site & Team": "◷",
+    "Estimating": "▤",
+    "Reports": "▥",
+    "Administration": "⚙",
+    "My Work": "✓",
+}
+
+selected_group = st.sidebar.radio(
+    "Navigation",
+    group_names,
+    key="pb_nav_group",
+    format_func=lambda item: f"{nav_icons.get(item, '•')}  {item}",
 )
 
-if main_menu_choice == "Management":
-    st.sidebar.markdown("### Management")
-    management_labels = list(management_menu_map.keys())
-    if st.session_state.get("management_menu") not in management_labels:
-        st.session_state["management_menu"] = management_labels[0] if management_labels else ""
-    selected_management_label = st.sidebar.selectbox(
-        "Management Section",
-        management_labels,
-        key="management_menu",
-    )
-    menu = management_menu_map.get(selected_management_label, selected_management_label)
-elif main_menu_choice == "Estimating":
-    st.sidebar.markdown("### Estimating")
-    estimating_labels = list(estimating_menu_map.keys())
-    if st.session_state.get("estimating_menu") not in estimating_labels:
-        st.session_state["estimating_menu"] = estimating_labels[0] if estimating_labels else ""
-    selected_estimating_label = st.sidebar.selectbox(
-        "Estimating Section",
-        estimating_labels,
-        key="estimating_menu",
-    )
-    menu = estimating_menu_map.get(selected_estimating_label, selected_estimating_label)
-elif main_menu_choice == "Site Operations":
-    st.sidebar.markdown("### Site Operations")
-    site_labels = list(site_operations_menu_map.keys())
-    if st.session_state.get("site_operations_menu") not in site_labels:
-        st.session_state["site_operations_menu"] = site_labels[0] if site_labels else ""
-    selected_site_label = st.sidebar.selectbox(
-        "Site Section",
-        site_labels,
-        key="site_operations_menu",
-    )
-    menu = site_operations_menu_map.get(selected_site_label, selected_site_label)
-elif main_menu_choice == "AI Assistant":
-    st.sidebar.markdown("### AI Assistant")
-    ai_labels = list(ai_menu_map.keys())
-    if st.session_state.get("ai_menu") not in ai_labels:
-        st.session_state["ai_menu"] = ai_labels[0] if ai_labels else ""
-    selected_ai_label = st.sidebar.selectbox(
-        "AI Section",
-        ai_labels,
-        key="ai_menu",
-    )
-    menu = ai_menu_map.get(selected_ai_label, selected_ai_label)
-elif main_menu_choice == "Reports":
-    menu = "Reports / Export"
+page_map = nav_groups[selected_group]
+page_labels = list(page_map.keys())
+if st.session_state.get("pb_nav_page") not in page_labels:
+    st.session_state["pb_nav_page"] = page_labels[0]
+
+if len(page_labels) == 1:
+    selected_page = page_labels[0]
+    st.session_state["pb_nav_page"] = selected_page
 else:
-    menu = main_menu_choice
+    selected_page = st.sidebar.selectbox(
+        "Page",
+        page_labels,
+        key="pb_nav_page",
+        label_visibility="collapsed",
+    )
+
+menu = page_map[selected_page]
 
 
 # =============================
@@ -12914,11 +12780,12 @@ elif menu == "PDF Import Centre":
     pdf_import_centre_page()
 
 
+
 elif menu == "Dashboard":
     pb_page_header(
         "Dashboard",
-        "Quick view of active jobs, pending site actions, job risk and operational priorities.",
-        "Today at a glance"
+        "The items needing attention now, followed by current jobs and upcoming work.",
+        "Operations overview",
     )
 
     jobs_count = int(df_query("SELECT COUNT(*) AS c FROM jobs").iloc[0]["c"])
@@ -12927,8 +12794,6 @@ elif menu == "Dashboard":
         FROM jobs
         WHERE COALESCE(status, '') NOT IN ('Completed', 'Paid', 'Archived')
     """).iloc[0]["c"])
-    builder_count = int(df_query("SELECT COUNT(*) AS c FROM builders_clients").iloc[0]["c"])
-    employee_count = int(df_query("SELECT COUNT(*) AS c FROM employees WHERE COALESCE(status, '') = 'Active'").iloc[0]["c"])
 
     try:
         pending_timesheets = int(df_query("""
@@ -12943,7 +12808,8 @@ elif menu == "Dashboard":
         open_variations = int(df_query("""
             SELECT COUNT(*) AS c
             FROM job_variations
-            WHERE COALESCE(status, 'Draft') NOT IN ('Approved', 'Rejected', 'Invoiced')
+            WHERE COALESCE(status, 'Draft')
+                  NOT IN ('Approved', 'Rejected', 'Invoiced')
         """).iloc[0]["c"])
     except Exception:
         open_variations = 0
@@ -12958,138 +12824,144 @@ elif menu == "Dashboard":
               AND due_date <> ''
               AND due_date < ?
         """, (str(date.today()),))
-        overdue_claims = int(overdue_claims_df.iloc[0]["c"]) if not overdue_claims_df.empty else 0
-        overdue_value = float(overdue_claims_df.iloc[0]["total"] or 0) if not overdue_claims_df.empty else 0
+        overdue_claims = int(overdue_claims_df.iloc[0]["c"])
+        overdue_value = float(overdue_claims_df.iloc[0]["total"] or 0)
     except Exception:
         overdue_claims = 0
         overdue_value = 0
 
-    try:
-        takeoff_count = int(df_query("SELECT COUNT(*) AS c FROM painting_takeoff_packages").iloc[0]["c"])
-    except Exception:
-        takeoff_count = 0
-    try:
-        progress_count = int(df_query("SELECT COUNT(*) AS c FROM painting_progress_sections").iloc[0]["c"])
-    except Exception:
-        progress_count = 0
-    try:
-        schedule_count = int(df_query("SELECT COUNT(*) AS c FROM staff_schedule").iloc[0]["c"])
-    except Exception:
-        schedule_count = 0
-    try:
-        documents_count = int(df_query("SELECT COUNT(*) AS c FROM job_documents").iloc[0]["c"])
-    except Exception:
-        documents_count = 0
-
     m1, m2, m3, m4 = st.columns(4)
+
     with m1:
-        pb_metric_card("Active Jobs", active_jobs_count, f"{jobs_count} total jobs", "green")
-        if st.button("Open jobs", key="dash_card_open_jobs", use_container_width=True):
+        pb_metric_card("Active Jobs", active_jobs_count, f"{jobs_count} jobs in the register", "green")
+        if st.button("Open job folders", key="tidy_dash_jobs", use_container_width=True):
             st.session_state["go_to_menu"] = "Job Folders"
             st.rerun()
+
     with m2:
-        pb_metric_card("Active Staff", employee_count, "Available employee records", "blue")
-        if st.button("Open staff", key="dash_card_open_staff", use_container_width=True):
-            st.session_state["go_to_menu"] = "Employees"
-            st.rerun()
-    with m3:
-        pb_metric_card("Timesheets Pending", pending_timesheets, "Submitted and awaiting review", "orange" if pending_timesheets else "green")
-        if st.button("Review timesheets", key="dash_card_review_timesheets", use_container_width=True):
+        pb_metric_card(
+            "Timesheets Pending",
+            pending_timesheets,
+            "Submitted and awaiting review",
+            "orange" if pending_timesheets else "green",
+        )
+        if st.button("Review timesheets", key="tidy_dash_timesheets", use_container_width=True):
             st.session_state["go_to_menu"] = "Timesheets"
             st.rerun()
+
+    with m3:
+        pb_metric_card(
+            "Open Variations",
+            open_variations,
+            "Not yet approved, rejected or invoiced",
+            "orange" if open_variations else "green",
+        )
+        if st.button("Open variations", key="tidy_dash_variations", use_container_width=True):
+            st.session_state["go_to_menu"] = "Control Centre"
+            st.session_state["go_to_control_centre_section"] = "Variations Register"
+            st.rerun()
+
     with m4:
-        pb_metric_card("Overdue Claims", overdue_claims, pb_money(overdue_value), "red" if overdue_claims else "green")
-        if st.button("Open claims", key="dash_card_open_claims", use_container_width=True):
+        pb_metric_card(
+            "Overdue Claims",
+            overdue_claims,
+            pb_money(overdue_value),
+            "red" if overdue_claims else "green",
+        )
+        if st.button("Open claims", key="tidy_dash_claims", use_container_width=True):
             st.session_state["go_to_menu"] = "Control Centre"
             st.session_state["go_to_control_centre_section"] = "Invoice / Claim Tracker"
             st.rerun()
 
-    m5, m6, m7, m8 = st.columns(4)
-    with m5:
-        pb_metric_card("Builders / Clients", builder_count, "Saved contact records", "taupe")
-        if st.button("Open builders", key="dash_card_open_builders", use_container_width=True):
-            st.session_state["go_to_menu"] = "Builders & Clients"
-            st.rerun()
-    with m6:
-        pb_metric_card("Open Variations", open_variations, "Draft, submitted or sent", "orange" if open_variations else "green")
-        if st.button("Open variations", key="dash_card_open_variations", use_container_width=True):
-            st.session_state["go_to_menu"] = "Control Centre"
-            st.session_state["go_to_control_centre_section"] = "Variations Register"
-            st.rerun()
-    with m7:
-        products_count = int(df_query("SELECT COUNT(*) AS c FROM products").iloc[0]["c"])
-        pb_metric_card("Products", products_count, "Saved product list", "blue")
-        if st.button("Open products", key="dash_card_open_products", use_container_width=True):
-            st.session_state["go_to_menu"] = "Products"
-            st.rerun()
-    with m8:
-        photos_count = int(df_query("SELECT COUNT(*) AS c FROM job_photos").iloc[0]["c"])
-        pb_metric_card("Photos", photos_count, "Stored against job folders", "taupe")
-        if st.button("Open photos", key="dash_card_open_photos", use_container_width=True):
-            st.session_state["go_to_menu"] = "Job Photos"
-            st.rerun()
+    st.markdown("#### Quick access")
+    q1, q2, q3, q4 = st.columns(4)
 
-    m9, m10, m11, m12 = st.columns(4)
-    with m9:
-        pb_metric_card("Take-offs", takeoff_count, "Painting take-off packages", "blue")
-        if st.button("Open take-offs", key="dash_card_open_takeoffs", use_container_width=True):
-            st.session_state["go_to_menu"] = "Painting Take-off Generator"
-            st.rerun()
-    with m10:
-        pb_metric_card("Progress Models", progress_count, "Measured sections / substrates", "green")
-        if st.button("Open progress", key="dash_card_open_progress", use_container_width=True):
-            st.session_state["go_to_menu"] = "Progress / Billing Model"
-            st.rerun()
-    with m11:
-        pb_metric_card("Staff Schedule", schedule_count, "Saved schedule entries", "orange" if schedule_count else "taupe")
-        if st.button("Open scheduling", key="dash_card_open_scheduling", use_container_width=True):
-            st.session_state["go_to_menu"] = "Control Centre"
-            st.session_state["go_to_control_centre_section"] = "Staff Scheduling Board"
-            st.rerun()
-    with m12:
-        pb_metric_card("Plans / Docs", documents_count, "Uploaded job documents", "taupe")
-        if st.button("Open documents", key="dash_card_open_documents", use_container_width=True):
-            st.session_state["go_to_menu"] = "Job Folders"
-            st.rerun()
-
-    st.markdown("### Open Jobs")
-    active = df_query("""
-        SELECT j.job_no AS 'Job No',
-               j.job_name AS 'Job Name',
-               bc.name AS 'Builder / Client',
-               j.site_address AS 'Site Address',
-               j.status AS 'Status',
-               j.leading_hand AS 'Leading Hand',
-               j.start_date AS 'Start Date',
-               j.end_date AS 'End Date'
-        FROM jobs j
-        LEFT JOIN builders_clients bc ON bc.id = j.builder_client_id
-        WHERE j.status NOT IN ('Completed', 'Paid', 'Archived')
-        ORDER BY j.job_no
-    """)
-
-    if active.empty:
-        st.info("No open jobs found. Add a job from the Jobs page to start using JobHub.")
-    else:
-        st.dataframe(active, width="stretch", hide_index=True)
-
-    st.markdown("### Quick Actions")
-    qa1, qa2, qa3, qa4, qa5 = st.columns(5)
-    if qa1.button("Open Job Folders", key="dash_open_job_folders"):
-        st.session_state["go_to_menu"] = "Job Folders"
+    if q1.button("Add or edit a job", key="tidy_quick_jobs", use_container_width=True):
+        st.session_state["go_to_menu"] = "Jobs"
         st.rerun()
-    if qa2.button("Review Timesheets", key="dash_review_timesheets"):
-        st.session_state["go_to_menu"] = "Timesheets"
-        st.rerun()
-    if qa3.button("Open Control Centre", key="dash_open_control"):
+
+    if q2.button("Staff scheduling", key="tidy_quick_schedule", use_container_width=True):
         st.session_state["go_to_menu"] = "Control Centre"
+        st.session_state["go_to_control_centre_section"] = "Staff Scheduling Board"
         st.rerun()
-    if qa4.button("Run Reports", key="dash_open_reports"):
-        st.session_state["go_to_menu"] = "Reports"
+
+    if q3.button("Materials & costs", key="tidy_quick_materials", use_container_width=True):
+        st.session_state["go_to_menu"] = "Material Costs"
         st.rerun()
-    if qa5.button("Import PDFs", key="dash_open_pdf_import"):
-        st.session_state["go_to_menu"] = "PDF Import Centre"
+
+    if q4.button("Reports & export", key="tidy_quick_reports", use_container_width=True):
+        st.session_state["go_to_menu"] = "Reports / Export"
         st.rerun()
+
+    tab_open, tab_upcoming, tab_attention = st.tabs(
+        ["Open Jobs", "Upcoming Work", "Attention"]
+    )
+
+    with tab_open:
+        active = df_query("""
+            SELECT j.job_no AS 'Job No',
+                   j.job_name AS 'Job Name',
+                   bc.name AS 'Builder / Client',
+                   j.site_address AS 'Site Address',
+                   j.status AS 'Status',
+                   j.leading_hand AS 'Leading Hand',
+                   j.start_date AS 'Start Date',
+                   j.end_date AS 'End Date'
+            FROM jobs j
+            LEFT JOIN builders_clients bc ON bc.id = j.builder_client_id
+            WHERE COALESCE(j.status, '') NOT IN ('Completed', 'Paid', 'Archived')
+            ORDER BY j.job_no
+        """)
+        if active.empty:
+            st.info("No open jobs found.")
+        else:
+            st.dataframe(active, use_container_width=True, hide_index=True)
+
+    with tab_upcoming:
+        upcoming = df_query("""
+            SELECT j.job_no AS 'Job No',
+                   j.job_name AS 'Job Name',
+                   COALESCE(bc.name, '') AS 'Builder / Client',
+                   j.start_date AS 'Start Date',
+                   j.leading_hand AS 'Leading Hand',
+                   j.status AS 'Status'
+            FROM jobs j
+            LEFT JOIN builders_clients bc ON bc.id = j.builder_client_id
+            WHERE COALESCE(j.status, '') IN ('Not Started', 'Quoted', 'Booked')
+            ORDER BY j.start_date, j.job_no
+        """)
+        if upcoming.empty:
+            st.info("No upcoming work is currently recorded.")
+        else:
+            st.dataframe(upcoming, use_container_width=True, hide_index=True)
+
+    with tab_attention:
+        missing_details = df_query("""
+            SELECT j.job_no AS 'Job No',
+                   j.job_name AS 'Job Name',
+                   j.status AS 'Status',
+                   j.leading_hand AS 'Leading Hand',
+                   j.start_date AS 'Start Date',
+                   CASE
+                       WHEN COALESCE(j.leading_hand, '') = '' THEN 'Leading hand missing'
+                       WHEN COALESCE(j.start_date, '') = '' THEN 'Start date missing'
+                       ELSE 'Review'
+                   END AS 'Attention'
+            FROM jobs j
+            WHERE COALESCE(j.status, '') NOT IN ('Completed', 'Paid', 'Archived')
+              AND (COALESCE(j.leading_hand, '') = '' OR COALESCE(j.start_date, '') = '')
+            ORDER BY j.job_no
+        """)
+
+        a1, a2, a3 = st.columns(3)
+        a1.metric("Missing job details", len(missing_details.index))
+        a2.metric("Pending timesheets", pending_timesheets)
+        a3.metric("Overdue claims", overdue_claims)
+
+        if missing_details.empty:
+            st.success("No open jobs are missing a leading hand or start date.")
+        else:
+            st.dataframe(missing_details, use_container_width=True, hide_index=True)
 
 
 # =============================
