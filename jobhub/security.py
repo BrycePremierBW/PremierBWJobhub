@@ -26,6 +26,7 @@ JOB_DIRECT_LINK_TABLES = [
 def linked_job_counts(job_id):
     counts = {}
     for table in JOB_DIRECT_LINK_TABLES + [
+        "material_order_requests",
         "estimate_working_sheets",
         "painting_takeoff_packages",
         "painting_progress_sections",
@@ -49,6 +50,8 @@ def delete_job_linked_records(cur, job_id=None):
         cur.execute("DELETE FROM painting_takeoff_packages")
         cur.execute("DELETE FROM estimate_line_items")
         cur.execute("DELETE FROM estimate_working_sheets")
+        cur.execute("DELETE FROM material_order_items")
+        cur.execute("DELETE FROM material_order_requests")
         for table in JOB_DIRECT_LINK_TABLES:
             cur.execute(f"DELETE FROM {table}")
         return
@@ -71,6 +74,11 @@ def delete_job_linked_records(cur, job_id=None):
         )
     """, params)
     cur.execute("DELETE FROM estimate_working_sheets WHERE job_id = ?", params)
+    cur.execute("""
+        DELETE FROM material_order_items
+        WHERE request_id IN (SELECT id FROM material_order_requests WHERE job_id = ?)
+    """, params)
+    cur.execute("DELETE FROM material_order_requests WHERE job_id = ?", params)
     for table in JOB_DIRECT_LINK_TABLES:
         cur.execute(f"DELETE FROM {table} WHERE job_id = ?", params)
 
@@ -429,137 +437,12 @@ def employee_portal():
             )
             selected_job_id = job_options[selected_job]
 
-            st.markdown("### Add Material Request to Job Register")
-            st.caption("Employees can request materials without seeing pricing. Saved products apply their stored cost to the job material register automatically.")
-
-            employee_product_code_options = get_product_options()
-            employee_product_name_options = get_product_name_options()
-            material_request_type_options = ["Saved Product", "One-off / Not Listed"] if employee_product_code_options else ["One-off / Not Listed"]
-            material_request_type = st.radio(
-                "Material request type",
-                material_request_type_options,
-                horizontal=True,
-                key=f"employee_material_request_type_{selected_job_id}",
+            render_employee_material_orders(
+                selected_job_id,
+                employee_id,
+                employee_name,
+                int(user.get("id")),
             )
-
-            employee_product_id = None
-            request_product_name = ""
-            request_supplier = ""
-            request_unit = ""
-            request_colour = ""
-
-            if material_request_type == "Saved Product":
-                product_search_type = st.radio(
-                    "Select product by",
-                    ["Product Code", "Product Name"],
-                    horizontal=True,
-                    key=f"employee_material_product_search_{selected_job_id}",
-                )
-                if product_search_type == "Product Code":
-                    selected_product = st.selectbox(
-                        "Product Code",
-                        list(employee_product_code_options.keys()),
-                        key=f"employee_material_product_code_{selected_job_id}",
-                    )
-                    employee_product_id = employee_product_code_options[selected_product]
-                else:
-                    selected_product = st.selectbox(
-                        "Product Name",
-                        list(employee_product_name_options.keys()),
-                        key=f"employee_material_product_name_{selected_job_id}",
-                    )
-                    employee_product_id = employee_product_name_options[selected_product]
-                selected_product_df = df_query("""
-                    SELECT product_name, supplier, unit
-                    FROM products
-                    WHERE id = ?
-                """, (employee_product_id,))
-                if not selected_product_df.empty:
-                    request_product_name = str(selected_product_df.iloc[0]["product_name"] or "")
-                    request_supplier = str(selected_product_df.iloc[0]["supplier"] or "")
-                    request_unit = str(selected_product_df.iloc[0]["unit"] or "")
-                    st.info(f"Selected: {request_product_name}")
-                request_colour = st.text_input("Colour / Finish", key=f"employee_saved_product_colour_{selected_job_id}")
-            else:
-                c_req1, c_req2 = st.columns(2)
-                request_product_name = c_req1.text_input("Product / Material Name", key=f"employee_custom_product_name_{selected_job_id}")
-                request_colour = c_req2.text_input("Colour / Finish", key=f"employee_custom_colour_{selected_job_id}")
-                c_req3, c_req4 = st.columns(2)
-                request_supplier = c_req3.text_input("Supplier", key=f"employee_custom_supplier_{selected_job_id}")
-                request_unit = c_req4.text_input("Unit", value="each", key=f"employee_custom_unit_{selected_job_id}")
-
-            with st.form(f"employee_material_request_form_{selected_job_id}"):
-                c_qty1, c_qty2, c_qty3 = st.columns(3)
-                qty_required = c_qty1.number_input("Qty Required", min_value=0.0, step=1.0, key=f"employee_material_qty_required_{selected_job_id}")
-                qty_received = c_qty2.number_input("Qty Received / Loaded", min_value=0.0, step=1.0, key=f"employee_material_qty_received_{selected_job_id}")
-                date_ordered = c_qty3.text_input("Date", value=str(date.today()), key=f"employee_material_date_{selected_job_id}")
-                material_notes = st.text_area("Notes", key=f"employee_material_notes_{selected_job_id}")
-                save_material_request = st.form_submit_button("Save Material Request to Job Register")
-
-                if save_material_request:
-                    if material_request_type == "Saved Product" and not employee_product_id:
-                        st.error("Select a saved product first.")
-                    elif not str(request_product_name or "").strip() and material_request_type == "One-off / Not Listed":
-                        st.error("Enter a product/material name.")
-                    else:
-                        execute("""
-                            INSERT INTO material_entries
-                            (
-                                job_id,
-                                product_id,
-                                qty_required,
-                                qty_received,
-                                date_ordered,
-                                supplier,
-                                notes,
-                                custom_product_code,
-                                custom_product_name,
-                                custom_supplier,
-                                custom_unit,
-                                custom_unit_price,
-                                custom_colour
-                            )
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """, (
-                            selected_job_id,
-                            employee_product_id,
-                            qty_required,
-                            qty_received,
-                            date_ordered,
-                            request_supplier,
-                            f"Employee material request by {employee_name}. {material_notes}",
-                            "CUSTOM" if material_request_type == "One-off / Not Listed" else "",
-                            request_product_name if material_request_type == "One-off / Not Listed" else "",
-                            request_supplier if material_request_type == "One-off / Not Listed" else "",
-                            request_unit if material_request_type == "One-off / Not Listed" else "",
-                            0 if material_request_type == "One-off / Not Listed" else None,
-                            request_colour,
-                        ))
-                        st.success("Material request saved to this job.")
-                        st.info("The Paint & Materials Order Form can now be generated with this material included.")
-                        refresh()
-
-            st.divider()
-
-            st.markdown("### Paint & Materials Order Form")
-            st.caption("Generates a fillable paint/materials order PDF and attaches it to the selected job.")
-
-            if st.button("Generate Paint & Materials Order Form", key=f"employee_generate_paint_order_{selected_job_id}"):
-                try:
-                    pdf_path = generate_paint_order_pdf(selected_job_id)
-                    st.success("Paint & Materials Order Form generated and attached to this job.")
-
-                    with open(pdf_path, "rb") as f:
-                        st.download_button(
-                            "Download Paint & Materials Order Form",
-                            data=f,
-                            file_name=os.path.basename(pdf_path),
-                            mime="application/pdf",
-                            key=f"employee_download_paint_order_{selected_job_id}",
-                        )
-
-                except Exception as e:
-                    st.error(f"Could not generate Paint & Materials Order Form: {e}")
 
             st.divider()
 

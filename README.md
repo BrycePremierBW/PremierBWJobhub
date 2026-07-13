@@ -48,3 +48,19 @@ py .\tests\smoke_test.py
 ```
 
 This compiles every module, logs in to a fresh local database and renders all major routes.
+
+## Material order approval workflow
+
+Employee accounts now create material-order drafts from **Employee Portal → Generate Forms**.
+Employees can add multiple saved or one-off products, submit the order to admin, see returned
+comments, revise the order, and download the approved PDF.
+
+Admin accounts review requests under **Materials → Material Order Approval Queue**. Approval:
+
+1. generates a uniquely numbered approved PDF;
+2. attaches it to the selected job;
+3. records approver, approval time and notes; and
+4. posts approved items to the job material cost register once only.
+
+Only admin accounts can approve, return or reject requests. Manager accounts have read-only
+visibility of the queue.

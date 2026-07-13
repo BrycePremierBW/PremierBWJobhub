@@ -51,3 +51,17 @@ After Render shows **Live**, check:
 ## Rollback
 
 If Render fails, restore the repository backup or revert the GitHub commit. The modular package does not intentionally alter or reset existing database records.
+
+## Material-order approval migration
+
+The first startup after deployment automatically creates `material_order_requests` and
+`material_order_items` and adds approval-link fields to `material_entries`. Existing material
+entries and job records are retained.
+
+The updated requirements include `reportlab`, which generates the final approved order PDF.
+Run both tests before uploading:
+
+```powershell
+py .\tests\smoke_test.py
+py .\tests\material_order_workflow_test.py
+```

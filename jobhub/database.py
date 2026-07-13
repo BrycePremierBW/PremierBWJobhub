@@ -340,6 +340,59 @@ def init_db():
     ensure_column("material_entries", "custom_unit", "TEXT")
     ensure_column("material_entries", "custom_unit_price", "REAL")
     ensure_column("material_entries", "custom_colour", "TEXT")
+    ensure_column("material_entries", "material_order_request_id", "INTEGER")
+    ensure_column("material_entries", "material_order_item_id", "INTEGER")
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS material_order_requests (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        order_no TEXT UNIQUE,
+        job_id INTEGER NOT NULL,
+        requested_by_user_id INTEGER,
+        requested_by_employee_id INTEGER,
+        requested_by_name TEXT,
+        required_delivery_date TEXT,
+        supplier TEXT,
+        status TEXT DEFAULT 'Draft',
+        employee_notes TEXT,
+        admin_notes TEXT,
+        submitted_at TEXT,
+        reviewed_at TEXT,
+        reviewed_by TEXT,
+        approved_pdf_path TEXT,
+        created_at TEXT,
+        updated_at TEXT,
+        FOREIGN KEY(job_id) REFERENCES jobs(id),
+        FOREIGN KEY(requested_by_employee_id) REFERENCES employees(id)
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS material_order_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        request_id INTEGER NOT NULL,
+        product_id INTEGER,
+        product_code TEXT,
+        product_name TEXT,
+        supplier TEXT,
+        unit TEXT,
+        unit_price REAL DEFAULT 0,
+        colour TEXT,
+        qty_required REAL DEFAULT 0,
+        qty_received REAL DEFAULT 0,
+        notes TEXT,
+        sort_order INTEGER DEFAULT 0,
+        created_at TEXT,
+        FOREIGN KEY(request_id) REFERENCES material_order_requests(id),
+        FOREIGN KEY(product_id) REFERENCES products(id)
+    )
+    """)
+
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_material_orders_job_id ON material_order_requests(job_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_material_orders_status ON material_order_requests(status)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_material_orders_requested_by ON material_order_requests(requested_by_user_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_material_order_items_request_id ON material_order_items(request_id)")
+    cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_material_entries_order_item_unique ON material_entries(material_order_item_id) WHERE material_order_item_id IS NOT NULL")
     cur.execute("""
     CREATE TABLE IF NOT EXISTS wage_entries (
         id INTEGER PRIMARY KEY AUTOINCREMENT,

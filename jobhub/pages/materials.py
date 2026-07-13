@@ -5,7 +5,13 @@ from ..runtime import *
 
 
 def render_material_costs():
-    st.header("Material Costs")
+    st.header("Materials")
+    st.caption("Approve employee material orders, manage job material costs, and review imported material schedules.")
+
+    render_material_order_admin_queue()
+    st.divider()
+
+    st.markdown("## Material Cost Register")
     st.caption("Use saved products from the database, or add one-off materials that are not added to the master product list.")
 
     render_context_pdf_import_for_selected_job(
