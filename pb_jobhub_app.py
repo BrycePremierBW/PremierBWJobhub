@@ -12629,7 +12629,7 @@ def initialise_jobhub():
 initialise_jobhub()
 require_login()
 
-pb_page_header(
+pb_page_header()
     "JobHub",
     
 pb_sidebar_header()
