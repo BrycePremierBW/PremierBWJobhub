@@ -1,0 +1,16 @@
+[server]
+headless = true
+fileWatcherType = "none"
+websocketPingInterval = 30
+disconnectedSessionTTL = 600
+enableWebsocketCompression = true
+enableXsrfProtection = true
+
+[runner]
+fastReruns = false
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+base = "light"
