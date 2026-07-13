@@ -12630,7 +12630,7 @@ initialise_jobhub()
 require_login()
 
 pb_page_header()
-    "JobHub",
+    "JobHub"
     
 pb_sidebar_header()
 logout_button()
