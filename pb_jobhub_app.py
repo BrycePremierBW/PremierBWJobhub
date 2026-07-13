@@ -495,7 +495,7 @@ def get_postgres_pool():
 
     return ThreadedConnectionPool(
         minconn=1,
-        maxconn=20,
+        maxconn=15,
         dsn=DATABASE_URL,
         sslmode="require",
     )
@@ -1400,18 +1400,18 @@ def execute_many(sql, rows):
 def refresh():
     st.rerun()
 
-
+@st.cache_data(ttl=15, show_spinner=False)
 def get_builder_options():
     df = df_query("SELECT id, name FROM builders_clients ORDER BY name")
     return {str(row["name"]): int(row["id"]) for _, row in df.iterrows()}
 
-
+@st.cache_data(ttl=15, show_spinner=False)
 def get_employee_options(active_only=False):
     where = "WHERE status = 'Active'" if active_only else ""
     df = df_query(f"SELECT id, name FROM employees {where} ORDER BY name")
     return {str(row["name"]): int(row["id"]) for _, row in df.iterrows()}
 
-
+@st.cache_data(ttl=15, show_spinner=False)
 def get_job_options():
     df = df_query("""
         SELECT id, job_no || ' - ' || COALESCE(job_name, '') AS label
@@ -1420,12 +1420,12 @@ def get_job_options():
     """)
     return {str(row["label"]): int(row["id"]) for _, row in df.iterrows()}
 
-
+@st.cache_data(ttl=15, show_spinner=False)
 def get_product_options():
     df = df_query("SELECT id, product_code FROM products ORDER BY product_code")
     return {str(row["product_code"]): int(row["id"]) for _, row in df.iterrows()}
 
-
+@st.cache_data(ttl=15, show_spinner=False)
 def get_product_name_options():
     df = df_query("""
         SELECT id, product_name, product_code
@@ -3351,8 +3351,6 @@ def is_manager_or_admin():
 
 
 def require_login():
-    seed_app_users()
-
     if "user" not in st.session_state:
         st.session_state["user"] = None
 
@@ -12616,16 +12614,27 @@ def job_folders_page():
 # =============================
 # START APP
 # =============================
-init_db()
-set_app_setting("starter_jobs_disabled", "yes")
-set_app_setting("starter_data_seeded", "yes")
-mark_seeded_if_existing_data_present()
-seed_data()
+
+@st.cache_resource(show_spinner="Starting JobHub...")
+def initialise_jobhub():
+    init_db()
+    set_app_setting("starter_jobs_disabled", "yes")
+    set_app_setting("starter_data_seeded", "yes")
+    mark_seeded_if_existing_data_present()
+    seed_data()
+    seed_app_users()
+    return True
+
+
+initialise_jobhub()
 require_login()
 
+pb_page_header(
+    "JobHub",
+    
 pb_sidebar_header()
 logout_button()
-
+    
 role = current_role()
 
 
