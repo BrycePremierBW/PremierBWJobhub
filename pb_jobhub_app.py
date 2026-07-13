@@ -598,8 +598,10 @@ def set_app_setting(key, value):
     try:
         cur = conn.cursor()
         cur.execute("""
-            INSERT OR REPLACE INTO app_settings (setting_key, setting_value)
+            INSERT INTO app_settings (setting_key, setting_value)
             VALUES (?, ?)
+            ON CONFLICT(setting_key) DO UPDATE SET
+                setting_value = excluded.setting_value
         """, (key, value))
         conn.commit()
     except Exception:
@@ -773,7 +775,10 @@ def connect():
         raw_conn = pool.getconn()
         return PostgresConnectionAdapter(raw_conn, pool)
 
-    return sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30)
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 30000")
+    return conn
 
 
 def init_db():
@@ -1183,6 +1188,20 @@ def init_db():
     cur.execute("CREATE INDEX IF NOT EXISTS idx_building_surfaces_progress_id ON building_model_surfaces(progress_section_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_building_surfaces_takeoff_line_id ON building_model_surfaces(takeoff_line_id)")
 
+    # PostgreSQL requires referenced tables to exist before a foreign key is declared.
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS job_documents (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_id INTEGER NOT NULL,
+        document_type TEXT,
+        file_name TEXT,
+        file_path TEXT,
+        created_at TEXT,
+        notes TEXT,
+        FOREIGN KEY(job_id) REFERENCES jobs(id)
+    )
+    """)
+
     cur.execute("""
     CREATE TABLE IF NOT EXISTS drawing_progress_zones (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1249,19 +1268,6 @@ def init_db():
     )
     """)
    
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS job_documents (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        job_id INTEGER NOT NULL,
-        document_type TEXT,
-        file_name TEXT,
-        file_path TEXT,
-        created_at TEXT,
-        notes TEXT,
-        FOREIGN KEY(job_id) REFERENCES jobs(id)
-   
-    )
-    """)
     cur.execute("""
     CREATE TABLE IF NOT EXISTS app_users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1695,8 +1701,10 @@ def seed_data():
 
 
     cur.execute("""
-        INSERT OR REPLACE INTO app_settings (setting_key, setting_value)
+        INSERT INTO app_settings (setting_key, setting_value)
         VALUES (?, ?)
+        ON CONFLICT(setting_key) DO UPDATE SET
+            setting_value = excluded.setting_value
     """, ("starter_data_seeded", "yes"))
 
     conn.commit()
@@ -3207,57 +3215,96 @@ def generate_variation_form_pdf(job_id, requested_by="", description="", reason=
 
     return output_path, variation_no
 
+JOB_DIRECT_LINK_TABLES = [
+    "material_entries",
+    "wage_entries",
+    "timesheet_entries",
+    "equipment_entries",
+    "equipment_checklist_records",
+    "imported_material_entries",
+    "job_photos",
+    "job_documents",
+    "job_budgets",
+    "job_variations",
+    "invoice_claims",
+    "staff_schedule",
+]
+
+
 def linked_job_counts(job_id):
     counts = {}
-
-    for table in [
-        "material_entries",
-        "wage_entries",
-        "timesheet_entries",
-        "equipment_entries",
-        "equipment_checklist_records",
-        "imported_material_entries",
-        "job_photos",
-        "job_documents",
+    for table in JOB_DIRECT_LINK_TABLES + [
+        "estimate_working_sheets",
+        "painting_takeoff_packages",
+        "painting_progress_sections",
+        "building_model_surfaces",
+        "drawing_progress_zones",
     ]:
         try:
             df = df_query(f"SELECT COUNT(*) AS c FROM {table} WHERE job_id = ?", (job_id,))
             counts[table] = int(df.iloc[0]["c"])
         except Exception:
             counts[table] = 0
-
     return counts
+
+
+def delete_job_linked_records(cur, job_id=None):
+    """Delete job-linked records in foreign-key-safe order."""
+    if job_id is None:
+        cur.execute("DELETE FROM drawing_progress_zones")
+        cur.execute("DELETE FROM building_model_surfaces")
+        cur.execute("DELETE FROM painting_progress_sections")
+        cur.execute("DELETE FROM painting_takeoff_lines")
+        cur.execute("DELETE FROM painting_takeoff_packages")
+        cur.execute("DELETE FROM estimate_line_items")
+        cur.execute("DELETE FROM estimate_working_sheets")
+        for table in JOB_DIRECT_LINK_TABLES:
+            cur.execute(f"DELETE FROM {table}")
+        return
+
+    params = (job_id,)
+    cur.execute("DELETE FROM drawing_progress_zones WHERE job_id = ?", params)
+    cur.execute("DELETE FROM building_model_surfaces WHERE job_id = ?", params)
+    cur.execute("DELETE FROM painting_progress_sections WHERE job_id = ?", params)
+    cur.execute("""
+        DELETE FROM painting_takeoff_lines
+        WHERE package_id IN (
+            SELECT id FROM painting_takeoff_packages WHERE job_id = ?
+        )
+    """, params)
+    cur.execute("DELETE FROM painting_takeoff_packages WHERE job_id = ?", params)
+    cur.execute("""
+        DELETE FROM estimate_line_items
+        WHERE estimate_id IN (
+            SELECT id FROM estimate_working_sheets WHERE job_id = ?
+        )
+    """, params)
+    cur.execute("DELETE FROM estimate_working_sheets WHERE job_id = ?", params)
+    for table in JOB_DIRECT_LINK_TABLES:
+        cur.execute(f"DELETE FROM {table} WHERE job_id = ?", params)
+
+
 def permanently_delete_job_and_linked_data(job_id):
     conn = connect()
-    cur = conn.cursor()
-
-    for table in [
-        "material_entries",
-        "wage_entries",
-        "timesheet_entries",
-        "equipment_entries",
-        "equipment_checklist_records",
-        "imported_material_entries",
-        "job_photos",
-        "job_documents",
-    ]:
+    try:
+        cur = conn.cursor()
+        delete_job_linked_records(cur, job_id)
+        cur.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+        cur.execute("""
+            INSERT INTO app_settings (setting_key, setting_value)
+            VALUES (?, ?)
+            ON CONFLICT(setting_key) DO UPDATE SET
+                setting_value = excluded.setting_value
+        """, ("starter_data_seeded", "yes"))
+        conn.commit()
+    except Exception:
         try:
-            cur.execute(f"DELETE FROM {table} WHERE job_id = ?", (job_id,))
+            conn.rollback()
         except Exception:
             pass
-
-    cur.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
-
-    try:
-        cur.execute("""
-            INSERT OR REPLACE INTO app_settings (setting_key, setting_value)
-            VALUES (?, ?)
-        """, ("starter_data_seeded", "yes"))
-    except Exception:
-        pass
-
-    conn.commit()
-    conn.close()
+        raise
+    finally:
+        conn.close()
     
 # =============================
 # LOGIN / ACCESS CONTROL
@@ -4186,8 +4233,10 @@ def mark_seeded_if_existing_data_present():
         # This stops old/deleted jobs reappearing on first run after this update.
         if job_count > 0 or builder_count > 0 or employee_count > 0:
             cur.execute("""
-                INSERT OR REPLACE INTO app_settings (setting_key, setting_value)
+                INSERT INTO app_settings (setting_key, setting_value)
                 VALUES (?, ?)
+                ON CONFLICT(setting_key) DO UPDATE SET
+                    setting_value = excluded.setting_value
             """, ("starter_data_seeded", "yes"))
             conn.commit()
 
@@ -4199,38 +4248,25 @@ def mark_seeded_if_existing_data_present():
 
 def clear_all_jobs_and_linked_data():
     conn = connect()
-    cur = conn.cursor()
-
-    # Delete all job-linked records first
-    for table in [
-        "material_entries",
-        "wage_entries",
-        "timesheet_entries",
-        "equipment_entries",
-        "equipment_checklist_records",
-        "imported_material_entries",
-        "job_photos",
-        "job_documents",
-    ]:
+    try:
+        cur = conn.cursor()
+        delete_job_linked_records(cur, job_id=None)
+        cur.execute("DELETE FROM jobs")
+        cur.execute("""
+            INSERT INTO app_settings (setting_key, setting_value)
+            VALUES (?, ?)
+            ON CONFLICT(setting_key) DO UPDATE SET
+                setting_value = excluded.setting_value
+        """, ("starter_data_seeded", "yes"))
+        conn.commit()
+    except Exception:
         try:
-            cur.execute(f"DELETE FROM {table}")
+            conn.rollback()
         except Exception:
             pass
-
-    # Delete all jobs
-    cur.execute("DELETE FROM jobs")
-
-    # Make sure starter/demo jobs do not reseed after clearing jobs
-    try:
-        cur.execute("""
-            INSERT OR REPLACE INTO app_settings (setting_key, setting_value)
-            VALUES (?, ?)
-        """, ("starter_data_seeded", "yes"))
-    except Exception:
-        pass
-
-    conn.commit()
-    conn.close()
+        raise
+    finally:
+        conn.close()
 
 
 
@@ -4993,9 +5029,15 @@ def restore_product_list():
     restored = 0
     for row in products:
         execute("""
-            INSERT OR REPLACE INTO products
+            INSERT INTO products
             (product_code, product_name, supplier, unit, price_ex_gst, notes)
             VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(product_code) DO UPDATE SET
+                product_name = excluded.product_name,
+                supplier = excluded.supplier,
+                unit = excluded.unit,
+                price_ex_gst = excluded.price_ex_gst,
+                notes = excluded.notes
         """, row)
         restored += 1
 
@@ -5018,9 +5060,15 @@ def restore_taubmans_product_list():
     restored = 0
     for product_name, product_code, taubmans_sku, unit, price_ex_gst in products:
         execute("""
-            INSERT OR REPLACE INTO products
+            INSERT INTO products
             (product_code, product_name, supplier, unit, price_ex_gst, notes)
             VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(product_code) DO UPDATE SET
+                product_name = excluded.product_name,
+                supplier = excluded.supplier,
+                unit = excluded.unit,
+                price_ex_gst = excluded.price_ex_gst,
+                notes = excluded.notes
         """, (
             product_code,
             product_name,
@@ -5053,9 +5101,15 @@ def restore_haymes_and_taubmans_product_lists():
     restored = 0
     for product_code, product_name, supplier, unit, price_ex_gst, notes in products:
         execute("""
-            INSERT OR REPLACE INTO products
+            INSERT INTO products
             (product_code, product_name, supplier, unit, price_ex_gst, notes)
             VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(product_code) DO UPDATE SET
+                product_name = excluded.product_name,
+                supplier = excluded.supplier,
+                unit = excluded.unit,
+                price_ex_gst = excluded.price_ex_gst,
+                notes = excluded.notes
         """, (
             product_code,
             product_name,
@@ -5099,17 +5153,34 @@ def restore_builders_clients_and_employees():
 
     for row in builders:
         execute("""
-            INSERT OR REPLACE INTO builders_clients
+            INSERT INTO builders_clients
             (type, name, contact_name, phone, email, address, qbcc, abn, terms, notes)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(name) DO UPDATE SET
+                type = excluded.type,
+                contact_name = excluded.contact_name,
+                phone = excluded.phone,
+                email = excluded.email,
+                address = excluded.address,
+                qbcc = excluded.qbcc,
+                abn = excluded.abn,
+                terms = excluded.terms,
+                notes = excluded.notes
         """, row)
         restored_builders += 1
 
     for row in employees:
         execute("""
-            INSERT OR REPLACE INTO employees
+            INSERT INTO employees
             (name, role, phone, base_hourly_rate, rate_plus_10, status, notes)
             VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(name) DO UPDATE SET
+                role = excluded.role,
+                phone = excluded.phone,
+                base_hourly_rate = excluded.base_hourly_rate,
+                rate_plus_10 = excluded.rate_plus_10,
+                status = excluded.status,
+                notes = excluded.notes
         """, row)
         restored_employees += 1
 
@@ -12601,7 +12672,6 @@ set_app_setting("starter_jobs_disabled", "yes")
 set_app_setting("starter_data_seeded", "yes")
 mark_seeded_if_existing_data_present()
 seed_data()
-seed_app_users()
 require_login()
 
 pb_page_header(
@@ -13059,9 +13129,19 @@ elif menu == "Jobs":
             if submitted and job_no:
                 builder_id = builder_options.get(builder_label) if builder_label else None
                 execute("""
-                    INSERT OR REPLACE INTO jobs
+                    INSERT INTO jobs
                     (job_no, job_name, builder_client_id, site_address, status, leading_hand, start_date, end_date, contract_value, notes)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(job_no) DO UPDATE SET
+                        job_name = excluded.job_name,
+                        builder_client_id = excluded.builder_client_id,
+                        site_address = excluded.site_address,
+                        status = excluded.status,
+                        leading_hand = excluded.leading_hand,
+                        start_date = excluded.start_date,
+                        end_date = excluded.end_date,
+                        contract_value = excluded.contract_value,
+                        notes = excluded.notes
                 """, (job_no, job_name, builder_id, site_address, status, leading_hand, start_date, end_date, contract_value, notes))
                 st.success(f"Saved job {job_no}")
                 refresh()
@@ -13146,19 +13226,12 @@ elif menu == "Jobs":
                 refresh()
 
             if col2.button("Delete Job"):
-                linked = (
-                    has_related_records("material_entries", "job_id", selected_id)
-                    or has_related_records("wage_entries", "job_id", selected_id)
-                    or has_related_records("timesheet_entries", "job_id", selected_id)
-                    or has_related_records("estimate_working_sheets", "job_id", selected_id)
-                    or has_related_records("equipment_entries", "job_id", selected_id)
-                    or has_related_records("equipment_checklist_records", "job_id", selected_id)
-                )
-                if linked:
+                linked_counts = linked_job_counts(selected_id)
+                if any(int(value or 0) > 0 for value in linked_counts.values()):
                     execute("UPDATE jobs SET status = 'Archived' WHERE id = ?", (selected_id,))
                     st.info("This job has linked records, so it was archived instead of deleted.")
                 else:
-                    execute("DELETE FROM jobs WHERE id = ?", (selected_id,))
+                    permanently_delete_job_and_linked_data(selected_id)
                     st.success("Job deleted.")
                 refresh()
 
@@ -13425,9 +13498,19 @@ elif menu == "Builders & Clients":
 
             if submitted and name:
                 execute("""
-                    INSERT OR REPLACE INTO builders_clients
+                    INSERT INTO builders_clients
                     (type, name, contact_name, phone, email, address, qbcc, abn, terms, notes)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(name) DO UPDATE SET
+                        type = excluded.type,
+                        contact_name = excluded.contact_name,
+                        phone = excluded.phone,
+                        email = excluded.email,
+                        address = excluded.address,
+                        qbcc = excluded.qbcc,
+                        abn = excluded.abn,
+                        terms = excluded.terms,
+                        notes = excluded.notes
                 """, (typ, name, contact, phone, email, address, qbcc, abn, terms, notes))
                 st.success(f"Saved {name}")
                 refresh()
@@ -13568,9 +13651,16 @@ elif menu == "Employees":
                 if rate_plus == 0 and base_rate > 0:
                     rate_plus = round(base_rate * 1.10, 2)
                 execute("""
-                    INSERT OR REPLACE INTO employees
+                    INSERT INTO employees
                     (name, role, phone, base_hourly_rate, rate_plus_10, status, notes)
                     VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(name) DO UPDATE SET
+                        role = excluded.role,
+                        phone = excluded.phone,
+                        base_hourly_rate = excluded.base_hourly_rate,
+                        rate_plus_10 = excluded.rate_plus_10,
+                        status = excluded.status,
+                        notes = excluded.notes
                 """, (name, role, phone, base_rate, rate_plus, status, notes))
                 st.success(f"Saved {name}")
                 refresh()
@@ -13777,9 +13867,15 @@ elif menu == "Products":
 
             if submitted and code:
                 execute("""
-                    INSERT OR REPLACE INTO products
+                    INSERT INTO products
                     (product_code, product_name, supplier, unit, price_ex_gst, notes)
                     VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(product_code) DO UPDATE SET
+                        product_name = excluded.product_name,
+                        supplier = excluded.supplier,
+                        unit = excluded.unit,
+                        price_ex_gst = excluded.price_ex_gst,
+                        notes = excluded.notes
                 """, (code, product_name, supplier, unit, price, notes))
                 st.success(f"Saved product {code}")
                 refresh()
@@ -14565,9 +14661,13 @@ elif menu == "Equipment":
 
             if submitted and item_name:
                 execute("""
-                    INSERT OR REPLACE INTO equipment_checklist_items
+                    INSERT INTO equipment_checklist_items
                     (category, item_name, default_qty, notes)
                     VALUES (?, ?, ?, ?)
+                    ON CONFLICT(item_name) DO UPDATE SET
+                        category = excluded.category,
+                        default_qty = excluded.default_qty,
+                        notes = excluded.notes
                 """, (category, item_name, default_qty, notes))
                 st.success(f"Saved checklist item: {item_name}")
                 refresh()
