@@ -1,8 +1,7 @@
-streamlit
-pandas
-pillow
-requests
-psycopg2-binary
-pypdf
-openpyxl
-PyMuPDF
+streamlit>=1.40,<2
+pandas>=2.0
+Pillow>=10.0
+requests>=2.31
+psycopg2-binary>=2.9
+pypdf>=4.0
+openpyxl>=3.1

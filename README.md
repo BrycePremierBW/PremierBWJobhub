@@ -1,27 +1,50 @@
-# Premier Brushworks JobHub cleanup
+# Premier Brushworks JobHub — Modular Edition
 
-## Included changes
+This package restructures the former single-file application into a maintainable project.
 
-- Clean commercial theme with no large background watermark.
-- Sidebar consolidated into Home, Jobs, Site & Team, Estimating, Reports and Administration.
-- Employee accounts remain limited to the Employee Portal.
-- Dashboard reduced from twelve cards to four priorities: Active Jobs, Pending Timesheets, Open Variations and Overdue Claims.
-- Dashboard tabs for Open Jobs, Upcoming Work and Attention.
-- Control Centre's long radio list changed to a compact selector.
-- Duplicate page banner removed.
-- Old storage checks hidden unless `SHOW_STORAGE_CHECK=true`.
-- Deprecated Streamlit sizing arguments updated.
+## Structure
 
-## Saved data is not altered
+- `pb_jobhub_app.py` — small Streamlit entry point and page dispatcher
+- `jobhub/database.py` — schema, connection pool, queries and cached lookups
+- `jobhub/security.py` — login, users, employee portal and safe deletion
+- `jobhub/documents.py` — PDF/document imports and printable forms
+- `jobhub/operations.py` — photos and timesheets
+- `jobhub/estimating.py` — estimates, products and forecasting
+- `jobhub/control_centre.py` — budgets, variations, claims and scheduling
+- `jobhub/takeoff.py` — take-off and progress calculation services
+- `jobhub/mapping.py` — drawing and 3D mapping
+- `jobhub/ai_tools.py` — JobHub AI and developer tools
+- `jobhub/pages/` — isolated user-facing pages that were formerly embedded in routing
 
-The cleanup does not change Supabase/database tables, jobs, clients, staff, products, timesheets, wages, costs, equipment, photos, documents, estimates, claims, variations, users or passwords.
+## Deploy to Render
 
-## Windows instructions
+Replace the repository contents with this package while retaining any existing `assets/`,
+`templates/` and Supabase environment settings. The Render start command remains:
 
-1. Put these three files beside your current `pb_jobhub_app.py`.
-2. Double-click `TIDY_JOBHUB.bat`.
-3. Confirm the window says the compile check passed.
-4. Test locally with `py -m streamlit run pb_jobhub_app.py`.
-5. Upload or commit the changed `pb_jobhub_app.py` to the GitHub repository used by Render.
+```bash
+streamlit run pb_jobhub_app.py --server.port=$PORT --server.address=0.0.0.0
+```
 
-A timestamped `.before_tidy.bak` file is created before any changes.
+## Local test
+
+```powershell
+$env:DATA_DIR="$PWD\data"
+py -m pip install -r requirements.txt
+py -m py_compile pb_jobhub_app.py
+py -m streamlit run pb_jobhub_app.py
+```
+
+## Important
+
+The database table names and saved-record structure are preserved. This is a code/project
+restructure, not a database reset or migration.
+
+## Automated smoke test
+
+Before deployment, run:
+
+```powershell
+py .\tests\smoke_test.py
+```
+
+This compiles every module, logs in to a fresh local database and renders all major routes.
