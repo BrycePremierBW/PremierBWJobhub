@@ -1,7 +1,13 @@
 [server]
 headless = true
-address = "0.0.0.0"
-enableCORS = false
+fileWatcherType = "none"
+websocketPingInterval = 30
+disconnectedSessionTTL = 300
+enableWebsocketCompression = true
+enableXsrfProtection = true
 
 [browser]
 gatherUsageStats = false
+
+[theme]
+base = "light"
