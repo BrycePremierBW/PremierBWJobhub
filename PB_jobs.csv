@@ -1,0 +1,15 @@
+id,job_no,job_name,builder,address,start_date,end_date,status,leading_hand,notes
+1,PB26001,Palm Lake Villas,Palm Lake,Pelican Waters QLD,2026-07-13,2026-08-12,Active,Bryce,Sample job — edit or delete
+2,PB26002,School Refurbishment,Rejuvenate Group,Sunshine Coast QLD,2026-07-15,2026-08-03,Active,,delete
+3,PB26003,Commercial Repaint,Private Client,Nambour QLD,2026-07-20,2026-07-31,Upcoming,,Sample job — edit or delete
+4,PB26004,Ninderry,Adlair homes,4 Eulinga Ct Ninderry,2026-07-27,2026-07-28,Upcoming,,
+5,PB26005,Braemer,Ashbuilt,"30 Braemer Road, Buderim",2026-07-27,2026-07-31,Upcoming,,
+6,PB26006,Moorindil Upper Ext,COSTA HOMES,"Moorindil street, Tewantin",2026-07-14,2026-07-24,Active,Ian,Upper scaffold work only - rest is TBA
+7,PB26007,ARKANA External Uppers,COSTA HOMES,"48 Arkana drive, Noosa Heads",2026-07-27,2026-07-31,Active,Ian,ONLY UPPER SCAFFOLD WORK rest TBA
+8,PB26008,Helig,Kenzee,"1 Heilig Ct, Glass house mountains",2026-08-10,2026-08-14,Upcoming,,
+9,PB26009,Ron,BEACH HOMES,"29 Meridien Pl, Sunshine Cove",2026-07-22,2026-07-23,Upcoming,Bryce and Nick,
+10,PB26010,Buderim fence,BEACH HOMES,"20 Orme street, Buderim",2026-07-30,2026-07-31,Upcoming,Bryce and Nick,
+11,PB26011,old gympie road,Blue moon,"20 Orme street, Buderim",2026-08-03,2026-08-07,Upcoming,,
+12,PB26012,Coes Creek,Kevin,"6 Parkhaven Close, Coes creek",2026-07-20,2026-07-22,Upcoming,,
+13,PB26013,Rosemount,Owner,"6 Parkhaven Close, Coes creek",2026-07-20,2026-07-31,Upcoming,,
+14,PB26014,NICKS FRIENDS,Cale Cramer,"18 Puma Street, Tingalpa",2026-07-08,2026-07-17,Active,Chris Nagy,

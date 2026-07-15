@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import hashlib
 import html
 import os
@@ -30,7 +31,7 @@ from pb_jobhub_visual_scheduler import render_jobhub_staff_scheduler
 # and job_variations. Existing PostgreSQL/Supabase data is therefore
 # reused when the same DATABASE_URL is retained.
 
-APP_VERSION = "5.0.0"
+APP_VERSION = "5.1.0"
 DATA_DIR = os.getenv("DATA_DIR", str(Path(__file__).resolve().parent / "data"))
 DB_PATH = os.path.join(DATA_DIR, "jobhub.db")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -367,7 +368,108 @@ def init_db() -> None:
         connection.close()
 
 
+BUNDLED_JOBS_CSV = Path(__file__).resolve().parent / "PB_jobs.csv"
+BUNDLED_JOBS_IMPORT_KEY = "pb_jobs_csv_2026_07_15_v1"
+
+
+def import_bundled_jobs_once() -> str:
+    """Import the supplied PB_jobs.csv once, without overwriting existing job numbers."""
+    if not BUNDLED_JOBS_CSV.exists():
+        return "Bundled jobs file not present."
+
+    existing_marker = df_query(
+        "SELECT setting_value FROM app_settings WHERE setting_key=?",
+        (BUNDLED_JOBS_IMPORT_KEY,),
+    )
+    if not existing_marker.empty:
+        return str(existing_marker.iloc[0]["setting_value"] or "Bundled jobs already imported.")
+
+    added = 0
+    skipped = 0
+    invalid = 0
+    connection = connect()
+    cursor = connection.cursor()
+    try:
+        with BUNDLED_JOBS_CSV.open("r", encoding="utf-8-sig", newline="") as handle:
+            for row in csv.DictReader(handle):
+                job_no = str(row.get("job_no") or "").strip()
+                job_name = str(row.get("job_name") or "").strip()
+                if not job_no or not job_name:
+                    invalid += 1
+                    continue
+
+                builder_name = str(row.get("builder") or "").strip()
+                builder_id = None
+                if builder_name:
+                    cursor.execute(
+                        """INSERT OR IGNORE INTO builders_clients
+                           (type,name,contact_name,phone,email,address,qbcc,abn,terms,notes)
+                           VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                        ("Builder / Client", builder_name, "", "", "", "", "", "", "",
+                         "Imported from PB_jobs.csv"),
+                    )
+                    cursor.execute(
+                        "SELECT id FROM builders_clients WHERE LOWER(name)=LOWER(?)",
+                        (builder_name,),
+                    )
+                    builder_row = cursor.fetchone()
+                    builder_id = int(builder_row[0]) if builder_row else None
+
+                cursor.execute("SELECT id FROM jobs WHERE LOWER(job_no)=LOWER(?)", (job_no,))
+                if cursor.fetchone():
+                    skipped += 1
+                    continue
+
+                cursor.execute(
+                    """INSERT OR IGNORE INTO jobs
+                       (job_no,job_name,builder_client_id,site_address,status,leading_hand,
+                        start_date,end_date,contract_value,notes)
+                       VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        job_no,
+                        job_name,
+                        builder_id,
+                        str(row.get("address") or "").strip(),
+                        str(row.get("status") or "Upcoming").strip() or "Upcoming",
+                        str(row.get("leading_hand") or "").strip(),
+                        str(row.get("start_date") or "").strip(),
+                        str(row.get("end_date") or "").strip(),
+                        0.0,
+                        str(row.get("notes") or "").strip(),
+                    ),
+                )
+                if int(cursor.rowcount or 0) > 0:
+                    added += 1
+                else:
+                    skipped += 1
+
+        imported_at = datetime.now().replace(microsecond=0).isoformat(sep=" ")
+        summary = (
+            f"PB_jobs.csv processed {imported_at}: {added} added, "
+            f"{skipped} already existed, {invalid} invalid."
+        )
+        cursor.execute(
+            "INSERT OR IGNORE INTO app_settings (setting_key,setting_value) VALUES (?,?)",
+            (BUNDLED_JOBS_IMPORT_KEY, summary),
+        )
+        cursor.execute(
+            "UPDATE app_settings SET setting_value=? WHERE setting_key=?",
+            (summary, BUNDLED_JOBS_IMPORT_KEY),
+        )
+        connection.commit()
+        return summary
+    except Exception:
+        try:
+            connection.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        connection.close()
+
+
 init_db()
+BUNDLED_JOBS_IMPORT_STATUS = import_bundled_jobs_once()
 
 
 # ============================================================
@@ -1103,6 +1205,7 @@ def system_page() -> None:
     st.write(f"**JobHub version:** {APP_VERSION}")
     st.write(f"**Database mode:** {'PostgreSQL / Supabase' if USE_POSTGRES else 'Local SQLite'}")
     st.write(f"**Local data path:** `{DB_PATH}`")
+    st.success(f"**Bundled jobs import:** {BUNDLED_JOBS_IMPORT_STATUS}")
     checks = []
     for table in ["jobs", "employees", "staff_schedule", "app_users", "timesheet_entries", "material_entries", "job_variations"]:
         try:

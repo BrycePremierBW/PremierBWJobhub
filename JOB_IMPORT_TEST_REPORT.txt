@@ -1,0 +1,29 @@
+PREMIER BRUSHWORKS JOBHUB v5.1 — JOB IMPORT TEST
+=================================================
+
+Python compilation
+------------------
+pb_jobhub_app.py: PASS
+pb_jobhub_visual_scheduler.py: PASS
+
+CSV validation
+--------------
+Rows found: 14
+Valid rows: 14
+Invalid rows: 0
+Job-number range: PB26001 to PB26014
+Distinct builder/client names: 12
+
+SQLite import test
+------------------
+First import: 14 jobs added, 0 skipped, 0 invalid
+Second import: 0 jobs added, 14 skipped, 0 invalid
+Jobs after test: 14
+Builders/clients after test: 12
+Duplicate protection: PASS
+
+Deployment behaviour
+--------------------
+The bundled PB_jobs.csv imports once when the application starts.
+Matching existing job numbers are skipped and not overwritten.
+The result is stored in app_settings and displayed on the System page.
