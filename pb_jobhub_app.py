@@ -7143,9 +7143,9 @@ def go_to_linked_job_view(job_id=None, builder_id=None, mode=None):
     if mode:
         st.session_state["linked_view_mode"] = mode
 
-    # Job lookup now lives inside the Control Centre.
-    st.session_state["go_to_menu"] = "Control Centre"
-    st.session_state["control_centre_section"] = "Job Lookup / Links"
+    # Defer navigation until the next rerun. The router applies both the
+    # main menu and Control Centre section before their widgets are created.
+    st.session_state["go_to_menu"] = "Job Lookup / Links"
     st.rerun()
 
 
