@@ -5,6 +5,7 @@ from urllib.parse import urlparse
 import shutil
 import base64
 import hashlib
+import html
 import re
 import json
 from pathlib import Path
@@ -33,6 +34,8 @@ PHOTOS_DIR = os.path.join(DATA_DIR, "photos")
 EXPORTS_DIR = os.path.join(DATA_DIR, "exports")
 
 TEMPLATE_DIR = os.path.join(os.path.dirname(__file__), "templates")
+ASSET_DIR = os.path.join(os.path.dirname(__file__), "assets")
+PB_LOGO_BACKGROUND_IMAGE = os.path.join(ASSET_DIR, "PB_Logo_Main_PNG.png")
 
 EQUIPMENT_TEMPLATE_PDF = os.path.join(
     TEMPLATE_DIR,
@@ -61,7 +64,400 @@ def get_job_folder(job_number):
     return folder
 
 
-st.set_page_config(page_title="Premier Brushworks JobHub", layout="wide")
+st.set_page_config(
+    page_title="Premier Brushworks JobHub",
+    page_icon="🎨",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+
+# =============================
+# PREMIER BRUSHWORKS VISUAL THEME
+# =============================
+
+PB_MENU_ICONS = {
+    "Dashboard": "🏠",
+    "Control Centre": "🎯",
+    "Jobs": "🧾",
+    "Job Folders": "📁",
+    "Estimating": "💰",
+    "Site Operations": "🛠️",
+    "Reports": "📊",
+    "Management": "⚙️",
+    "AI Assistant": "🤖",
+    "3D Building Mapper": "🏗️",
+    "Building Progress Mapper": "🗺️",
+    "Employee Portal": "👷",
+}
+
+
+def pb_logo_data_uri():
+    """Return the Premier Brushworks logo as a browser-safe data URI."""
+    possible_paths = [
+        PB_LOGO_BACKGROUND_IMAGE,
+        os.path.join(os.path.dirname(__file__), "PB_Logo_Main_PNG.png"),
+    ]
+    for logo_path in possible_paths:
+        try:
+            if os.path.exists(logo_path):
+                with open(logo_path, "rb") as logo_file:
+                    encoded_logo = base64.b64encode(logo_file.read()).decode("utf-8")
+                return f"data:image/png;base64,{encoded_logo}"
+        except Exception:
+            pass
+    return ""
+
+
+def pb_html(value):
+    return html.escape(str(value or ""))
+
+
+def pb_money(value):
+    try:
+        return f"${float(value or 0):,.0f}"
+    except Exception:
+        return "$0"
+
+
+def apply_pb_branding():
+    """Restore the last Premier Brushworks logo, colours and layout theme."""
+    logo_data_uri = pb_logo_data_uri()
+    logo_background_css = ""
+    if logo_data_uri:
+        logo_background_css = f"""
+        .stApp {{
+            background-image:
+                linear-gradient(rgba(247, 243, 238, 0.89), rgba(247, 243, 238, 0.89)),
+                url("{logo_data_uri}");
+            background-size: cover, min(72vw, 760px) auto;
+            background-position: center center;
+            background-repeat: no-repeat;
+            background-attachment: fixed;
+            background-color: var(--pb-bg);
+        }}
+
+        [data-testid="stAppViewContainer"] {{
+            background: transparent !important;
+        }}
+        """
+
+    st.markdown(
+        """
+        <style>
+        @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700;800&display=swap');
+
+        :root {
+            --pb-bg: #f7f3ee;
+            --pb-card: #ffffff;
+            --pb-charcoal: #1f1f1f;
+            --pb-muted: #6f6a63;
+            --pb-border: #e8ded3;
+            --pb-accent: #d8c8b8;
+            --pb-accent-dark: #7a6856;
+            --pb-success: #1f7a4d;
+            --pb-warning: #b7791f;
+            --pb-danger: #b42318;
+            --pb-info: #2f5f8f;
+        }
+
+        html, body, [class*="css"] {
+            font-family: 'Poppins', 'Segoe UI', Arial, sans-serif;
+        }
+
+        .stApp {
+            background:
+                radial-gradient(circle at top left, rgba(216, 200, 184, 0.36), rgba(247, 243, 238, 0) 34rem),
+                var(--pb-bg);
+            color: var(--pb-charcoal);
+        }
+
+        """ + logo_background_css + """
+
+        [data-testid="stHeader"] {
+            background: transparent;
+        }
+
+        .block-container {
+            max-width: 1560px;
+            padding-top: 1.15rem;
+            padding-bottom: 2.5rem;
+        }
+
+        section[data-testid="stSidebar"] {
+            background: linear-gradient(180deg, #171717 0%, #29231f 100%);
+            border-right: 1px solid rgba(255,255,255,0.08);
+        }
+
+        section[data-testid="stSidebar"] * {
+            color: #f6efe7;
+        }
+
+        section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p,
+        section[data-testid="stSidebar"] label,
+        section[data-testid="stSidebar"] span {
+            color: #f6efe7;
+        }
+
+        section[data-testid="stSidebar"] [role="radiogroup"] label {
+            border-radius: 10px;
+            padding: 0.4rem 0.5rem;
+        }
+
+        section[data-testid="stSidebar"] [role="radiogroup"] label:hover {
+            background: rgba(255,255,255,0.08);
+        }
+
+        section[data-testid="stSidebar"] div[data-baseweb="select"],
+        section[data-testid="stSidebar"] div[data-baseweb="select"] > div,
+        section[data-testid="stSidebar"] div[data-baseweb="select"] *,
+        section[data-testid="stSidebar"] div[data-baseweb="select"] input,
+        section[data-testid="stSidebar"] div[data-baseweb="select"] span,
+        section[data-testid="stSidebar"] div[data-baseweb="select"] svg {
+            color: #111111 !important;
+            -webkit-text-fill-color: #111111 !important;
+            fill: #111111 !important;
+        }
+
+        section[data-testid="stSidebar"] [role="listbox"],
+        section[data-testid="stSidebar"] [role="listbox"] *,
+        section[data-testid="stSidebar"] [data-baseweb="popover"],
+        section[data-testid="stSidebar"] [data-baseweb="popover"] * {
+            color: #111111 !important;
+            -webkit-text-fill-color: #111111 !important;
+        }
+
+        section[data-testid="stSidebar"] .stSelectbox div[data-baseweb="select"] div {
+            background-color: #ffffff !important;
+        }
+
+        section[data-testid="stSidebar"] [data-testid="stSelectbox"] label {
+            color: #f6efe7 !important;
+            -webkit-text-fill-color: #f6efe7 !important;
+        }
+
+        h1, h2, h3, h4 {
+            color: var(--pb-charcoal);
+            letter-spacing: -0.02em;
+        }
+
+        div[data-testid="stMetric"],
+        div[data-testid="stVerticalBlockBorderWrapper"] {
+            background: rgba(255,255,255,0.96);
+            border: 1px solid var(--pb-border);
+            border-radius: 18px;
+            box-shadow: 0 10px 28px rgba(31,31,31,0.06);
+        }
+
+        div[data-testid="stMetric"] {
+            padding: 16px 18px;
+        }
+
+        div[data-testid="stMetric"] label {
+            color: var(--pb-muted) !important;
+            font-weight: 600;
+        }
+
+        .pb-sidebar-logo {
+            background: rgba(255,255,255,0.08);
+            border: 1px solid rgba(255,255,255,0.12);
+            border-radius: 22px;
+            padding: 18px 16px;
+            margin: 0 0 18px 0;
+            text-align: left;
+        }
+
+        .pb-logo-image {
+            display: block;
+            width: min(190px, 100%);
+            max-height: 92px;
+            object-fit: contain;
+            object-position: left center;
+            margin-bottom: 10px;
+            filter: drop-shadow(0 4px 8px rgba(0,0,0,0.16));
+        }
+
+        .pb-logo-mark {
+            width: 48px;
+            height: 48px;
+            border-radius: 15px;
+            background: #f6efe7;
+            color: #1f1f1f;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 800;
+            font-size: 20px;
+            margin-bottom: 10px;
+        }
+
+        .pb-sidebar-title {
+            font-size: 17px;
+            font-weight: 700;
+            line-height: 1.15;
+            color: #ffffff;
+        }
+
+        .pb-sidebar-subtitle {
+            font-size: 12px;
+            color: #d8c8b8;
+            margin-top: 4px;
+        }
+
+        .pb-page-hero {
+            background: linear-gradient(135deg, #1f1f1f 0%, #463a30 62%, #d8c8b8 140%);
+            color: white;
+            border-radius: 26px;
+            padding: 26px 30px;
+            margin: 8px 0 22px 0;
+            box-shadow: 0 16px 34px rgba(31,31,31,0.16);
+        }
+
+        .pb-page-eyebrow {
+            color: #d8c8b8;
+            text-transform: uppercase;
+            letter-spacing: 0.16em;
+            font-size: 12px;
+            font-weight: 700;
+            margin-bottom: 8px;
+        }
+
+        .pb-page-title {
+            font-size: 34px;
+            font-weight: 800;
+            line-height: 1.1;
+            margin-bottom: 8px;
+            color: #ffffff;
+        }
+
+        .pb-page-subtitle {
+            color: #f4ebe1;
+            font-size: 15px;
+            max-width: 920px;
+        }
+
+        .pb-card {
+            background: rgba(255,255,255,0.97);
+            border: 1px solid var(--pb-border);
+            border-radius: 20px;
+            padding: 18px;
+            box-shadow: 0 10px 26px rgba(31,31,31,0.06);
+            min-height: 120px;
+            margin-bottom: 12px;
+        }
+
+        .pb-card-label {
+            color: var(--pb-muted);
+            font-size: 12px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            margin-bottom: 8px;
+        }
+
+        .pb-card-value {
+            color: var(--pb-charcoal);
+            font-size: 31px;
+            font-weight: 800;
+            line-height: 1;
+            margin-bottom: 8px;
+        }
+
+        .pb-card-subtitle {
+            color: var(--pb-muted);
+            font-size: 13px;
+            line-height: 1.35;
+        }
+
+        .pb-card.green { border-left: 7px solid var(--pb-success); }
+        .pb-card.orange { border-left: 7px solid var(--pb-warning); }
+        .pb-card.red { border-left: 7px solid var(--pb-danger); }
+        .pb-card.blue { border-left: 7px solid var(--pb-info); }
+        .pb-card.taupe { border-left: 7px solid var(--pb-accent-dark); }
+
+        .stButton > button, .stDownloadButton > button {
+            border-radius: 999px !important;
+            border: 1px solid var(--pb-accent) !important;
+            background: #ffffff !important;
+            color: #1f1f1f !important;
+            font-weight: 700 !important;
+            padding: 0.55rem 1rem !important;
+            box-shadow: 0 6px 14px rgba(31,31,31,0.05);
+        }
+
+        .stButton > button:hover, .stDownloadButton > button:hover {
+            border-color: var(--pb-accent-dark) !important;
+            color: #000000 !important;
+            transform: translateY(-1px);
+        }
+
+        [data-testid="stDataFrame"], [data-testid="stTable"] {
+            border: 1px solid var(--pb-border);
+            border-radius: 18px;
+            overflow: hidden;
+            background: rgba(255,255,255,0.98);
+        }
+
+        div[data-testid="stTabs"] button {
+            font-weight: 700;
+        }
+
+        @media (max-width: 760px) {
+            .pb-page-title { font-size: 26px; }
+            .pb-card { min-height: auto; }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def pb_sidebar_header():
+    logo_data_uri = pb_logo_data_uri()
+    logo_html = (
+        f'<img class="pb-logo-image" src="{logo_data_uri}" alt="Premier Brushworks logo">'
+        if logo_data_uri
+        else '<div class="pb-logo-mark">PB</div>'
+    )
+    st.sidebar.markdown(
+        f"""
+        <div class="pb-sidebar-logo">
+            {logo_html}
+            <div class="pb-sidebar-title">Premier Brushworks<br>JobHub</div>
+            <div class="pb-sidebar-subtitle">Commercial painting operations</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def pb_page_header(title, subtitle="", eyebrow="Premier Brushworks"):
+    st.markdown(
+        f"""
+        <div class="pb-page-hero">
+            <div class="pb-page-eyebrow">{pb_html(eyebrow)}</div>
+            <div class="pb-page-title">{pb_html(title)}</div>
+            <div class="pb-page-subtitle">{pb_html(subtitle)}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def pb_metric_card(label, value, subtitle="", tone="taupe"):
+    st.markdown(
+        f"""
+        <div class="pb-card {pb_html(tone)}">
+            <div class="pb-card-label">{pb_html(label)}</div>
+            <div class="pb-card-value">{pb_html(value)}</div>
+            <div class="pb-card-subtitle">{pb_html(subtitle)}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+apply_pb_branding()
 
 
 def get_database_url():
@@ -81,30 +477,29 @@ USE_POSTGRES = bool(DATABASE_URL)
 
 
 # =============================
-# TEMP STORAGE TEST - REMOVE LATER
+# OPTIONAL STORAGE DIAGNOSTICS
 # =============================
 
-st.sidebar.markdown("### Storage Check")
-st.sidebar.write("DATA_DIR:", DATA_DIR)
-st.sidebar.write("DB_PATH:", DB_PATH)
-st.sidebar.write("Using Postgres:", USE_POSTGRES)
-st.sidebar.write("DATA_DIR exists:", os.path.exists(DATA_DIR))
-st.sidebar.write("JOB_FILES_DIR exists:", os.path.exists(JOB_FILES_DIR))
+if str(os.getenv("SHOW_STORAGE_CHECK", "")).strip().lower() in ["1", "true", "yes", "on"]:
+    with st.sidebar.expander("Storage Check", expanded=False):
+        st.write("DATA_DIR:", DATA_DIR)
+        st.write("DB_PATH:", DB_PATH)
+        st.write("Using Postgres:", USE_POSTGRES)
+        st.write("DATA_DIR exists:", os.path.exists(DATA_DIR))
+        st.write("JOB_FILES_DIR exists:", os.path.exists(JOB_FILES_DIR))
 
-test_file_path = os.path.join(DATA_DIR, "persistent_test.txt")
+        test_file_path = os.path.join(DATA_DIR, "persistent_test.txt")
+        if st.button("Test Persistent Disk", key="storage_check_test_button"):
+            with open(test_file_path, "a", encoding="utf-8") as test_file:
+                test_file.write(f"Test saved at {datetime.now()}\n")
+            st.success("Test file saved.")
 
-if st.sidebar.button("Test Persistent Disk"):
-    with open(test_file_path, "a") as f:
-        f.write(f"Test saved at {datetime.now()}\n")
-    st.sidebar.success("Test file saved.")
-
-if os.path.exists(test_file_path):
-    with open(test_file_path, "r") as f:
-        lines = f.readlines()
-    st.sidebar.success(f"Persistent test file exists with {len(lines)} saved test line(s).")
-else:
-    st.sidebar.warning("No persistent test file found yet.")
-
+        if os.path.exists(test_file_path):
+            with open(test_file_path, "r", encoding="utf-8") as test_file:
+                lines = test_file.readlines()
+            st.success(f"Persistent test file exists with {len(lines)} saved test line(s).")
+        else:
+            st.warning("No persistent test file found yet.")
 
 
 
@@ -7491,8 +7886,12 @@ seed_data()
 seed_app_users()
 require_login()
 
-st.title("Premier Brushworks JobHub")
-st.caption("Local job system for jobs, builders, clients, employees, materials, wages and equipment.")
+pb_sidebar_header()
+pb_page_header(
+    "Premier Brushworks JobHub",
+    "Jobs, builders, clients, employees, scheduling, estimating and site operations in one place.",
+    "Commercial painting operations",
+)
 logout_button()
 
 role = current_role()
