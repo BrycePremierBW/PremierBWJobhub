@@ -4224,6 +4224,160 @@ def render_rate_library_estimate_adder(selected_estimate_id):
                 recalc_estimate_totals(selected_estimate_id)
                 st.success("Saved estimating rate added to the estimate.")
                 st.rerun()
+
+# PB_ESTIMATE_LINE_IMPORTER_V1
+def _normalise_estimate_import_header(value):
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
+
+
+def _prepare_estimate_line_import_dataframe(source_df):
+    if source_df is None or source_df.empty:
+        raise ValueError("The uploaded CSV does not contain any line items.")
+
+    aliases = {
+        "section": "Section",
+        "itemdescription": "Item Description",
+        "description": "Item Description",
+        "item": "Item Description",
+        "qty": "Qty",
+        "quantity": "Qty",
+        "unit": "Unit",
+        "unitrate": "Unit Rate",
+        "rate": "Unit Rate",
+        "linetotal": "Line Total",
+        "total": "Line Total",
+        "notes": "Notes",
+        "linenotes": "Notes",
+    }
+
+    rename_map = {}
+    for column in source_df.columns:
+        key = _normalise_estimate_import_header(column)
+        if key in aliases:
+            rename_map[column] = aliases[key]
+
+    work = source_df.rename(columns=rename_map).copy()
+    required = ["Section", "Item Description", "Qty", "Unit", "Unit Rate"]
+    missing = [column for column in required if column not in work.columns]
+    if missing:
+        raise ValueError("Missing required column(s): " + ", ".join(missing))
+
+    if "Line Total" not in work.columns:
+        work["Line Total"] = None
+    if "Notes" not in work.columns:
+        work["Notes"] = ""
+
+    work["Section"] = work["Section"].fillna("").astype(str).str.strip()
+    work["Item Description"] = work["Item Description"].fillna("").astype(str).str.strip()
+    work["Unit"] = work["Unit"].fillna("").astype(str).str.strip()
+    work["Notes"] = work["Notes"].fillna("").astype(str)
+
+    for column in ["Qty", "Unit Rate", "Line Total"]:
+        work[column] = pd.to_numeric(work[column], errors="coerce")
+
+    work["Qty"] = work["Qty"].fillna(0.0)
+    work["Unit Rate"] = work["Unit Rate"].fillna(0.0)
+    calculated_total = (work["Qty"] * work["Unit Rate"]).round(2)
+    work["Line Total"] = work["Line Total"].where(work["Line Total"].notna(), calculated_total)
+    work["Line Total"] = work["Line Total"].round(2)
+
+    work = work[work["Item Description"] != ""].copy()
+    if work.empty:
+        raise ValueError("No valid line items were found after removing blank descriptions.")
+
+    return work[["Section", "Item Description", "Qty", "Unit", "Unit Rate", "Line Total", "Notes"]]
+
+
+def render_estimate_line_item_csv_importer(selected_estimate_id):
+    with st.expander("Import Estimate Working Sheet CSV", expanded=False):
+        st.caption(
+            "Upload line items with these columns: Section, Item Description, Qty, Unit, "
+            "Unit Rate, Line Total and Notes."
+        )
+        uploaded = st.file_uploader(
+            "Choose estimate working-sheet CSV",
+            type=["csv"],
+            key=f"estimate_line_import_file_{selected_estimate_id}",
+        )
+        import_mode = st.radio(
+            "Import mode",
+            ["Append to existing line items", "Replace existing line items"],
+            horizontal=True,
+            key=f"estimate_line_import_mode_{selected_estimate_id}",
+        )
+
+        if uploaded is None:
+            return
+
+        try:
+            uploaded.seek(0)
+            source_df = pd.read_csv(uploaded)
+            prepared_df = _prepare_estimate_line_import_dataframe(source_df)
+            st.dataframe(prepared_df, width="stretch", hide_index=True)
+            st.metric(
+                "Import Total Ex GST",
+                f"${float(prepared_df['Line Total'].sum()):,.2f}",
+            )
+
+            confirm_replace = True
+            if import_mode.startswith("Replace"):
+                confirm_replace = st.checkbox(
+                    "Confirm replacement of all existing line items",
+                    key=f"estimate_line_import_confirm_{selected_estimate_id}",
+                )
+
+            if st.button(
+                "Import Working Sheet",
+                type="primary",
+                key=f"estimate_line_import_button_{selected_estimate_id}",
+            ):
+                if not confirm_replace:
+                    st.error("Tick the replacement confirmation box first.")
+                    return
+
+                conn = connect()
+                try:
+                    cur = conn.cursor()
+                    if import_mode.startswith("Replace"):
+                        cur.execute(
+                            "DELETE FROM estimate_line_items WHERE estimate_id = ?",
+                            (selected_estimate_id,),
+                        )
+
+                    insert_sql = (
+                        "INSERT INTO estimate_line_items "
+                        "(estimate_id, section, item_description, qty, unit, unit_rate, line_total, notes) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+                    )
+                    for _, row in prepared_df.iterrows():
+                        cur.execute(insert_sql, (
+                            selected_estimate_id,
+                            str(row["Section"]),
+                            str(row["Item Description"]),
+                            float(row["Qty"] or 0),
+                            str(row["Unit"]),
+                            float(row["Unit Rate"] or 0),
+                            float(row["Line Total"] or 0),
+                            str(row["Notes"]),
+                        ))
+                    conn.commit()
+                except Exception:
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+                    raise
+                finally:
+                    conn.close()
+
+                recalc_estimate_totals(selected_estimate_id)
+                st.success(f"Imported {len(prepared_df)} estimate line item(s).")
+                st.rerun()
+
+        except Exception as exc:
+            st.error(f"Could not import this estimate working sheet: {exc}")
+
+
 def estimate_totals(estimate_id, labour_hours, labour_rate, material_allowance, access_equipment_allowance, subcontractor_allowance, sundries_allowance, margin_percent, contingency_percent, gst_percent):
     line_df = df_query("SELECT COALESCE(SUM(line_total), 0) AS line_total FROM estimate_line_items WHERE estimate_id = ?", (estimate_id,))
     line_total = float(line_df.iloc[0]["line_total"] or 0) if not line_df.empty else 0.0
@@ -4397,6 +4551,7 @@ def estimate_working_sheet_page():
 
     with tab_lines:
         st.subheader("Estimate Line Items")
+        render_estimate_line_item_csv_importer(selected_estimate_id)
         render_rate_library_estimate_adder(selected_estimate_id)
 
         st.markdown("#### Add Manual Line Item")
