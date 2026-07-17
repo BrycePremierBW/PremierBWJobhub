@@ -933,6 +933,32 @@ def init_db():
 
 
 
+
+
+    # PB_JOBHUB_ESTIMATING_RATE_LIBRARY_V1 - reusable estimating rate library
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS estimating_rates (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        rate_code TEXT UNIQUE,
+        category TEXT,
+        item_description TEXT,
+        project_type TEXT,
+        work_type TEXT,
+        unit TEXT,
+        rate_min_ex_gst REAL DEFAULT 0,
+        recommended_rate_ex_gst REAL DEFAULT 0,
+        rate_max_ex_gst REAL DEFAULT 0,
+        adjustment_type TEXT,
+        rate_basis TEXT,
+        notes TEXT,
+        effective_date TEXT,
+        active INTEGER DEFAULT 1,
+        created_at TEXT,
+        updated_at TEXT
+    )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_estimating_rates_code ON estimating_rates(rate_code)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_estimating_rates_filters ON estimating_rates(project_type, work_type, category, active)")
     cur.execute("""
     CREATE TABLE IF NOT EXISTS estimate_working_sheets (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -3713,6 +3739,491 @@ def timesheets_page(employee_restricted=False):
 # =============================
 # ESTIMATE WORKING SHEET
 # =============================
+
+
+# =============================
+# ESTIMATING RATE LIBRARY
+# PB_JOBHUB_ESTIMATING_RATE_LIBRARY_V1
+# =============================
+ESTIMATING_RATE_LIBRARY_FILENAME = "PB_JobHub_Estimating_Rate_Library_Import.csv"
+ESTIMATING_RATE_LIBRARY_PATH = os.path.join(os.path.dirname(__file__), ESTIMATING_RATE_LIBRARY_FILENAME)
+
+ESTIMATING_RATE_COLUMNS = {
+    "Rate Code": "rate_code",
+    "Category": "category",
+    "Item Description": "item_description",
+    "Project Type": "project_type",
+    "Work Type": "work_type",
+    "Unit": "unit",
+    "Rate Min Ex GST": "rate_min_ex_gst",
+    "Recommended Rate Ex GST": "recommended_rate_ex_gst",
+    "Rate Max Ex GST": "rate_max_ex_gst",
+    "Adjustment Type": "adjustment_type",
+    "Rate Basis": "rate_basis",
+    "Included Scope / Notes": "notes",
+    "Effective Date": "effective_date",
+    "Active": "active",
+}
+
+
+def _rate_library_clean_text(value):
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    return str(value).strip()
+
+
+def _rate_library_float(value):
+    text = _rate_library_clean_text(value).replace("$", "").replace(",", "")
+    if not text:
+        return 0.0
+    try:
+        return float(text)
+    except Exception:
+        return 0.0
+
+
+def _rate_library_active(value):
+    text = _rate_library_clean_text(value).lower()
+    return 0 if text in {"0", "no", "n", "false", "inactive", "disabled"} else 1
+
+
+def normalise_estimating_rate_dataframe(source_df):
+    if source_df is None or source_df.empty:
+        raise ValueError("The rate library file is empty.")
+
+    work = source_df.copy()
+    work.columns = [str(c).strip() for c in work.columns]
+    missing = [name for name in ESTIMATING_RATE_COLUMNS if name not in work.columns]
+    if missing:
+        raise ValueError("Missing required column(s): " + ", ".join(missing))
+
+    work = work[list(ESTIMATING_RATE_COLUMNS.keys())].rename(columns=ESTIMATING_RATE_COLUMNS)
+    output_rows = []
+    seen_codes = set()
+
+    for _, row in work.iterrows():
+        rate_code = _rate_library_clean_text(row.get("rate_code"))
+        item_description = _rate_library_clean_text(row.get("item_description"))
+        if not rate_code or not item_description:
+            continue
+        if rate_code in seen_codes:
+            # The last row for a duplicate code wins, matching a normal update import.
+            output_rows = [r for r in output_rows if r[0] != rate_code]
+        seen_codes.add(rate_code)
+        output_rows.append((
+            rate_code,
+            _rate_library_clean_text(row.get("category")),
+            item_description,
+            _rate_library_clean_text(row.get("project_type")),
+            _rate_library_clean_text(row.get("work_type")),
+            _rate_library_clean_text(row.get("unit")) or "item",
+            _rate_library_float(row.get("rate_min_ex_gst")),
+            _rate_library_float(row.get("recommended_rate_ex_gst")),
+            _rate_library_float(row.get("rate_max_ex_gst")),
+            _rate_library_clean_text(row.get("adjustment_type")) or "Fixed",
+            _rate_library_clean_text(row.get("rate_basis")),
+            _rate_library_clean_text(row.get("notes")),
+            _rate_library_clean_text(row.get("effective_date")),
+            _rate_library_active(row.get("active")),
+        ))
+
+    if not output_rows:
+        raise ValueError("No valid rate records were found. Rate Code and Item Description are required.")
+    return output_rows
+
+
+def import_estimating_rate_dataframe(source_df, replace_all=False):
+    rows = normalise_estimating_rate_dataframe(source_df)
+    conn = connect()
+    inserted = 0
+    updated = 0
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        cur = conn.cursor()
+        if replace_all:
+            cur.execute("DELETE FROM estimating_rates")
+
+        for row in rows:
+            rate_code = row[0]
+            cur.execute("SELECT id FROM estimating_rates WHERE rate_code = ?", (rate_code,))
+            existing = cur.fetchone()
+            if existing:
+                cur.execute("""
+                    UPDATE estimating_rates
+                    SET category = ?, item_description = ?, project_type = ?, work_type = ?, unit = ?,
+                        rate_min_ex_gst = ?, recommended_rate_ex_gst = ?, rate_max_ex_gst = ?,
+                        adjustment_type = ?, rate_basis = ?, notes = ?, effective_date = ?, active = ?, updated_at = ?
+                    WHERE rate_code = ?
+                """, (
+                    row[1], row[2], row[3], row[4], row[5], row[6], row[7], row[8],
+                    row[9], row[10], row[11], row[12], row[13], now, rate_code,
+                ))
+                updated += 1
+            else:
+                cur.execute("""
+                    INSERT INTO estimating_rates
+                    (rate_code, category, item_description, project_type, work_type, unit,
+                     rate_min_ex_gst, recommended_rate_ex_gst, rate_max_ex_gst,
+                     adjustment_type, rate_basis, notes, effective_date, active, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (*row, now, now))
+                inserted += 1
+        conn.commit()
+        return {"inserted": inserted, "updated": updated, "total": len(rows)}
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+
+
+def seed_packaged_estimating_rates_if_empty():
+    try:
+        count_df = df_query("SELECT COUNT(*) AS c FROM estimating_rates")
+        existing_count = int(count_df.iloc[0]["c"] or 0) if not count_df.empty else 0
+        if existing_count > 0 or not os.path.exists(ESTIMATING_RATE_LIBRARY_PATH):
+            return None
+        packaged_df = pd.read_csv(ESTIMATING_RATE_LIBRARY_PATH)
+        return import_estimating_rate_dataframe(packaged_df, replace_all=False)
+    except Exception:
+        # Do not prevent JobHub loading if a packaged CSV was removed or malformed.
+        return None
+
+
+def estimating_rates_dataframe(active_only=False):
+    where_clause = "WHERE active = 1" if active_only else ""
+    return df_query(f"""
+        SELECT id,
+               rate_code AS 'Rate Code',
+               category AS 'Category',
+               item_description AS 'Item Description',
+               project_type AS 'Project Type',
+               work_type AS 'Work Type',
+               unit AS 'Unit',
+               rate_min_ex_gst AS 'Rate Min Ex GST',
+               recommended_rate_ex_gst AS 'Recommended Rate Ex GST',
+               rate_max_ex_gst AS 'Rate Max Ex GST',
+               adjustment_type AS 'Adjustment Type',
+               rate_basis AS 'Rate Basis',
+               notes AS 'Included Scope / Notes',
+               effective_date AS 'Effective Date',
+               active AS 'Active'
+        FROM estimating_rates
+        {where_clause}
+        ORDER BY project_type, work_type, category, item_description, rate_code
+    """)
+
+
+def _filter_estimating_rates(rate_df, key_prefix):
+    if rate_df.empty:
+        return rate_df
+
+    c1, c2, c3 = st.columns(3)
+    project_values = ["All"] + sorted([v for v in rate_df["Project Type"].dropna().astype(str).unique() if v])
+    selected_project = c1.selectbox("Project Type", project_values, key=f"{key_prefix}_project")
+
+    project_df = rate_df if selected_project == "All" else rate_df[rate_df["Project Type"].astype(str) == selected_project]
+    work_values = ["All"] + sorted([v for v in project_df["Work Type"].dropna().astype(str).unique() if v])
+    selected_work = c2.selectbox("Work Type", work_values, key=f"{key_prefix}_work")
+
+    work_df = project_df if selected_work == "All" else project_df[project_df["Work Type"].astype(str) == selected_work]
+    category_values = ["All"] + sorted([v for v in work_df["Category"].dropna().astype(str).unique() if v])
+    selected_category = c3.selectbox("Category", category_values, key=f"{key_prefix}_category")
+
+    filtered = work_df if selected_category == "All" else work_df[work_df["Category"].astype(str) == selected_category]
+    search_text = st.text_input(
+        "Search rate code, substrate or description",
+        key=f"{key_prefix}_search",
+        placeholder="e.g. blockwork, epoxy, plasterboard, downpipe",
+    ).strip().lower()
+    if search_text:
+        haystack = (
+            filtered["Rate Code"].fillna("").astype(str) + " " +
+            filtered["Category"].fillna("").astype(str) + " " +
+            filtered["Item Description"].fillna("").astype(str) + " " +
+            filtered["Project Type"].fillna("").astype(str) + " " +
+            filtered["Work Type"].fillna("").astype(str) + " " +
+            filtered["Included Scope / Notes"].fillna("").astype(str)
+        ).str.lower()
+        filtered = filtered[haystack.str.contains(search_text, na=False, regex=False)]
+    return filtered
+
+
+def estimating_rate_library_page():
+    st.header("Estimating Rate Library")
+    st.caption("Import, search and maintain the reusable Premier Brushworks estimating rates used by Estimate Working Sheets.")
+
+    seeded = seed_packaged_estimating_rates_if_empty()
+    if seeded:
+        st.success(f"Loaded {seeded['total']} packaged Premier Brushworks estimating rates.")
+
+    full_df = estimating_rates_dataframe(active_only=False)
+    active_count = int((full_df["Active"].fillna(0).astype(float) == 1).sum()) if not full_df.empty else 0
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Total rates", len(full_df))
+    c2.metric("Active rates", active_count)
+    c3.metric("Inactive rates", max(len(full_df) - active_count, 0))
+
+    tab_import, tab_browse, tab_manage = st.tabs(["Import / Export", "Browse Rates", "Manage Rates"])
+
+    with tab_import:
+        st.subheader("Import Rate Library CSV")
+        st.caption(f"Expected file: {ESTIMATING_RATE_LIBRARY_FILENAME}. Merge/update matches records by Rate Code.")
+        uploaded = st.file_uploader("Choose rate-library CSV", type=["csv"], key="estimating_rate_library_upload")
+        import_mode = st.radio(
+            "Import mode",
+            ["Merge / update existing rates", "Replace the complete rate library"],
+            horizontal=True,
+            key="estimating_rate_library_mode",
+        )
+        if uploaded is not None:
+            try:
+                preview_df = pd.read_csv(uploaded)
+                st.dataframe(preview_df.head(25), width="stretch", hide_index=True)
+                st.caption(f"{len(preview_df):,} row(s) detected.")
+                if st.button("Import Rate Library", type="primary", key="estimating_rate_library_import_button"):
+                    result = import_estimating_rate_dataframe(
+                        preview_df,
+                        replace_all=import_mode.startswith("Replace"),
+                    )
+                    st.success(
+                        f"Rate library imported: {result['inserted']} inserted, "
+                        f"{result['updated']} updated, {result['total']} processed."
+                    )
+                    st.rerun()
+            except Exception as exc:
+                st.error(f"Could not read or import this CSV: {exc}")
+
+        if os.path.exists(ESTIMATING_RATE_LIBRARY_PATH):
+            with open(ESTIMATING_RATE_LIBRARY_PATH, "rb") as rate_file:
+                st.download_button(
+                    "Download Packaged Premier Brushworks Rate CSV",
+                    data=rate_file.read(),
+                    file_name=ESTIMATING_RATE_LIBRARY_FILENAME,
+                    mime="text/csv",
+                    key="download_packaged_rate_library",
+                )
+
+        export_df = estimating_rates_dataframe(active_only=False)
+        if not export_df.empty:
+            export_columns = [c for c in export_df.columns if c != "id"]
+            st.download_button(
+                "Export Current JobHub Rate Library",
+                data=export_df[export_columns].to_csv(index=False).encode("utf-8-sig"),
+                file_name=f"PB_JobHub_Rate_Library_Export_{date.today().isoformat()}.csv",
+                mime="text/csv",
+                key="export_current_rate_library",
+            )
+
+    with tab_browse:
+        browse_df = estimating_rates_dataframe(active_only=False)
+        show_inactive = st.checkbox("Include inactive rates", value=False, key="rate_library_show_inactive")
+        if not show_inactive and not browse_df.empty:
+            browse_df = browse_df[browse_df["Active"].fillna(0).astype(float) == 1]
+        filtered_df = _filter_estimating_rates(browse_df, "rate_library_browse")
+        st.caption(f"Showing {len(filtered_df):,} rate(s). All rates exclude GST.")
+        if filtered_df.empty:
+            st.info("No rates match the selected filters.")
+        else:
+            display_columns = [
+                "Rate Code", "Category", "Item Description", "Project Type", "Work Type", "Unit",
+                "Recommended Rate Ex GST", "Rate Min Ex GST", "Rate Max Ex GST", "Adjustment Type",
+                "Included Scope / Notes", "Effective Date", "Active",
+            ]
+            st.dataframe(filtered_df[display_columns], width="stretch", hide_index=True)
+
+    with tab_manage:
+        st.subheader("Add or update one rate")
+        existing = estimating_rates_dataframe(active_only=False)
+        with st.form("manual_estimating_rate_form"):
+            c1, c2 = st.columns(2)
+            rate_code = c1.text_input("Rate Code")
+            item_description = c2.text_input("Item Description")
+            c3, c4, c5 = st.columns(3)
+            category = c3.text_input("Category")
+            project_type = c4.text_input("Project Type", value="Commercial")
+            work_type = c5.text_input("Work Type", value="New")
+            c6, c7, c8, c9 = st.columns(4)
+            unit = c6.text_input("Unit", value="m²")
+            rate_min = c7.number_input("Minimum", min_value=0.0, step=1.0)
+            rate_rec = c8.number_input("Recommended", min_value=0.0, step=1.0)
+            rate_max = c9.number_input("Maximum", min_value=0.0, step=1.0)
+            adjustment_type = st.selectbox(
+                "Adjustment Type",
+                ["Fixed", "Fixed Range", "Percentage Add", "Cost Plus Percentage"],
+            )
+            rate_basis = st.text_input("Rate Basis", value="Base substrate/item rate")
+            notes = st.text_area("Included Scope / Notes")
+            effective_date = st.text_input("Effective Date", value=str(date.today()))
+            active = st.checkbox("Active", value=True)
+            save_rate = st.form_submit_button("Save / Update Rate")
+            if save_rate:
+                if not rate_code.strip() or not item_description.strip():
+                    st.error("Rate Code and Item Description are required.")
+                else:
+                    manual_df = pd.DataFrame([{
+                        "Rate Code": rate_code,
+                        "Category": category,
+                        "Item Description": item_description,
+                        "Project Type": project_type,
+                        "Work Type": work_type,
+                        "Unit": unit,
+                        "Rate Min Ex GST": rate_min,
+                        "Recommended Rate Ex GST": rate_rec,
+                        "Rate Max Ex GST": rate_max,
+                        "Adjustment Type": adjustment_type,
+                        "Rate Basis": rate_basis,
+                        "Included Scope / Notes": notes,
+                        "Effective Date": effective_date,
+                        "Active": "Yes" if active else "No",
+                    }])
+                    result = import_estimating_rate_dataframe(manual_df, replace_all=False)
+                    st.success(f"Rate saved: {result['inserted']} inserted, {result['updated']} updated.")
+                    st.rerun()
+
+        if not existing.empty:
+            st.divider()
+            st.subheader("Activate, deactivate or delete")
+            rate_options = {
+                f"{row['Rate Code']} | {row['Item Description']} | {row['Project Type']} / {row['Work Type']}": int(row["id"])
+                for _, row in existing.iterrows()
+            }
+            selected_label = st.selectbox("Select rate", list(rate_options.keys()), key="manage_rate_selection")
+            selected_id = rate_options[selected_label]
+            b1, b2, b3 = st.columns(3)
+            if b1.button("Set Active", key="set_rate_active"):
+                execute("UPDATE estimating_rates SET active = 1, updated_at = ? WHERE id = ?", (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), selected_id))
+                st.rerun()
+            if b2.button("Set Inactive", key="set_rate_inactive"):
+                execute("UPDATE estimating_rates SET active = 0, updated_at = ? WHERE id = ?", (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), selected_id))
+                st.rerun()
+            confirm_delete = st.checkbox("Confirm permanent deletion", key="confirm_rate_delete")
+            if b3.button("Delete Rate", key="delete_rate_button"):
+                if not confirm_delete:
+                    st.error("Tick confirm permanent deletion first.")
+                else:
+                    execute("DELETE FROM estimating_rates WHERE id = ?", (selected_id,))
+                    st.rerun()
+
+
+def render_rate_library_estimate_adder(selected_estimate_id):
+    seed_packaged_estimating_rates_if_empty()
+    rate_df = estimating_rates_dataframe(active_only=True)
+
+    st.markdown("#### Add from Estimating Rate Library")
+    if rate_df.empty:
+        st.info("The estimating rate library is empty. Open Estimating → Rate Library and import the Premier Brushworks CSV.")
+        return
+
+    with st.expander("Search and add a saved rate", expanded=True):
+        filtered_df = _filter_estimating_rates(rate_df, f"estimate_rate_{selected_estimate_id}")
+        if filtered_df.empty:
+            st.info("No rates match the selected filters.")
+            return
+
+        option_map = {
+            (
+                f"{row['Item Description']} | {row['Project Type']} / {row['Work Type']} | "
+                f"{row['Unit']} @ ${float(row['Recommended Rate Ex GST'] or 0):,.2f}"
+            ): int(row["id"])
+            for _, row in filtered_df.iterrows()
+        }
+        selected_label = st.selectbox(
+            "Select saved rate",
+            list(option_map.keys()),
+            key=f"estimate_saved_rate_{selected_estimate_id}",
+        )
+        selected_rate_id = option_map[selected_label]
+        selected_row = filtered_df[filtered_df["id"] == selected_rate_id].iloc[0]
+
+        rate_basis_choice = st.radio(
+            "Rate to use",
+            ["Recommended", "Minimum", "Maximum"],
+            horizontal=True,
+            key=f"estimate_rate_basis_{selected_estimate_id}",
+        )
+        rate_column = {
+            "Recommended": "Recommended Rate Ex GST",
+            "Minimum": "Rate Min Ex GST",
+            "Maximum": "Rate Max Ex GST",
+        }[rate_basis_choice]
+        selected_rate = float(selected_row[rate_column] or 0)
+
+        c1, c2, c3 = st.columns(3)
+        qty = c1.number_input(
+            "Quantity",
+            min_value=0.0,
+            value=1.0,
+            step=1.0,
+            key=f"estimate_rate_qty_{selected_estimate_id}",
+        )
+        override_rate = c2.checkbox("Override rate", value=False, key=f"estimate_rate_override_{selected_estimate_id}")
+        final_rate = c3.number_input(
+            "Unit Rate Ex GST",
+            min_value=0.0,
+            value=float(selected_rate),
+            step=1.0,
+            disabled=not override_rate,
+            key=f"estimate_rate_value_{selected_estimate_id}_{selected_rate_id}_{rate_basis_choice}",
+        )
+        if not override_rate:
+            final_rate = selected_rate
+
+        category = _rate_library_clean_text(selected_row["Category"])
+        section_options = []
+        for value in [category, "Painting Works", "Floor Coatings", "Preliminaries", "Labour", "Materials", "Access / Equipment", "Subcontractor", "Variations", "Other"]:
+            if value and value not in section_options:
+                section_options.append(value)
+        section = st.selectbox(
+            "Estimate Section",
+            section_options,
+            key=f"estimate_rate_section_{selected_estimate_id}",
+        )
+        default_notes = (
+            f"Rate library: {selected_row['Rate Code']} | {rate_basis_choice} rate. "
+            f"{_rate_library_clean_text(selected_row['Included Scope / Notes'])}"
+        ).strip()
+        line_notes = st.text_area(
+            "Line Notes",
+            value=default_notes,
+            key=f"estimate_rate_notes_{selected_estimate_id}_{selected_rate_id}",
+        )
+
+        preview_total = round(float(qty or 0) * float(final_rate or 0), 2)
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Unit", _rate_library_clean_text(selected_row["Unit"]) or "item")
+        m2.metric("Rate Ex GST", f"${float(final_rate or 0):,.2f}")
+        m3.metric("Line Total Ex GST", f"${preview_total:,.2f}")
+
+        if st.button("Add Saved Rate to Estimate", type="primary", key=f"add_saved_rate_{selected_estimate_id}"):
+            if float(qty or 0) <= 0:
+                st.error("Quantity must be greater than zero.")
+            else:
+                execute("""
+                    INSERT INTO estimate_line_items
+                    (estimate_id, section, item_description, qty, unit, unit_rate, line_total, notes)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    selected_estimate_id,
+                    section,
+                    _rate_library_clean_text(selected_row["Item Description"]),
+                    float(qty),
+                    _rate_library_clean_text(selected_row["Unit"]) or "item",
+                    float(final_rate),
+                    preview_total,
+                    line_notes,
+                ))
+                recalc_estimate_totals(selected_estimate_id)
+                st.success("Saved estimating rate added to the estimate.")
+                st.rerun()
 def estimate_totals(estimate_id, labour_hours, labour_rate, material_allowance, access_equipment_allowance, subcontractor_allowance, sundries_allowance, margin_percent, contingency_percent, gst_percent):
     line_df = df_query("SELECT COALESCE(SUM(line_total), 0) AS line_total FROM estimate_line_items WHERE estimate_id = ?", (estimate_id,))
     line_total = float(line_df.iloc[0]["line_total"] or 0) if not line_df.empty else 0.0
@@ -3886,6 +4397,9 @@ def estimate_working_sheet_page():
 
     with tab_lines:
         st.subheader("Estimate Line Items")
+        render_rate_library_estimate_adder(selected_estimate_id)
+
+        st.markdown("#### Add Manual Line Item")
         with st.form("add_estimate_line_form"):
             col1, col2 = st.columns(2)
             section = col1.selectbox("Section", ["Preliminaries", "Labour", "Materials", "Access / Equipment", "Subcontractor", "Variations", "Other"])
@@ -8090,6 +8604,7 @@ elif role == "manager":
     }
     estimating_menu_map = {
         "Estimate Working Sheet": "Estimate Working Sheet",
+        "Estimating Rate Library": "Estimating Rate Library",
         "Job Costs / Forecasting": "Job Costs / Forecasting",
     }
     site_operations_menu_map = {
@@ -8123,6 +8638,7 @@ else:
     }
     estimating_menu_map = {
         "Estimate Working Sheet": "Estimate Working Sheet",
+        "Estimating Rate Library": "Estimating Rate Library",
         "Job Costs / Forecasting": "Job Costs / Forecasting",
     }
     site_operations_menu_map = {
@@ -8634,6 +9150,10 @@ elif menu == "Jobs":
 # =============================
 # ESTIMATE WORKING SHEET
 # =============================
+elif menu == "Estimating Rate Library":
+    estimating_rate_library_page()
+
+
 elif menu == "Estimate Working Sheet":
     estimate_working_sheet_page()
 
