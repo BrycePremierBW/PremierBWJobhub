@@ -1172,6 +1172,174 @@ def execute(sql, params=()):
         conn.close()
 
 
+
+
+# =============================
+# BUILDERS / CLIENTS - SAFE CONTACT MERGE
+# =============================
+BUILDER_CLIENT_MERGE_FIELDS = (
+    "type", "name", "contact_name", "phone", "email",
+    "address", "qbcc", "abn", "terms", "notes",
+)
+
+
+def clean_contact_merge_value(value):
+    """Return a stable string for database values, including pandas NaN."""
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    return str(value).strip()
+
+
+def builder_client_merge_defaults(records_df, primary_id):
+    """
+    Build conservative merge defaults.
+
+    The primary record wins for populated fields. Blank primary fields are
+    filled from the selected duplicate records. Notes are combined without
+    repeating identical text.
+    """
+    if records_df is None or records_df.empty:
+        raise ValueError("No contact records were supplied for merging.")
+
+    work = records_df.copy()
+    work["id"] = work["id"].astype(int)
+    primary_rows = work[work["id"] == int(primary_id)]
+    if primary_rows.empty:
+        raise ValueError("The selected primary contact could not be found.")
+
+    primary = primary_rows.iloc[0]
+    duplicates = work[work["id"] != int(primary_id)]
+    ordered = pd.concat([primary_rows, duplicates], ignore_index=True)
+
+    defaults = {}
+    for field in BUILDER_CLIENT_MERGE_FIELDS:
+        if field == "notes":
+            continue
+        values = [clean_contact_merge_value(v) for v in ordered[field].tolist()]
+        defaults[field] = next((v for v in values if v), "")
+
+    note_values = []
+    seen_notes = set()
+    for value in ordered["notes"].tolist():
+        note = clean_contact_merge_value(value)
+        key = note.casefold()
+        if note and key not in seen_notes:
+            note_values.append(note)
+            seen_notes.add(key)
+    defaults["notes"] = "\n\n".join(note_values)
+    defaults["type"] = defaults.get("type") or "Builder"
+    defaults["name"] = defaults.get("name") or clean_contact_merge_value(primary.get("name"))
+    return defaults
+
+
+def merge_builder_client_records(primary_id, duplicate_ids, final_values):
+    """
+    Merge duplicate builder/client records inside one database transaction.
+
+    - Keeps the primary record and its ID.
+    - Moves all linked jobs from duplicate records to the primary record.
+    - Updates the primary record with the reviewed final values.
+    - Deletes only the selected duplicate records.
+    """
+    primary_id = int(primary_id)
+    duplicate_ids = sorted({int(x) for x in duplicate_ids if int(x) != primary_id})
+    if not duplicate_ids:
+        raise ValueError("Select at least one duplicate contact to merge.")
+
+    selected_ids = [primary_id] + duplicate_ids
+    placeholders = ", ".join(["?"] * len(selected_ids))
+    duplicate_placeholders = ", ".join(["?"] * len(duplicate_ids))
+
+    values = {
+        field: clean_contact_merge_value(final_values.get(field, ""))
+        for field in BUILDER_CLIENT_MERGE_FIELDS
+    }
+    if not values["name"]:
+        raise ValueError("The merged company/client name cannot be blank.")
+
+    conn = connect()
+    try:
+        cur = conn.cursor()
+
+        cur.execute(
+            f"SELECT id, name FROM builders_clients WHERE id IN ({placeholders})",
+            tuple(selected_ids),
+        )
+        found = {int(row[0]): clean_contact_merge_value(row[1]) for row in cur.fetchall()}
+        missing = [record_id for record_id in selected_ids if record_id not in found]
+        if missing:
+            raise ValueError("One or more selected contacts no longer exist. Refresh and try again.")
+
+        # Do not allow the reviewed final name to collide with an unrelated record.
+        cur.execute(
+            f"""
+            SELECT id, name
+            FROM builders_clients
+            WHERE LOWER(TRIM(name)) = LOWER(TRIM(?))
+              AND id NOT IN ({placeholders})
+            LIMIT 1
+            """,
+            tuple([values["name"]] + selected_ids),
+        )
+        conflict = cur.fetchone()
+        if conflict:
+            raise ValueError(
+                f'The final name "{values["name"]}" already belongs to another contact. '
+                "Include that record in this merge or choose a different final name."
+            )
+
+        cur.execute(
+            f"SELECT COUNT(*) FROM jobs WHERE builder_client_id IN ({duplicate_placeholders})",
+            tuple(duplicate_ids),
+        )
+        moved_job_count = int((cur.fetchone() or [0])[0] or 0)
+
+        cur.execute(
+            """
+            UPDATE builders_clients
+            SET type = ?, name = ?, contact_name = ?, phone = ?, email = ?,
+                address = ?, qbcc = ?, abn = ?, terms = ?, notes = ?
+            WHERE id = ?
+            """,
+            (
+                values["type"], values["name"], values["contact_name"],
+                values["phone"], values["email"], values["address"],
+                values["qbcc"], values["abn"], values["terms"],
+                values["notes"], primary_id,
+            ),
+        )
+
+        cur.execute(
+            f"UPDATE jobs SET builder_client_id = ? WHERE builder_client_id IN ({duplicate_placeholders})",
+            tuple([primary_id] + duplicate_ids),
+        )
+        cur.execute(
+            f"DELETE FROM builders_clients WHERE id IN ({duplicate_placeholders})",
+            tuple(duplicate_ids),
+        )
+
+        conn.commit()
+        return {
+            "primary_id": primary_id,
+            "primary_name": values["name"],
+            "duplicates_removed": len(duplicate_ids),
+            "jobs_moved": moved_job_count,
+        }
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+
+
 def execute_many(sql, rows):
     conn = connect()
     try:
@@ -8484,7 +8652,7 @@ elif menu == "JobHub AI Assistant":
 elif menu == "Builders & Clients":
     st.header("Builders & Clients")
 
-    tab_add, tab_edit, tab_remove, tab_list = st.tabs(["Add", "Edit", "Remove", "List"])
+    tab_add, tab_edit, tab_remove, tab_merge, tab_list = st.tabs(["Add", "Edit", "Remove", "Merge", "List"])
 
     with tab_add:
         st.subheader("Add Builder / Client")
@@ -8572,6 +8740,150 @@ elif menu == "Builders & Clients":
                     execute("DELETE FROM builders_clients WHERE id = ?", (selected_id,))
                     st.success("Builder/client deleted.")
                     refresh()
+
+    with tab_merge:
+        st.subheader("Merge Duplicate Contacts")
+        st.caption(
+            "Keep one primary record, transfer every linked job from the selected duplicates, "
+            "review the final details, then remove only those duplicate records."
+        )
+
+        merge_contacts_df = df_query("""
+            SELECT id, type, name, contact_name, phone, email, address,
+                   qbcc, abn, terms, notes
+            FROM builders_clients
+            ORDER BY name, id
+        """)
+
+        if len(merge_contacts_df.index) < 2:
+            st.info("At least two builder/client records are required before contacts can be merged.")
+        else:
+            merge_contacts_df["id"] = merge_contacts_df["id"].astype(int)
+            contact_rows = {
+                int(row["id"]): row
+                for _, row in merge_contacts_df.iterrows()
+            }
+
+            def merge_contact_label(contact_id):
+                row = contact_rows[int(contact_id)]
+                details = [clean_contact_merge_value(row.get("phone")), clean_contact_merge_value(row.get("email"))]
+                details = [item for item in details if item]
+                suffix = f" — {' / '.join(details)}" if details else ""
+                return f'{clean_contact_merge_value(row.get("name"))}{suffix} (ID {int(contact_id)})'
+
+            all_contact_ids = list(contact_rows.keys())
+            primary_merge_id = st.selectbox(
+                "Primary contact to keep",
+                all_contact_ids,
+                format_func=merge_contact_label,
+                key="builder_contact_merge_primary",
+            )
+            duplicate_options = [contact_id for contact_id in all_contact_ids if contact_id != int(primary_merge_id)]
+            duplicate_merge_ids = st.multiselect(
+                "Duplicate contacts to merge into the primary contact",
+                duplicate_options,
+                format_func=merge_contact_label,
+                key="builder_contact_merge_duplicates",
+            )
+
+            if duplicate_merge_ids:
+                selected_merge_ids = [int(primary_merge_id)] + [int(x) for x in duplicate_merge_ids]
+                selected_merge_df = merge_contacts_df[merge_contacts_df["id"].isin(selected_merge_ids)].copy()
+
+                linked_job_counts = df_query(
+                    f"""
+                    SELECT builder_client_id, COUNT(*) AS linked_jobs
+                    FROM jobs
+                    WHERE builder_client_id IN ({', '.join(['?'] * len(selected_merge_ids))})
+                    GROUP BY builder_client_id
+                    """,
+                    tuple(selected_merge_ids),
+                )
+                count_map = {
+                    int(row["builder_client_id"]): int(row["linked_jobs"])
+                    for _, row in linked_job_counts.iterrows()
+                } if not linked_job_counts.empty else {}
+                selected_merge_df["Linked Jobs"] = selected_merge_df["id"].map(count_map).fillna(0).astype(int)
+                selected_merge_df["Role"] = selected_merge_df["id"].apply(
+                    lambda record_id: "PRIMARY — KEEP" if int(record_id) == int(primary_merge_id) else "DUPLICATE — REMOVE"
+                )
+
+                st.markdown("#### Records selected")
+                st.dataframe(
+                    selected_merge_df[[
+                        "Role", "name", "contact_name", "phone", "email", "address", "Linked Jobs"
+                    ]].rename(columns={
+                        "name": "Company / Client",
+                        "contact_name": "Contact",
+                        "phone": "Phone",
+                        "email": "Email",
+                        "address": "Address",
+                    }),
+                    width="stretch",
+                    hide_index=True,
+                )
+
+                merge_defaults = builder_client_merge_defaults(selected_merge_df, int(primary_merge_id))
+                jobs_to_move = int(selected_merge_df.loc[
+                    selected_merge_df["id"] != int(primary_merge_id), "Linked Jobs"
+                ].sum())
+
+                st.info(
+                    f"This merge will keep 1 contact, remove {len(duplicate_merge_ids)} duplicate "
+                    f"record(s), and transfer {jobs_to_move} linked job(s) to the primary contact."
+                )
+
+                with st.form("builder_contact_merge_review_form"):
+                    st.markdown("#### Review the final contact")
+                    c1, c2 = st.columns(2)
+                    merged_type = c1.text_input("Type", value=merge_defaults["type"])
+                    merged_name = c2.text_input("Company / Client Name", value=merge_defaults["name"])
+                    merged_contact = st.text_input("Contact Name", value=merge_defaults["contact_name"])
+                    c3, c4 = st.columns(2)
+                    merged_phone = c3.text_input("Phone / Mobile", value=merge_defaults["phone"])
+                    merged_email = c4.text_input("Email", value=merge_defaults["email"])
+                    merged_address = st.text_input("Address", value=merge_defaults["address"])
+                    c5, c6, c7 = st.columns(3)
+                    merged_qbcc = c5.text_input("QBCC", value=merge_defaults["qbcc"])
+                    merged_abn = c6.text_input("ABN", value=merge_defaults["abn"])
+                    merged_terms = c7.text_input("Payment Terms", value=merge_defaults["terms"])
+                    merged_notes = st.text_area("Notes", value=merge_defaults["notes"], height=140)
+                    merge_confirmed = st.checkbox(
+                        "I have reviewed the primary contact and understand the selected duplicate records will be deleted."
+                    )
+                    merge_submitted = st.form_submit_button("Merge contacts safely", type="primary")
+
+                    if merge_submitted:
+                        if not merge_confirmed:
+                            st.error("Tick the confirmation box before merging contacts.")
+                        else:
+                            try:
+                                merge_result = merge_builder_client_records(
+                                    int(primary_merge_id),
+                                    [int(x) for x in duplicate_merge_ids],
+                                    {
+                                        "type": merged_type,
+                                        "name": merged_name,
+                                        "contact_name": merged_contact,
+                                        "phone": merged_phone,
+                                        "email": merged_email,
+                                        "address": merged_address,
+                                        "qbcc": merged_qbcc,
+                                        "abn": merged_abn,
+                                        "terms": merged_terms,
+                                        "notes": merged_notes,
+                                    },
+                                )
+                                st.success(
+                                    f'Merged into "{merge_result["primary_name"]}". '
+                                    f'{merge_result["duplicates_removed"]} duplicate record(s) removed and '
+                                    f'{merge_result["jobs_moved"]} linked job(s) transferred.'
+                                )
+                                refresh()
+                            except Exception as exc:
+                                st.error(f"Contacts were not merged: {exc}")
+            else:
+                st.info("Choose one or more duplicate contacts to preview and merge.")
 
     with tab_list:
         st.subheader("Builder & Client List")
