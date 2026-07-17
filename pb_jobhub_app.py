@@ -986,6 +986,10 @@ def init_db():
     )
     """)
 
+    ensure_column("estimate_working_sheets", "archived", "INTEGER DEFAULT 0")
+    ensure_column("estimate_working_sheets", "archived_at", "TEXT")
+    ensure_column("estimate_working_sheets", "archived_by", "TEXT")
+
     cur.execute("""
     CREATE TABLE IF NOT EXISTS estimate_line_items (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -4418,6 +4422,93 @@ def recalc_estimate_totals(estimate_id):
     """, (totals["total_ex_gst"], totals["gst_amount"], totals["total_inc_gst"], datetime.now().strftime("%Y-%m-%d %H:%M:%S"), estimate_id))
 
 
+# PB_ESTIMATE_ARCHIVE_DELETE_V1
+def permanently_delete_estimate_working_sheet(estimate_id):
+    conn = connect()
+    try:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM estimate_line_items WHERE estimate_id = ?", (int(estimate_id),))
+        cur.execute("DELETE FROM estimate_working_sheets WHERE id = ?", (int(estimate_id),))
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+
+
+def render_estimate_archive_delete_controls(selected_estimate_id, current):
+    if not is_manager_or_admin():
+        return
+
+    is_archived = int(current.get("archived") or 0) == 1
+    estimate_no = str(current.get("estimate_no") or f"Estimate {selected_estimate_id}")
+    revision = str(current.get("revision") or "")
+    estimate_label = f"{estimate_no} {revision}".strip()
+
+    with st.expander("Manage Estimate Working Sheet", expanded=False):
+        st.caption("Admin and Manager access only.")
+
+        if is_archived:
+            st.warning("This estimate is archived and hidden from the normal estimate list.")
+            if st.button("Restore Estimate Working Sheet", key=f"restore_estimate_{selected_estimate_id}"):
+                execute("""
+                    UPDATE estimate_working_sheets
+                    SET archived = 0, archived_at = '', archived_by = ''
+                    WHERE id = ?
+                """, (selected_estimate_id,))
+                st.success(f"{estimate_label} restored successfully.")
+                st.session_state.pop("estimate_select", None)
+                refresh()
+        else:
+            archive_confirmed = st.checkbox(
+                "Confirm archive of this estimate working sheet",
+                key=f"confirm_archive_estimate_{selected_estimate_id}",
+            )
+            if st.button("Archive Estimate Working Sheet", key=f"archive_estimate_{selected_estimate_id}"):
+                if not archive_confirmed:
+                    st.error("Tick the archive confirmation box first.")
+                else:
+                    user = get_current_user() or {}
+                    archived_by = str(user.get("username") or user.get("employee_name") or current_role() or "manager")
+                    execute("""
+                        UPDATE estimate_working_sheets
+                        SET archived = 1, archived_at = ?, archived_by = ?
+                        WHERE id = ?
+                    """, (
+                        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        archived_by,
+                        selected_estimate_id,
+                    ))
+                    st.success(f"{estimate_label} archived successfully.")
+                    st.session_state.pop("estimate_select", None)
+                    refresh()
+
+        st.divider()
+        st.error("Permanent deletion cannot be undone. It removes the estimate and every linked line item.")
+        delete_text = st.text_input(
+            "Type DELETE to permanently remove this estimate",
+            key=f"delete_estimate_text_{selected_estimate_id}",
+        )
+        delete_confirmed = st.checkbox(
+            "I understand this estimate and its line items will be permanently deleted",
+            key=f"delete_estimate_checkbox_{selected_estimate_id}",
+        )
+        if st.button("Delete Estimate Permanently", key=f"delete_estimate_permanently_{selected_estimate_id}"):
+            if str(delete_text or "").strip().upper() != "DELETE":
+                st.error("Type DELETE exactly before permanently deleting the estimate.")
+            elif not delete_confirmed:
+                st.error("Tick the permanent deletion confirmation box first.")
+            else:
+                permanently_delete_estimate_working_sheet(selected_estimate_id)
+                st.session_state.pop("estimate_select", None)
+                st.success(f"{estimate_label} deleted permanently.")
+                refresh()
+
+
 def estimate_working_sheet_page():
     st.header("Estimate Working Sheet")
     st.caption("Build a working estimate and link it directly to the job it relates to.")
@@ -4440,15 +4531,28 @@ def estimate_working_sheet_page():
     if not job_details.empty:
         st.dataframe(job_details, width="stretch", hide_index=True)
 
-    estimates = df_query("""
-        SELECT id, estimate_no, revision, estimate_date, status, total_ex_gst, total_inc_gst
+    show_archived_estimates = st.checkbox(
+        "Show archived estimate working sheets",
+        value=False,
+        key=f"show_archived_estimates_{selected_job_id}",
+    )
+    archived_estimate_filter = "" if show_archived_estimates else "AND COALESCE(archived, 0) = 0"
+
+    estimates = df_query(f"""
+        SELECT id, estimate_no, revision, estimate_date, status,
+               total_ex_gst, total_inc_gst, COALESCE(archived, 0) AS archived
         FROM estimate_working_sheets
         WHERE job_id = ?
+        {archived_estimate_filter}
         ORDER BY id DESC
     """, (selected_job_id,))
 
     with st.expander("Create New Estimate Working Sheet", expanded=estimates.empty):
-        next_rev = len(estimates) + 1
+        estimate_count_df = df_query(
+            "SELECT COUNT(*) AS total FROM estimate_working_sheets WHERE job_id = ?",
+            (selected_job_id,),
+        )
+        next_rev = int(estimate_count_df.iloc[0]["total"] or 0) + 1 if not estimate_count_df.empty else 1
         default_job_no = "EST"
         if not job_details.empty:
             default_job_no = str(job_details.iloc[0]["Job No"])
@@ -4472,10 +4576,12 @@ def estimate_working_sheet_page():
                 st.success("Estimate working sheet created.")
                 refresh()
 
-    estimates = df_query("""
-        SELECT id, estimate_no, revision, estimate_date, status, total_ex_gst, total_inc_gst
+    estimates = df_query(f"""
+        SELECT id, estimate_no, revision, estimate_date, status,
+               total_ex_gst, total_inc_gst, COALESCE(archived, 0) AS archived
         FROM estimate_working_sheets
         WHERE job_id = ?
+        {archived_estimate_filter}
         ORDER BY id DESC
     """, (selected_job_id,))
 
@@ -4484,7 +4590,11 @@ def estimate_working_sheet_page():
         return
 
     estimate_options = {
-        f"{row['estimate_no']} - {row['revision']} - {row['status']} - ${float(row['total_inc_gst'] or 0):,.2f} inc GST": int(row["id"])
+        (
+            f"{row['estimate_no']} - {row['revision']} - {row['status']} - "
+            f"${float(row['total_inc_gst'] or 0):,.2f} inc GST"
+            f"{' - ARCHIVED' if int(row.get('archived') or 0) == 1 else ''}"
+        ): int(row["id"])
         for _, row in estimates.iterrows()
     }
     selected_estimate_label = st.selectbox("Select Estimate Working Sheet", list(estimate_options.keys()), key="estimate_select")
@@ -4495,6 +4605,8 @@ def estimate_working_sheet_page():
         st.warning("Selected estimate could not be found.")
         return
     current = current.iloc[0]
+
+    render_estimate_archive_delete_controls(selected_estimate_id, current)
 
     tab_summary, tab_lines, tab_view = st.tabs(["Summary / Pricing", "Line Items", "View / Export"])
 
