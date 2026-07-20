@@ -20,6 +20,8 @@ from psycopg2.pool import ThreadedConnectionPool
 from pypdf import PdfReader, PdfWriter
 from pypdf.generic import BooleanObject, NameObject, DictionaryObject
 import streamlit as st
+from pb_jobhub_visual_scheduler import render_jobhub_staff_scheduler
+# PB_FULL_VISUAL_STAFF_SCHEDULER_V1
 
 
 # =============================
@@ -8875,6 +8877,7 @@ elif role == "manager":
         "Job Costs / Forecasting": "Job Costs / Forecasting",
     }
     site_operations_menu_map = {
+        "Staff Scheduler": "Staff Scheduler",
         "Material Costs": "Material Costs",
         "Wages": "Wages",
         "Timesheets": "Timesheets",
@@ -8909,6 +8912,7 @@ else:
         "Job Costs / Forecasting": "Job Costs / Forecasting",
     }
     site_operations_menu_map = {
+        "Staff Scheduler": "Staff Scheduler",
         "Material Costs": "Material Costs",
         "Wages": "Wages",
         "Timesheets": "Timesheets",
@@ -9980,6 +9984,10 @@ elif menu == "Products":
 # =============================
 # MATERIAL COSTS
 # =============================
+elif menu == "Staff Scheduler":
+    render_jobhub_staff_scheduler(get_current_user() or {})
+
+
 elif menu == "Material Costs":
     st.header("Material Costs")
     st.caption("Use saved products from the database, or add one-off materials that are not added to the master product list.")
