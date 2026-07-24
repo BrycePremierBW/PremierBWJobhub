@@ -1,11 +1,28 @@
 services:
   - type: web
-    name: premier-brushworks-jobhub
+    name: PremierBWJobhub
     runtime: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: streamlit run pb_jobhub_app.py --server.address 0.0.0.0 --server.port $PORT
+    region: singapore
+    plan: starter
+    buildCommand: pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
+    startCommand: streamlit run pb_jobhub_app.py --server.port=$PORT --server.address=0.0.0.0 --server.headless=true
+    healthCheckPath: /_stcore/health
+    disk:
+      name: jobhub-data
+      mountPath: /var/data
+      sizeGB: 1
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.4
+      - key: DATA_DIR
+        value: /var/data
       - key: DATABASE_URL
         sync: false
+      - key: AI_PROVIDER
+        value: none
+      - key: JOBHUB_ALLOW_EXTERNAL_AI
+        value: "false"
+      - key: JOBHUB_AI_INCLUDE_PERSONAL_DATA
+        value: "false"
+      - key: JOBHUB_ENABLE_SELF_EDIT
+        value: "false"

@@ -1,15 +1,17 @@
 import sqlite3
 import os
 import tempfile
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 import shutil
 import base64
 import hashlib
+import hmac
 import html
 import re
 import json
+import py_compile
 from pathlib import Path
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from io import BytesIO
 
 import pandas as pd
@@ -18,10 +20,27 @@ import requests
 import psycopg2
 from psycopg2.pool import ThreadedConnectionPool
 from pypdf import PdfReader, PdfWriter
-from pypdf.generic import BooleanObject, NameObject, DictionaryObject
 import streamlit as st
 from pb_jobhub_visual_scheduler import render_jobhub_staff_scheduler
+from jobhub_core import (
+    calculate_estimate_pricing,
+    calculate_shift_hours,
+    hash_password as secure_hash_password,
+    is_known_default_password_hash,
+    next_scoped_number,
+    password_needs_rehash,
+    password_strength_errors,
+    validate_public_http_url,
+    verify_password,
+)
 # PB_FULL_VISUAL_STAFF_SCHEDULER_V1
+
+MAX_PHOTO_UPLOAD_BYTES = 15 * 1024 * 1024
+MAX_PDF_UPLOAD_BYTES = 25 * 1024 * 1024
+MAX_CSV_UPLOAD_BYTES = 5 * 1024 * 1024
+MAX_CSV_IMPORT_ROWS = 10_000
+MAX_IMAGE_PIXELS = 25_000_000
+Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 
 
 # =============================
@@ -49,6 +68,11 @@ PAINT_ORDER_TEMPLATE_PDF = os.path.join(
     "PB Paint and Materials Order Form fillable.pdf"
 )
 
+DAY_LABOUR_TEMPLATE_PDF = os.path.join(
+    TEMPLATE_DIR,
+    "Day_Labour_Sheet_FILLABLE.pdf"
+)
+
 VARIATION_TEMPLATE_PDF = os.path.join(
     TEMPLATE_DIR,
     "PB Variation Form fillable.pdf"
@@ -60,10 +84,21 @@ os.makedirs(PHOTOS_DIR, exist_ok=True)
 os.makedirs(EXPORTS_DIR, exist_ok=True)
 
 
+def safe_job_storage_segment(job_number):
+    segment = re.sub(r"[^A-Za-z0-9._ -]", "_", str(job_number or "").strip())
+    segment = segment.strip(" .")
+    if not segment or segment in {".", ".."}:
+        raise ValueError("Job number cannot be used as a storage folder.")
+    return segment[:100]
+
+
 def get_job_folder(job_number):
-    folder = os.path.join(JOB_FILES_DIR, str(job_number))
-    os.makedirs(folder, exist_ok=True)
-    return folder
+    root = Path(JOB_FILES_DIR).resolve()
+    folder = (root / safe_job_storage_segment(job_number)).resolve()
+    if root not in folder.parents:
+        raise ValueError("Unsafe job storage path.")
+    folder.mkdir(parents=True, exist_ok=True)
+    return str(folder)
 
 
 st.set_page_config(
@@ -563,8 +598,10 @@ def set_app_setting(key, value):
     try:
         cur = conn.cursor()
         cur.execute("""
-            INSERT OR REPLACE INTO app_settings (setting_key, setting_value)
+            INSERT INTO app_settings (setting_key, setting_value)
             VALUES (?, ?)
+            ON CONFLICT(setting_key) DO UPDATE SET
+                setting_value = excluded.setting_value
         """, (key, value))
         conn.commit()
     except Exception:
@@ -738,9 +775,13 @@ def connect():
         raw_conn = pool.getconn()
         return PostgresConnectionAdapter(raw_conn, pool)
 
-    return sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 30000")
+    return conn
 
 
+@st.cache_resource
 def init_db():
     conn = connect()
     cur = conn.cursor()
@@ -1026,7 +1067,7 @@ def init_db():
         FOREIGN KEY(job_id) REFERENCES jobs(id)
     )
     """)
-   
+
     cur.execute("""
     CREATE TABLE IF NOT EXISTS job_documents (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1037,7 +1078,7 @@ def init_db():
         created_at TEXT,
         notes TEXT,
         FOREIGN KEY(job_id) REFERENCES jobs(id)
-   
+
     )
     """)
     cur.execute("""
@@ -1172,6 +1213,305 @@ def init_db():
     conn.close()
 
 
+def _migration_ensure_column(cur, table, column, definition):
+    """Add a column without relying on runtime string-patch installers."""
+    if USE_POSTGRES:
+        cur.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {definition}")
+        return
+    cur.execute(f"PRAGMA table_info({table})")
+    if column not in {str(row[1]) for row in cur.fetchall()}:
+        cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def _migration_has_duplicates(cur, table, columns, where_clause=""):
+    grouped = ", ".join(columns)
+    cur.execute(
+        f"""
+        SELECT 1
+        FROM {table}
+        {where_clause}
+        GROUP BY {grouped}
+        HAVING COUNT(*) > 1
+        LIMIT 1
+        """
+    )
+    return cur.fetchone() is not None
+
+
+@st.cache_resource
+def apply_schema_migrations():
+    """Apply versioned, restart-safe schema upgrades once per app process."""
+    conn = connect()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                migration_id TEXT PRIMARY KEY,
+                applied_at TEXT NOT NULL
+            )
+        """)
+        cur.execute("SELECT migration_id FROM schema_migrations")
+        applied = {str(row[0]) for row in cur.fetchall()}
+
+        migration_id = "20260724_security_integrity_v1"
+        if migration_id not in applied:
+            for column, definition in [
+                ("failed_login_count", "INTEGER DEFAULT 0"),
+                ("locked_until", "TEXT"),
+                ("must_change_password", "INTEGER DEFAULT 0"),
+                ("password_changed_at", "TEXT"),
+                ("last_login_at", "TEXT"),
+            ]:
+                _migration_ensure_column(cur, "app_users", column, definition)
+
+            for column, definition in [
+                ("approved_by", "TEXT"),
+                ("approved_at", "TEXT"),
+            ]:
+                _migration_ensure_column(cur, "timesheet_entries", column, definition)
+
+            for column, definition in [
+                ("timesheet_id", "INTEGER"),
+                ("hourly_rate_snapshot", "REAL DEFAULT 0"),
+                ("source", "TEXT DEFAULT 'Manual'"),
+            ]:
+                _migration_ensure_column(cur, "wage_entries", column, definition)
+
+            _migration_ensure_column(
+                cur,
+                "estimate_working_sheets",
+                "pricing_method",
+                "TEXT DEFAULT 'Markup'",
+            )
+            _migration_ensure_column(cur, "jobs", "row_version", "INTEGER DEFAULT 1")
+            _migration_ensure_column(cur, "jobs", "archived_at", "TEXT")
+            _migration_ensure_column(cur, "jobs", "archived_by", "TEXT")
+            _migration_ensure_column(cur, "builders_clients", "normalised_name", "TEXT")
+            _migration_ensure_column(cur, "job_documents", "storage_key", "TEXT")
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS audit_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    username TEXT,
+                    action TEXT NOT NULL,
+                    entity_type TEXT NOT NULL,
+                    entity_id TEXT,
+                    details TEXT,
+                    created_at TEXT NOT NULL
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS login_audit_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username TEXT,
+                    success INTEGER DEFAULT 0,
+                    reason TEXT,
+                    created_at TEXT NOT NULL
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS job_employee_access (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id INTEGER NOT NULL,
+                    employee_id INTEGER NOT NULL,
+                    access_role TEXT DEFAULT 'Assigned',
+                    granted_by TEXT,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(job_id, employee_id),
+                    FOREIGN KEY(job_id) REFERENCES jobs(id),
+                    FOREIGN KEY(employee_id) REFERENCES employees(id)
+                )
+            """)
+
+            # Reconcile only unambiguous wage rows created by the legacy
+            # "post wages on timesheet submission" behaviour. Ambiguous matches
+            # are deliberately left untouched for administrator review.
+            legacy_linked = 0
+            legacy_reversed = 0
+            legacy_ambiguous = 0
+            cur.execute("""
+                SELECT t.id, t.job_id, t.employee_id, t.work_date, t.total_hours,
+                       COALESCE(t.status, 'Submitted'),
+                       COALESCE(NULLIF(e.rate_plus_10, 0), e.base_hourly_rate, 0)
+                FROM timesheet_entries t
+                LEFT JOIN employees e ON e.id = t.employee_id
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM wage_entries w WHERE w.timesheet_id = t.id
+                )
+                ORDER BY t.id
+            """)
+            legacy_timesheets = cur.fetchall()
+            for (
+                timesheet_id,
+                job_id,
+                employee_id,
+                work_date,
+                total_hours,
+                timesheet_status,
+                hourly_rate,
+            ) in legacy_timesheets:
+                cur.execute("""
+                    SELECT id
+                    FROM wage_entries
+                    WHERE timesheet_id IS NULL
+                      AND job_id = ?
+                      AND employee_id = ?
+                      AND COALESCE(work_date, '') = COALESCE(?, '')
+                      AND ABS(COALESCE(hours, 0) - COALESCE(?, 0)) < 0.0001
+                      AND notes LIKE 'Timesheet:%'
+                    ORDER BY id
+                """, (job_id, employee_id, work_date, total_hours))
+                matching_wages = [int(row[0]) for row in cur.fetchall()]
+                if len(matching_wages) != 1:
+                    if matching_wages:
+                        legacy_ambiguous += 1
+                    continue
+                wage_id = matching_wages[0]
+                normalised_status = str(timesheet_status or "Submitted")
+                if normalised_status == "Processed":
+                    normalised_status = "Paid"
+                    cur.execute(
+                        "UPDATE timesheet_entries SET status = 'Paid' WHERE id = ?",
+                        (timesheet_id,),
+                    )
+                if normalised_status in {"Approved", "Paid"}:
+                    cur.execute("""
+                        UPDATE wage_entries
+                        SET timesheet_id = ?, hourly_rate_snapshot = ?,
+                            source = 'Legacy Timesheet'
+                        WHERE id = ?
+                    """, (timesheet_id, float(hourly_rate or 0), wage_id))
+                    legacy_linked += 1
+                else:
+                    cur.execute("DELETE FROM wage_entries WHERE id = ?", (wage_id,))
+                    legacy_reversed += 1
+
+            if legacy_linked or legacy_reversed or legacy_ambiguous:
+                cur.execute("""
+                    INSERT INTO audit_events
+                        (user_id, username, action, entity_type, entity_id, details, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    None,
+                    "system",
+                    "legacy_timesheet_wages_reconciled",
+                    "migration",
+                    migration_id,
+                    json.dumps({
+                        "linked": legacy_linked,
+                        "reversed_unapproved": legacy_reversed,
+                        "ambiguous_for_review": legacy_ambiguous,
+                    }, sort_keys=True),
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                ))
+
+            cur.execute(
+                "UPDATE builders_clients SET normalised_name = LOWER(TRIM(name)) "
+                "WHERE COALESCE(normalised_name, '') = ''"
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_builders_clients_normalised_name "
+                "ON builders_clients(normalised_name)"
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_audit_events_entity "
+                "ON audit_events(entity_type, entity_id, created_at)"
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_login_audit_username_created "
+                "ON login_audit_events(username, created_at)"
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_job_employee_access_employee "
+                "ON job_employee_access(employee_id, job_id)"
+            )
+            if not _migration_has_duplicates(
+                cur,
+                "app_users",
+                ["LOWER(TRIM(username))"],
+            ):
+                cur.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_app_users_username_ci_unique "
+                    "ON app_users(LOWER(TRIM(username)))"
+                )
+            if not _migration_has_duplicates(
+                cur,
+                "app_users",
+                ["employee_id"],
+                "WHERE employee_id IS NOT NULL",
+            ):
+                cur.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_app_users_employee_unique "
+                    "ON app_users(employee_id) WHERE employee_id IS NOT NULL"
+                )
+            if not _migration_has_duplicates(
+                cur,
+                "builders_clients",
+                ["normalised_name"],
+                "WHERE COALESCE(normalised_name, '') <> ''",
+            ):
+                cur.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_builders_clients_name_ci_unique "
+                    "ON builders_clients(normalised_name) "
+                    "WHERE COALESCE(normalised_name, '') <> ''"
+                )
+            for index_name, table_name, columns in [
+                ("idx_timesheet_entries_job", "timesheet_entries", "job_id, work_date"),
+                ("idx_wage_entries_job", "wage_entries", "job_id, work_date"),
+                ("idx_material_entries_job", "material_entries", "job_id"),
+                ("idx_imported_material_entries_job", "imported_material_entries", "job_id"),
+                ("idx_equipment_records_job", "equipment_checklist_records", "job_id"),
+                ("idx_job_photos_job", "job_photos", "job_id, uploaded_at"),
+                ("idx_job_documents_job", "job_documents", "job_id, created_at"),
+                ("idx_job_variations_job", "job_variations", "job_id"),
+                ("idx_invoice_claims_job", "invoice_claims", "job_id"),
+                ("idx_staff_schedule_job_date", "staff_schedule", "job_id, schedule_date"),
+                ("idx_staff_schedule_employee_date", "staff_schedule", "employee_id, schedule_date"),
+            ]:
+                cur.execute(
+                    f"CREATE INDEX IF NOT EXISTS {index_name} "
+                    f"ON {table_name}({columns})"
+                )
+
+            if not _migration_has_duplicates(
+                cur,
+                "wage_entries",
+                ["timesheet_id"],
+                "WHERE timesheet_id IS NOT NULL",
+            ):
+                cur.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_wage_entries_timesheet_unique "
+                    "ON wage_entries(timesheet_id)"
+                )
+            if not _migration_has_duplicates(cur, "job_variations", ["job_id", "variation_no"]):
+                cur.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_job_variations_number_unique "
+                    "ON job_variations(job_id, variation_no)"
+                )
+            if not _migration_has_duplicates(cur, "invoice_claims", ["job_id", "claim_no"]):
+                cur.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_invoice_claims_number_unique "
+                    "ON invoice_claims(job_id, claim_no)"
+                )
+
+            cur.execute(
+                "INSERT INTO schema_migrations (migration_id, applied_at) VALUES (?, ?)",
+                (migration_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+            )
+
+        conn.commit()
+        return True
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+
+
 def df_query(sql, params=()):
     """
     Query helper.
@@ -1184,6 +1524,12 @@ def df_query(sql, params=()):
         rows = cur.fetchall()
         columns = [desc[0] for desc in cur.description] if cur.description else []
         return pd.DataFrame(rows, columns=columns)
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
     finally:
         conn.close()
 
@@ -1202,6 +1548,47 @@ def execute(sql, params=()):
         raise
     finally:
         conn.close()
+
+
+def execute_with_rowcount(sql, params=()):
+    """Execute a write and return the number of affected rows."""
+    conn = connect()
+    try:
+        cur = conn.cursor()
+        cur.execute(sql, params)
+        rowcount = int(cur.rowcount or 0)
+        conn.commit()
+        return rowcount
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+
+
+def record_audit_event(action, entity_type, entity_id="", details=None):
+    """Best-effort application audit for sensitive and destructive actions."""
+    try:
+        user = st.session_state.get("user") or {}
+        execute("""
+            INSERT INTO audit_events
+            (user_id, username, action, entity_type, entity_id, details, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (
+            user.get("id"),
+            str(user.get("username") or ""),
+            str(action or ""),
+            str(entity_type or ""),
+            str(entity_id or ""),
+            json.dumps(details or {}, default=str, sort_keys=True),
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        ))
+    except Exception:
+        # Auditing must not hide the original user action or error.
+        pass
 
 
 
@@ -1297,9 +1684,12 @@ def merge_builder_client_records(primary_id, duplicate_ids, final_values):
     conn = connect()
     try:
         cur = conn.cursor()
+        if not USE_POSTGRES:
+            cur.execute("BEGIN IMMEDIATE")
 
         cur.execute(
-            f"SELECT id, name FROM builders_clients WHERE id IN ({placeholders})",
+            f"SELECT id, name FROM builders_clients WHERE id IN ({placeholders})"
+            + (" FOR UPDATE" if USE_POSTGRES else ""),
             tuple(selected_ids),
         )
         found = {int(row[0]): clean_contact_merge_value(row[1]) for row in cur.fetchall()}
@@ -1335,14 +1725,15 @@ def merge_builder_client_records(primary_id, duplicate_ids, final_values):
             """
             UPDATE builders_clients
             SET type = ?, name = ?, contact_name = ?, phone = ?, email = ?,
-                address = ?, qbcc = ?, abn = ?, terms = ?, notes = ?
+                address = ?, qbcc = ?, abn = ?, terms = ?, notes = ?,
+                normalised_name = LOWER(TRIM(?))
             WHERE id = ?
             """,
             (
                 values["type"], values["name"], values["contact_name"],
                 values["phone"], values["email"], values["address"],
                 values["qbcc"], values["abn"], values["terms"],
-                values["notes"], primary_id,
+                values["notes"], values["name"], primary_id,
             ),
         )
 
@@ -1356,12 +1747,14 @@ def merge_builder_client_records(primary_id, duplicate_ids, final_values):
         )
 
         conn.commit()
-        return {
+        result = {
             "primary_id": primary_id,
             "primary_name": values["name"],
             "duplicates_removed": len(duplicate_ids),
             "jobs_moved": moved_job_count,
         }
+        record_audit_event("contacts_merged", "builder_client", primary_id, result)
+        return result
     except Exception:
         try:
             conn.rollback()
@@ -1412,6 +1805,31 @@ def get_job_options():
     return {str(row["label"]): int(row["id"]) for _, row in df.iterrows()}
 
 
+def get_employee_job_options(employee_id):
+    """Return only jobs the employee leads, is scheduled on, or was granted."""
+    if not employee_id:
+        return {}
+    df = df_query("""
+        SELECT DISTINCT j.id,
+               j.job_no || ' - ' || COALESCE(j.job_name, '') AS label
+        FROM jobs j
+        JOIN employees e ON e.id = ?
+        LEFT JOIN staff_schedule s
+               ON s.job_id = j.id AND s.employee_id = e.id
+        LEFT JOIN job_employee_access a
+               ON a.job_id = j.id AND a.employee_id = e.id
+        WHERE (
+            s.employee_id IS NOT NULL
+            OR a.employee_id IS NOT NULL
+            OR LOWER(TRIM(COALESCE(j.leading_hand, ''))) = LOWER(TRIM(e.name))
+        )
+          AND COALESCE(j.archived_at, '') = ''
+          AND COALESCE(j.status, '') <> 'Archived'
+        ORDER BY j.job_no
+    """, (int(employee_id),))
+    return {str(row["label"]): int(row["id"]) for _, row in df.iterrows()}
+
+
 def get_product_options():
     df = df_query("SELECT id, product_code FROM products ORDER BY product_code")
     return {str(row["product_code"]): int(row["id"]) for _, row in df.iterrows()}
@@ -1450,198 +1868,10 @@ def has_related_records(table, field, record_id):
 # STARTER DATA
 # =============================
 def seed_data():
-    conn = connect()
-    cur = conn.cursor()
+    """Do not seed real customers, staff, jobs or payroll data from source code."""
+    if not starter_data_already_seeded():
+        set_app_setting("starter_data_seeded", "yes")
 
-    # Seed starter/demo data only once.
-    # This prevents deleted starter jobs, builders, employees, products, or equipment items
-    # from reappearing every time the app starts.
-    if starter_data_already_seeded():
-        conn.close()
-        return
-
-
-    builders = [
-        ("Builder","Ausmar Homes Pty Ltd","Compliance Team","07 5319 1500","compliance@ausmargroup.com.au","8 Flinders Lane, Maroochydore QLD 4558","1083000","55 087 236 208","30 Days","Annual Period Trade Contract"),
-        ("Developer / Builder","OneLife Property Group","Bryce Curran","0421 069 817","brycecurran@hotmail.com","Sunshine Coast","","","30 Days","Multi-residential complexes"),
-        ("Builder","Thompson Homes","","","","","","","30 Days","Existing JobHub builder"),
-        ("Client / Developer","Palm Lakes","","","","Pelican Waters","","","30 Days","Palm Lakes Pelican Waters"),
-        ("Interior Designer","Box Clever Interiors","Design Team","07 5309 5640","info@boxcleverinteriors.com.au","PO Box 208, Moffat Beach QLD 4551","","08 007 428 613","","Bannister project designer"),
-        ("Interior Designer","Inka Interiors","Sheena Hanks","0438 308 672","info@inkainteriors.com.au","Basement Level, 811 Stanley St, Woolloongabba","","","","Cunningham project designer"),
-        ("Painting Contractor","Emerald Painting Company Pty Ltd","Anthony Des Johnston","0410 949 719","des@emeraldpainting.com.au","20 Warenna Crescent, Glenvale QLD 4350","","85 169 333 957","","Industry contact"),
-        ("Supplier","Dulux Australia","","07 5443 7255","","Cnr Amaroo St & Maroochydore Rd, Maroochydore QLD 4558","","67 000 049 427","","Supplier"),
-        ("Builder","Greenrock Building","","","","","","","30 Days","Client history"),
-        ("Builder","Rejuvenate Group","","","","","","","30 Days","School works"),
-        ("Builder","Adlar Homes","","","","Maroochydore","","","30 Days","Client history"),
-        ("Builder","Darren Hunt Homes","","","","","","","30 Days","Custom homes"),
-        ("Builder","Watherston Building","","","","","","","30 Days","Custom homes"),
-        ("Commercial Client","Stockland Aura","","","","Aura","","","","Commercial developments"),
-        ("Commercial Builder","FDC Constructions","Simon Hawkins / Adam Pickering","","","","","","","Outreach"),
-        ("Commercial Client","Comiskey Group","Paul / David / Rob & team","","","Sunshine Coast","","","","Hospitality venue"),
-        ("Education Client","Nambour State College","","","","Nambour","","","","School works"),
-        ("Education Client","Currimundi State School","","","","Currimundi","","","","School works"),
-        ("Education Client","Currimundi Special School","","","","Currimindi","","","","School works"),
-        ("Education Client","Gympie South State School","","","","Gympie","","","","School works"),
-        ("Education Client","Good Shepherd Lutheran School","","","","","","","","School works"),
-    ]
-
-    builders = [tuple(list(row) + [""] * (10 - len(row)))[:10] for row in builders]
-
-    builders = normalise_seed_rows(builders, 10)
-
-    cur.executemany("""
-        INSERT OR IGNORE INTO builders_clients
-        (type, name, contact_name, phone, email, address, qbcc, abn, terms, notes)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, builders)
-
-    products = [
-        ("PB-H00001","Coverplus Interior L/S White","Haymes","",168.00,""),
-        ("PB-H00002","Elite Ceiling Toned White, 15L","Haymes","15L",90.00,""),
-        ("PB-H00003","Elite Ceiling White, 15L","Haymes","15L",90.00,""),
-        ("PB-H00004","Elite Interior Low Sheen White","Haymes","",118.00,""),
-        ("PB-H00005","Elite Interior Matt White, 15L","Haymes","15L",125.00,""),
-        ("PB-H00006","Elite Acrylic Sealer Undercoat","Haymes","",105.36,""),
-        ("PB-H00007","Elite Quick Dry Primer Undercoat","Haymes","",123.55,""),
-        ("PB-H00008","Expressions Low Sheen DKT, 4L","Haymes","4L",74.13,""),
-        ("PB-H00009","Expressions Low Sheen EDT, 4L","Haymes","4L",74.13,""),
-        ("PB-H00010","Expressions Low Sheen UDT, 4L","Haymes","4L",74.13,""),
-        ("PB-H00011","Expressions Low Sheen White","Haymes","",107.48,""),
-        ("PB-H00012","Expressions Low Sheen White","Haymes","",145.00,""),
-        ("PB-H00013","Expressions Low Sheen White, 4L","Haymes","4L",67.26,""),
-        ("PB-H00014","Solashield Low Sheen DKT, 10L","Haymes","10L",115.00,""),
-        ("PB-H00015","Solashield Low Sheen DKT, 15L","Haymes","15L",160.00,""),
-        ("PB-H00016","Solashield Low Sheen DKT, 4L","Haymes","4L",73.55,""),
-        ("PB-H00017","Solashield Low Sheen EDT, 10L","Haymes","10L",115.00,""),
-        ("PB-H00018","Solashield Low Sheen EDT, 15L","Haymes","15L",160.00,""),
-        ("PB-H00019","Solashield Low Sheen EDT, 4L","Haymes","4L",73.55,""),
-        ("PB-H00020","Solashield Low Sheen UDT, 10L","Haymes","10L",115.00,""),
-        ("PB-H00021","Solashield Low Sheen UDT, 15L","Haymes","15L",160.00,""),
-        ("PB-H00022","Solashield Low Sheen UDT, 4L","Haymes","4L",73.55,""),
-        ("PB-H00023","Solashield Low Sheen White, 10L","Haymes","10L",107.42,""),
-        ("PB-H00024","Solashield Low Sheen White, 15L","Haymes","15L",148.00,""),
-        ("PB-H00025","Solashield Low Sheen White, 4L","Haymes","4L",67.40,""),
-        ("PB-H00026","R/Tex Roll On Coarse, 15L","Haymes","15L",175.00,""),
-        ("PB-H00027","Solashield Satin DKT, 15L","Haymes","15L",160.00,""),
-        ("PB-H00028","Solashield Satin EDT, 15L","Haymes","15L",160.00,""),
-        ("PB-H00029","Solashield Satin UDT, 15L","Haymes","15L",160.00,""),
-        ("PB-H00030","Solashield Satin White, 10L","Haymes","10L",115.00,""),
-        ("PB-H00031","Solashield Satin White, 15L","Haymes","15L",148.00,""),
-        ("PB-H00032","Ultra Premium Primer Sealer","Haymes","",167.46,""),
-        ("PB-H00033","Acrylic Sealer Undercoat","Haymes","",120.00,""),
-        ("PB-H00034","Ultratrim High Gloss White","Haymes","",130.00,""),
-        ("PB-H00035","Ultratrim Semi Gloss White","Haymes","",130.00,""),
-        ("PB-H00036","Woodcare Aqualac Floor Satin","Haymes","",250.44,""),
-    ]
-
-    products = normalise_seed_rows(products, 6)
-
-    cur.executemany("""
-        INSERT OR IGNORE INTO products
-        (product_code, product_name, supplier, unit, price_ex_gst, notes)
-        VALUES (?, ?, ?, ?, ?, ?)
-    """, products)
-
-    employees = [
-        ("Bryce","", "",60.00,66.00,"Active",""),
-        ("Brodrick","", "",45.00,49.50,"Active",""),
-        ("Sol","", "",50.00,55.00,"Active",""),
-        ("Critter","", "",40.00,44.00,"Active",""),
-        ("Greg","", "",46.00,50.60,"Active",""),
-        ("Chris Nagy","", "",50.00,55.00,"Active",""),
-        ("Isaac","", "",46.00,50.60,"Active",""),
-        ("Rob Pullin","", "",45.00,49.50,"Active",""),
-        ("Ian","", "",46.00,50.60,"Active",""),
-        ("Tim","", "",45.00,49.50,"Active",""),
-        ("Anth","", "",35.00,38.50,"Active",""),
-        ("River","", "",32.50,35.75,"Active",""),
-        ("Dipper","", "",45.00,49.50,"Active",""),
-        ("Vlad 1","", "",45.00,49.50,"Active",""),
-        ("Vlad 2","", "",45.00,49.50,"Active",""),
-        ("Ryan","", "",45.00,49.50,"Active",""),
-    ]
-
-    cur.executemany("""
-        INSERT OR IGNORE INTO employees
-        (name, role, phone, base_hourly_rate, rate_plus_10, status, notes)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    """, employees)
-
-    equipment_items = [
-        ("Access", "Extension ladders", 0, ""),
-        ("Access", "Platform ladders", 0, ""),
-        ("Access", "Step ladders 6ft", 0, ""),
-        ("Access", "Step ladders 4ft", 0, ""),
-        ("Access", "Trestles", 0, ""),
-        ("Access", "Planks", 0, ""),
-        ("Access", "Scaffold / mobile scaffold", 0, ""),
-        ("Access", "Harness / height safety gear", 0, ""),
-        ("Spray Equipment", "Graco airless sprayer", 0, ""),
-        ("Spray Equipment", "Titan sprayer", 0, ""),
-        ("Spray Equipment", "Spray gun", 0, ""),
-        ("Spray Equipment", "Spray tips", 0, ""),
-        ("Spray Equipment", "Tip guards", 0, ""),
-        ("Spray Equipment", "Spray hose", 0, ""),
-        ("Spray Equipment", "Whip hose", 0, ""),
-        ("Sanding / Prep", "Mirka drywall sander", 0, ""),
-        ("Sanding / Prep", "Mirka orbital sander", 0, ""),
-        ("Sanding / Prep", "Dust extractor / vacuum", 0, ""),
-        ("Sanding / Prep", "Hand sanders", 0, ""),
-        ("Sanding / Prep", "Filler blades", 0, ""),
-        ("Sanding / Prep", "Scrapers", 0, ""),
-        ("Sanding / Prep", "Caulking guns", 0, ""),
-        ("Painting Gear", "Brushes", 0, ""),
-        ("Painting Gear", "Roller frames", 0, ""),
-        ("Painting Gear", "Roller poles", 0, ""),
-        ("Painting Gear", "Roller trays / buckets", 0, ""),
-        ("Painting Gear", "Cut pots", 0, ""),
-        ("Painting Gear", "Grids", 0, ""),
-        ("Protection", "Canvas drop sheets", 0, ""),
-        ("Protection", "Plastic drop sheets", 0, ""),
-        ("Protection", "Masking machine", 0, ""),
-        ("Protection", "Masking tape", 0, ""),
-        ("Protection", "Masking paper", 0, ""),
-        ("Protection", "Masking plastic", 0, ""),
-        ("Power / Site Gear", "Extension leads", 0, ""),
-        ("Power / Site Gear", "RCD safety switch", 0, ""),
-        ("Power / Site Gear", "Battery chargers", 0, ""),
-        ("Power / Site Gear", "Work lights", 0, ""),
-        ("Power / Site Gear", "Fans", 0, ""),
-        ("Power / Site Gear", "Cordless drill / driver", 0, ""),
-        ("Wash Down", "Petrol pressure cleaner", 0, ""),
-        ("Wash Down", "Hoses", 0, ""),
-        ("Wash Down", "Wash brushes", 0, ""),
-        ("Safety", "Safety glasses", 0, ""),
-        ("Safety", "Respirators / P2 masks", 0, ""),
-        ("Safety", "Gloves", 0, ""),
-        ("Safety", "Hi-vis", 0, ""),
-        ("Safety", "Barricades / exclusion zone gear", 0, ""),
-        ("Safety", "First aid kit", 0, ""),
-        ("Other", "Bins / rubbish bags", 0, ""),
-        ("Other", "Cleaning gear", 0, ""),
-    ]
-
-    cur.executemany("""
-        INSERT OR IGNORE INTO equipment_checklist_items
-        (category, item_name, default_qty, notes)
-        VALUES (?, ?, ?, ?)
-    """, equipment_items)
-
-    # Keep checklist starting quantities at zero by default, even for existing databases
-    cur.execute("UPDATE equipment_checklist_items SET default_qty = 0 WHERE default_qty IS NULL OR default_qty != 0")
-
-    # Starter/demo jobs are intentionally NOT auto-created.
-    # This keeps the Job Register at 0 when all jobs are deleted.
-    # Add real jobs manually from Jobs > Add Job.
-
-
-    cur.execute("""
-        INSERT OR REPLACE INTO app_settings (setting_key, setting_value)
-        VALUES (?, ?)
-    """, ("starter_data_seeded", "yes"))
-
-    conn.commit()
-    conn.close()
 
 
 
@@ -1768,8 +1998,27 @@ def is_pdf_tick(value):
     return bool(text and text not in ["off", "false", "0", "no"])
 
 
+def uploaded_file_size(uploaded_file):
+    size = getattr(uploaded_file, "size", None)
+    if size is not None:
+        return int(size)
+    try:
+        return int(uploaded_file.getbuffer().nbytes)
+    except Exception:
+        current_position = uploaded_file.tell()
+        uploaded_file.seek(0, os.SEEK_END)
+        size = uploaded_file.tell()
+        uploaded_file.seek(current_position)
+        return int(size)
+
+
 def parse_master_checklist_pdf(uploaded_file):
+    if uploaded_file_size(uploaded_file) > MAX_PDF_UPLOAD_BYTES:
+        raise ValueError("PDF is larger than the 25 MB upload limit.")
+    uploaded_file.seek(0)
     reader = PdfReader(uploaded_file)
+    if reader.is_encrypted:
+        raise ValueError("Encrypted PDFs cannot be imported.")
     fields = reader.get_fields() or {}
 
     job_info = {
@@ -1831,17 +2080,26 @@ def find_or_create_builder_client(cur, name):
     name = clean_pdf_value(name)
     if not name:
         return None
-    cur.execute("SELECT id FROM builders_clients WHERE name = ?", (name,))
+    cur.execute(
+        "SELECT id FROM builders_clients WHERE LOWER(TRIM(name)) = LOWER(TRIM(?))",
+        (name,),
+    )
     row = cur.fetchone()
     if row:
         return row[0]
     cur.execute("""
         INSERT INTO builders_clients
-        (type, name, contact_name, phone, email, address, qbcc, abn, terms, notes)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, ("Client / Builder", name, "", "", "", "", "", "", "", "Created from imported PDF checklist"))
+        (type, name, contact_name, phone, email, address, qbcc, abn, terms, notes, normalised_name)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        "Client / Builder", name, "", "", "", "", "", "", "",
+        "Created from imported PDF checklist", name.strip().casefold(),
+    ))
 
-    cur.execute("SELECT id FROM builders_clients WHERE name = ?", (name,))
+    cur.execute(
+        "SELECT id FROM builders_clients WHERE LOWER(TRIM(name)) = LOWER(TRIM(?))",
+        (name,),
+    )
     row = cur.fetchone()
     return row[0] if row else None
 
@@ -2023,10 +2281,6 @@ def import_master_checklist_to_job(job_id, job_info, equipment_df, materials_df,
 # PDF GENERATION HELPERS
 # =============================
 
-def safe_file_name(name):
-    name = str(name or "file").strip()
-    name = re.sub(r"[^a-zA-Z0-9._-]", "_", name)
-    return name[:120]
 
 
 def get_job_details_for_pdf(job_id):
@@ -2049,34 +2303,68 @@ def get_job_details_for_pdf(job_id):
 
 
 def fill_pdf_template(template_path, output_path, field_values):
+    if not os.path.exists(template_path):
+        raise FileNotFoundError(f"PDF template not found: {os.path.basename(template_path)}")
+
     reader = PdfReader(template_path)
+    if reader.is_encrypted:
+        raise ValueError("Encrypted PDF templates cannot be generated by JobHub.")
+    source_fields = reader.get_fields() or {}
+    values = {
+        str(name): "" if value is None else str(value)
+        for name, value in dict(field_values or {}).items()
+    }
+    missing_fields = sorted(set(values) - set(source_fields))
+    if missing_fields:
+        raise ValueError(
+            "PDF template is missing required fields: " + ", ".join(missing_fields)
+        )
+
     writer = PdfWriter()
-
-    for page in reader.pages:
-        writer.add_page(page)
-
-    if "/AcroForm" in reader.trailer["/Root"]:
-        writer._root_object.update({
-            NameObject("/AcroForm"): reader.trailer["/Root"]["/AcroForm"]
-        })
-
-    try:
-        writer.set_need_appearances_writer(True)
-    except Exception:
-        try:
-            if "/AcroForm" not in writer._root_object:
-                writer._root_object[NameObject("/AcroForm")] = DictionaryObject()
-            writer._root_object["/AcroForm"].update({
-                NameObject("/NeedAppearances"): BooleanObject(True)
-            })
-        except Exception:
-            pass
-
-    for page in writer.pages:
-        writer.update_page_form_field_values(page, field_values)
+    writer.clone_document_from_reader(reader)
+    writer.update_page_form_field_values(
+        None,
+        values,
+        auto_regenerate=False,
+    )
 
     with open(output_path, "wb") as f:
         writer.write(f)
+
+    # Reopen and verify both the canonical field tree and page widgets.
+    written_reader = PdfReader(output_path)
+    written_fields = written_reader.get_fields() or {}
+    for name, expected in values.items():
+        if name not in written_fields:
+            raise ValueError(f"Generated PDF lost required field: {name}")
+        actual = str(written_fields[name].get("/V", "") or "")
+        if actual != expected:
+            raise ValueError(f"Generated PDF field verification failed: {name}")
+
+    verified_widget_names = set()
+    for page in written_reader.pages:
+        for annotation_ref in page.get("/Annots", []) or []:
+            annotation = annotation_ref.get_object()
+            if annotation.get("/Subtype") != "/Widget":
+                continue
+            parent_ref = annotation.get("/Parent")
+            effective = parent_ref.get_object() if parent_ref else annotation
+            name = str(effective.get("/T", "") or "")
+            if name not in values:
+                continue
+            verified_widget_names.add(name)
+            actual = str(effective.get("/V", "") or "")
+            if actual != values[name]:
+                raise ValueError(f"Generated PDF widget verification failed: {name}")
+            appearance = annotation.get("/AP")
+            if not appearance or not appearance.get("/N"):
+                raise ValueError(f"Generated PDF field has no appearance stream: {name}")
+
+    missing_widgets = sorted(set(values) - verified_widget_names)
+    if missing_widgets:
+        raise ValueError(
+            "Generated PDF is missing field widgets: " + ", ".join(missing_widgets)
+        )
 
     return output_path
 
@@ -2245,6 +2533,61 @@ def generate_paint_order_pdf(job_id):
     return output_path
 
 
+def generate_day_labour_sheet_pdf(job_id):
+    job = get_job_details_for_pdf(job_id)
+    if not job:
+        raise ValueError("Job not found.")
+
+    job_no = str(job.get("job_no") or f"job_{job_id}")
+    job_folder = get_job_folder(job_no)
+    output_path = os.path.join(
+        job_folder,
+        f"{safe_file_name(job_no)}_day_labour_sheet_fillable.pdf",
+    )
+
+    fields = {
+        "job_number": job.get("job_no", ""),
+        "project_name": job.get("job_name", ""),
+        "site_address": job.get("site_address", ""),
+        "builder_client": job.get("builder_client", ""),
+        "leading_hand": job.get("leading_hand", ""),
+    }
+
+    labour_rows = df_query("""
+        SELECT t.work_date,
+               t.work_type,
+               t.total_hours,
+               t.notes,
+               e.name AS employee_name
+        FROM timesheet_entries t
+        JOIN employees e ON e.id = t.employee_id
+        WHERE t.job_id = ?
+          AND COALESCE(t.status, 'Submitted') <> 'Rejected'
+        ORDER BY t.work_date, t.id
+        LIMIT 18
+    """, (job_id,))
+
+    for index, (_, row) in enumerate(labour_rows.iterrows(), start=1):
+        suffix = f"{index:02d}"
+        work_type = str(row.get("work_type") or "").strip()
+        notes = str(row.get("notes") or "").strip()
+        task = work_type if not notes else f"{work_type}: {notes}".strip(": ")
+        fields[f"task_{suffix}"] = task[:140]
+        fields[f"date_completed_{suffix}"] = str(row.get("work_date") or "")
+        hours = float(row.get("total_hours") or 0)
+        fields[f"hours_{suffix}"] = f"{hours:g}" if hours else ""
+        fields[f"signed_{suffix}"] = str(row.get("employee_name") or "")
+
+    fill_pdf_template(DAY_LABOUR_TEMPLATE_PDF, output_path, fields)
+    attach_document_to_job(
+        job_id,
+        "Day Labour Sheet",
+        output_path,
+        notes="Generated from JobHub job details and non-rejected timesheets.",
+    )
+    return output_path
+
+
 def generate_variation_form_pdf(job_id, requested_by="", description="", reason="", notes=""):
     job = get_job_details_for_pdf(job_id)
 
@@ -2260,13 +2603,15 @@ def generate_variation_form_pdf(job_id, requested_by="", description="", reason=
     job_folder = get_job_folder(job_no)
 
     count_df = df_query("""
-        SELECT COUNT(*) AS c
+        SELECT variation_no
         FROM job_variations
         WHERE job_id = ?
     """, (job_id,))
 
-    next_no = int(count_df.iloc[0]["c"]) + 1 if not count_df.empty else 1
-    variation_no = f"VAR-{next_no:03d}"
+    variation_no = next_scoped_number(
+        count_df["variation_no"].tolist() if not count_df.empty else [],
+        "VAR",
+    )
 
     output_path = os.path.join(
         job_folder,
@@ -2334,67 +2679,130 @@ def generate_variation_form_pdf(job_id, requested_by="", description="", reason=
 
     return output_path, variation_no
 
+JOB_DIRECT_CHILD_TABLES = (
+    "wage_entries",
+    "timesheet_entries",
+    "material_entries",
+    "equipment_entries",
+    "equipment_checklist_records",
+    "imported_material_entries",
+    "job_photos",
+    "job_documents",
+    "job_budgets",
+    "job_variations",
+    "invoice_claims",
+    "staff_schedule",
+    "job_employee_access",
+)
+
+
 def linked_job_counts(job_id):
     counts = {}
-
-    for table in [
-        "material_entries",
-        "wage_entries",
-        "timesheet_entries",
-        "equipment_entries",
-        "equipment_checklist_records",
-        "imported_material_entries",
-        "job_photos",
-        "job_documents",
-    ]:
-        try:
-            df = df_query(f"SELECT COUNT(*) AS c FROM {table} WHERE job_id = ?", (job_id,))
-            counts[table] = int(df.iloc[0]["c"])
-        except Exception:
-            counts[table] = 0
-
+    for table in JOB_DIRECT_CHILD_TABLES:
+        df = df_query(f"SELECT COUNT(*) AS c FROM {table} WHERE job_id = ?", (job_id,))
+        counts[table] = int(df.iloc[0]["c"] or 0) if not df.empty else 0
+    line_df = df_query("""
+        SELECT COUNT(*) AS c
+        FROM estimate_line_items li
+        JOIN estimate_working_sheets e ON e.id = li.estimate_id
+        WHERE e.job_id = ?
+    """, (job_id,))
+    counts["estimate_line_items"] = int(line_df.iloc[0]["c"] or 0) if not line_df.empty else 0
+    estimate_df = df_query(
+        "SELECT COUNT(*) AS c FROM estimate_working_sheets WHERE job_id = ?",
+        (job_id,),
+    )
+    counts["estimate_working_sheets"] = (
+        int(estimate_df.iloc[0]["c"] or 0) if not estimate_df.empty else 0
+    )
     return counts
-def permanently_delete_job_and_linked_data(job_id):
-    conn = connect()
-    cur = conn.cursor()
 
-    for table in [
-        "material_entries",
-        "wage_entries",
-        "timesheet_entries",
-        "equipment_entries",
-        "equipment_checklist_records",
-        "imported_material_entries",
-        "job_photos",
-        "job_documents",
-    ]:
-        try:
-            cur.execute(f"DELETE FROM {table} WHERE job_id = ?", (job_id,))
-        except Exception:
-            pass
 
+def _delete_job_rows(cur, job_id):
+    cur.execute("""
+        DELETE FROM estimate_line_items
+        WHERE estimate_id IN (
+            SELECT id FROM estimate_working_sheets WHERE job_id = ?
+        )
+    """, (job_id,))
+    cur.execute("DELETE FROM estimate_working_sheets WHERE job_id = ?", (job_id,))
+    for table in JOB_DIRECT_CHILD_TABLES:
+        cur.execute(f"DELETE FROM {table} WHERE job_id = ?", (job_id,))
     cur.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
 
-    try:
-        cur.execute("""
-            INSERT OR REPLACE INTO app_settings (setting_key, setting_value)
-            VALUES (?, ?)
-        """, ("starter_data_seeded", "yes"))
-    except Exception:
-        pass
 
-    conn.commit()
-    conn.close()
-    
+def _archive_deleted_job_files(job_number):
+    """Move deleted job files into a recoverable archive instead of erasing them."""
+    if not job_number:
+        return ""
+    source = (Path(JOB_FILES_DIR) / safe_job_storage_segment(job_number)).resolve()
+    allowed_root = Path(JOB_FILES_DIR).resolve()
+    try:
+        source.relative_to(allowed_root)
+    except ValueError:
+        return ""
+    if not source.exists() or not source.is_dir():
+        return ""
+
+    archive_root = Path(EXPORTS_DIR).resolve() / "deleted_jobs"
+    archive_root.mkdir(parents=True, exist_ok=True)
+    destination = archive_root / (
+        f"{safe_file_name(job_number)}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    )
+    shutil.move(str(source), str(destination))
+    return str(destination)
+
+
+def permanently_delete_job_and_linked_data(job_id):
+    conn = connect()
+    job_number = ""
+    counts = linked_job_counts(job_id)
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT job_no FROM jobs WHERE id = ?", (job_id,))
+        row = cur.fetchone()
+        if not row:
+            raise ValueError("Job not found.")
+        job_number = str(row[0] or "")
+        _delete_job_rows(cur, job_id)
+        cur.execute("""
+            INSERT INTO app_settings (setting_key, setting_value)
+            VALUES (?, ?)
+            ON CONFLICT(setting_key) DO UPDATE SET
+                setting_value = excluded.setting_value
+        """, ("starter_data_seeded", "yes"))
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+
+    archived_files = _archive_deleted_job_files(job_number)
+    record_audit_event(
+        "job_permanently_deleted",
+        "job",
+        job_id,
+        {
+            "job_number": job_number,
+            "deleted_counts": counts,
+            "archived_files": archived_files,
+        },
+    )
+    return {"counts": counts, "archived_files": archived_files}
+
 # =============================
 # LOGIN / ACCESS CONTROL
 # =============================
 def hash_password(password):
-    return hashlib.sha256(password.encode("utf-8")).hexdigest()
+    return secure_hash_password(password)
 
 
 def check_password(password, password_hash):
-    return hash_password(password) == password_hash
+    return verify_password(password, password_hash)
 
 
 def username_from_employee_name(name):
@@ -2402,69 +2810,88 @@ def username_from_employee_name(name):
 
 
 def seed_app_users():
+    """Securely bootstrap the first admin; never create shared default users."""
     conn = connect()
-    cur = conn.cursor()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM app_users")
+        user_count = int((cur.fetchone() or [0])[0] or 0)
 
-    def user_exists(username=None, employee_id=None):
-        if username and employee_id:
+        bootstrap_username = str(
+            os.getenv("JOBHUB_BOOTSTRAP_ADMIN_USERNAME", "admin")
+        ).strip() or "admin"
+        bootstrap_password = str(os.getenv("JOBHUB_BOOTSTRAP_ADMIN_PASSWORD", ""))
+        bootstrap_errors = (
+            password_strength_errors(bootstrap_password, bootstrap_username)
+            if bootstrap_password
+            else []
+        )
+
+        if user_count == 0 and bootstrap_password and not bootstrap_errors:
             cur.execute("""
-                SELECT id FROM app_users
-                WHERE LOWER(TRIM(username)) = LOWER(TRIM(?)) OR employee_id = ?
-                LIMIT 1
-            """, (username, employee_id))
-        elif username:
+                INSERT INTO app_users
+                (username, password_hash, role, employee_id, active, notes,
+                 failed_login_count, locked_until, must_change_password, password_changed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                bootstrap_username,
+                hash_password(bootstrap_password),
+                "admin",
+                None,
+                1,
+                "Secure bootstrap administrator",
+                0,
+                "",
+                1,
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            ))
+        elif bootstrap_password and not bootstrap_errors:
+            # A secure environment value can recover an existing admin account
+            # that still has one of the disabled historical default passwords.
             cur.execute("""
-                SELECT id FROM app_users
+                SELECT id, password_hash
+                FROM app_users
                 WHERE LOWER(TRIM(username)) = LOWER(TRIM(?))
+                  AND role = 'admin'
                 LIMIT 1
-            """, (username,))
-        elif employee_id:
-            cur.execute("""
-                SELECT id FROM app_users
-                WHERE employee_id = ?
-                LIMIT 1
-            """, (employee_id,))
-        else:
-            return True
-        return cur.fetchone() is not None
+            """, (bootstrap_username,))
+            existing = cur.fetchone()
+            if existing and is_known_default_password_hash(existing[1]):
+                cur.execute("""
+                    UPDATE app_users
+                    SET password_hash = ?, active = 1, failed_login_count = 0,
+                        locked_until = '', must_change_password = 1,
+                        password_changed_at = ?
+                    WHERE id = ?
+                """, (
+                    hash_password(bootstrap_password),
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    int(existing[0]),
+                ))
 
-    # Default admin account
-    if not user_exists(username="admin"):
-        cur.execute("""
-            INSERT INTO app_users
-            (username, password_hash, role, employee_id, active, notes)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, ("admin", hash_password("admin123"), "admin", None, 1, "Default admin account - change password immediately"))
-
-    # Default manager account
-    if not user_exists(username="manager"):
-        cur.execute("""
-            INSERT INTO app_users
-            (username, password_hash, role, employee_id, active, notes)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, ("manager", hash_password("manager123"), "manager", None, 1, "Default manager account - change password immediately"))
-
-    # Create basic employee logins for active employees if missing.
-    # Username example: "bryce", "robpullin"
-    # Default password: changeme123
-    cur.execute("SELECT id, name FROM employees WHERE status = 'Active'")
-    for employee_id, employee_name in cur.fetchall():
-        username = username_from_employee_name(employee_name)
-        if not username:
-            continue
-
-        # Do not create another account if either the username OR employee link already exists.
-        if user_exists(username=username, employee_id=employee_id):
-            continue
-
-        cur.execute("""
-            INSERT INTO app_users
-            (username, password_hash, role, employee_id, active, notes)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (username, hash_password("changeme123"), "employee", employee_id, 1, "Auto-created employee account"))
-
-    conn.commit()
-    conn.close()
+        # Known shared passwords are disabled rather than silently left active.
+        default_hashes = tuple(
+            hashlib.sha256(value.encode("utf-8")).hexdigest()
+            for value in ("admin123", "manager123", "changeme123")
+        )
+        placeholders = ", ".join(["?"] * len(default_hashes))
+        cur.execute(
+            f"""
+            UPDATE app_users
+            SET must_change_password = 1
+            WHERE password_hash IN ({placeholders})
+            """,
+            default_hashes,
+        )
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
 
 
 def get_current_user():
@@ -2486,13 +2913,68 @@ def is_manager_or_admin():
     return current_role() in ["admin", "manager"]
 
 
-def require_login():
-    seed_app_users()
+def _login_audit(username, success, reason):
+    try:
+        execute("""
+            INSERT INTO login_audit_events (username, success, reason, created_at)
+            VALUES (?, ?, ?, ?)
+        """, (
+            str(username or "").strip(),
+            1 if success else 0,
+            str(reason or "")[:250],
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        ))
+    except Exception:
+        pass
 
+
+def _parse_timestamp(value):
+    try:
+        return datetime.fromisoformat(str(value or "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def force_password_change():
+    user = get_current_user() or {}
+    st.title("Secure your JobHub account")
+    st.warning("A new private password is required before this account can continue.")
+    with st.form("required_password_change_form"):
+        new_password = st.text_input("New password", type="password")
+        confirm_password = st.text_input("Confirm new password", type="password")
+        submitted = st.form_submit_button("Save secure password")
+    if submitted:
+        errors = password_strength_errors(new_password, user.get("username", ""))
+        if new_password != confirm_password:
+            errors.append("The two passwords do not match.")
+        if errors:
+            for error in errors:
+                st.error(error)
+        else:
+            execute("""
+                UPDATE app_users
+                SET password_hash = ?, must_change_password = 0,
+                    failed_login_count = 0, locked_until = '', password_changed_at = ?
+                WHERE id = ?
+            """, (
+                hash_password(new_password),
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                int(user["id"]),
+            ))
+            st.session_state["user"]["must_change_password"] = False
+            record_audit_event("password_changed", "app_user", user["id"])
+            st.success("Password updated.")
+            st.rerun()
+
+
+def require_login():
     if "user" not in st.session_state:
         st.session_state["user"] = None
 
     if st.session_state["user"]:
+        if st.session_state["user"].get("must_change_password"):
+            force_password_change()
+            st.stop()
         return True
 
     st.title("Premier Brushworks JobHub")
@@ -2506,32 +2988,85 @@ def require_login():
         if submitted:
             user_df = df_query("""
                 SELECT u.id, u.username, u.password_hash, u.role, u.employee_id, u.active,
+                       COALESCE(u.failed_login_count, 0) AS failed_login_count,
+                       COALESCE(u.locked_until, '') AS locked_until,
+                       COALESCE(u.must_change_password, 0) AS must_change_password,
                        e.name AS employee_name
                 FROM app_users u
                 LEFT JOIN employees e ON e.id = u.employee_id
-                WHERE u.username = ?
+                WHERE LOWER(TRIM(u.username)) = LOWER(TRIM(?))
             """, (username.strip(),))
 
             if user_df.empty:
+                _login_audit(username, False, "unknown_username")
+                unknown_failures = int(st.session_state.get("unknown_login_failures", 0)) + 1
+                st.session_state["unknown_login_failures"] = unknown_failures
                 st.error("Invalid username or password.")
             else:
                 row = user_df.iloc[0]
-                if int(row["active"] or 0) != 1:
+                locked_until = _parse_timestamp(row["locked_until"])
+                if locked_until and locked_until > datetime.now():
+                    _login_audit(username, False, "temporarily_locked")
+                    st.error("This account is temporarily locked. Try again later or contact an administrator.")
+                elif int(row["active"] or 0) != 1:
+                    _login_audit(username, False, "inactive")
                     st.error("This user account is inactive.")
+                elif is_known_default_password_hash(row["password_hash"]):
+                    _login_audit(username, False, "disabled_default_password")
+                    st.error(
+                        "This historical default password has been disabled. "
+                        "An administrator must reset the account securely."
+                    )
                 elif not check_password(password, row["password_hash"]):
+                    failed_count = int(row["failed_login_count"] or 0) + 1
+                    new_lock = ""
+                    if failed_count >= 5:
+                        new_lock = (datetime.now() + timedelta(minutes=15)).isoformat(timespec="seconds")
+                        failed_count = 0
+                    execute("""
+                        UPDATE app_users
+                        SET failed_login_count = ?, locked_until = ?
+                        WHERE id = ?
+                    """, (failed_count, new_lock, int(row["id"])))
+                    _login_audit(username, False, "invalid_password")
                     st.error("Invalid username or password.")
                 else:
+                    upgraded_hash = (
+                        hash_password(password)
+                        if password_needs_rehash(row["password_hash"])
+                        else row["password_hash"]
+                    )
+                    execute("""
+                        UPDATE app_users
+                        SET password_hash = ?, failed_login_count = 0,
+                            locked_until = '', last_login_at = ?
+                        WHERE id = ?
+                    """, (
+                        upgraded_hash,
+                        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        int(row["id"]),
+                    ))
                     st.session_state["user"] = {
                         "id": int(row["id"]),
                         "username": str(row["username"]),
                         "role": str(row["role"]),
                         "employee_id": int(row["employee_id"]) if not pd.isna(row["employee_id"]) else None,
                         "employee_name": "" if pd.isna(row["employee_name"]) else str(row["employee_name"]),
+                        "must_change_password": bool(int(row["must_change_password"] or 0)),
                     }
+                    st.session_state["unknown_login_failures"] = 0
+                    _login_audit(username, True, "success")
                     st.success("Logged in.")
                     st.rerun()
 
-    st.info("Default admin login: admin / admin123. Change this immediately in User Access.")
+    user_count_df = df_query("SELECT COUNT(*) AS c FROM app_users")
+    user_count = int(user_count_df.iloc[0]["c"] or 0) if not user_count_df.empty else 0
+    if user_count == 0:
+        st.info(
+            "No administrator exists yet. Set JOBHUB_BOOTSTRAP_ADMIN_PASSWORD "
+            "to a strong temporary password in the hosting environment, restart once, "
+            "then remove that environment value after signing in."
+        )
     st.stop()
 
 
@@ -2566,7 +3101,7 @@ def employee_portal():
         "Change Password",
     ])
 
-    job_options = get_job_options()
+    job_options = get_employee_job_options(employee_id)
 
     with tab_jobs:
         st.subheader("Job Information")
@@ -2667,8 +3202,12 @@ def employee_portal():
                     st.write(f"**{doc['Document Type']}** - {doc['File Name']}")
                     st.caption(f"Created: {doc['Created At']}")
                     file_path = str(doc["file_path"])
-                    if os.path.exists(file_path):
-                        with open(file_path, "rb") as f:
+                    try:
+                        trusted_path = resolve_trusted_storage_file(file_path)
+                    except ValueError:
+                        trusted_path = None
+                    if trusted_path and trusted_path.exists():
+                        with open(trusted_path, "rb") as f:
                             st.download_button(
                                 label=f"Download {doc['File Name']}",
                                 data=f,
@@ -2716,10 +3255,8 @@ def employee_portal():
         st.subheader("Generate Job Forms")
         st.caption("Employees can generate job forms without seeing pricing, contract values or financial reports.")
 
-        job_options = get_job_options()
-
         if not job_options:
-            st.info("No jobs available.")
+            st.info("No assigned jobs are available.")
         else:
             selected_job = st.selectbox(
                 "Select Job",
@@ -2840,6 +3377,31 @@ def employee_portal():
 
             st.divider()
 
+            st.markdown("### Day Labour Sheet")
+            st.caption(
+                "Generates a fillable project task log using the job details and "
+                "up to 18 non-rejected timesheet entries."
+            )
+            if st.button(
+                "Generate Day Labour Sheet",
+                key=f"employee_generate_day_labour_{selected_job_id}",
+            ):
+                try:
+                    pdf_path = generate_day_labour_sheet_pdf(selected_job_id)
+                    st.success("Day Labour Sheet generated and attached to this job.")
+                    with open(pdf_path, "rb") as f:
+                        st.download_button(
+                            "Download Day Labour Sheet",
+                            data=f,
+                            file_name=os.path.basename(pdf_path),
+                            mime="application/pdf",
+                            key=f"employee_download_day_labour_{selected_job_id}",
+                        )
+                except Exception as e:
+                    st.error(f"Could not generate Day Labour Sheet: {e}")
+
+            st.divider()
+
             st.markdown("### Paint & Materials Order Form")
             st.caption("Generates a fillable paint/materials order PDF and attaches it to the selected job.")
 
@@ -2941,13 +3503,134 @@ def employee_portal():
                     st.error("User account not found.")
                 elif not check_password(old_password, user_df.iloc[0]["password_hash"]):
                     st.error("Current password is incorrect.")
-                elif len(new_password) < 6:
-                    st.error("Password must be at least 6 characters.")
                 elif new_password != confirm_password:
                     st.error("New passwords do not match.")
                 else:
-                    execute("UPDATE app_users SET password_hash = ? WHERE id = ?", (hash_password(new_password), user["id"]))
-                    st.success("Password changed.")
+                    errors = password_strength_errors(new_password, user.get("username", ""))
+                    if errors:
+                        for error in errors:
+                            st.error(error)
+                    else:
+                        execute("""
+                            UPDATE app_users
+                            SET password_hash = ?, must_change_password = 0,
+                                failed_login_count = 0, locked_until = '', password_changed_at = ?
+                            WHERE id = ?
+                        """, (
+                            hash_password(new_password),
+                            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            user["id"],
+                        ))
+                        record_audit_event("password_changed", "app_user", user["id"])
+                        st.success("Password changed.")
+
+
+def import_protected_master_csv(uploaded_file, record_type):
+    """Admin-only replacement for hard-coded customer and payroll seed data."""
+    if uploaded_file is None:
+        raise ValueError("Choose a CSV file first.")
+    if uploaded_file_size(uploaded_file) > MAX_CSV_UPLOAD_BYTES:
+        raise ValueError("The CSV is larger than the 5 MB safety limit.")
+
+    uploaded_file.seek(0)
+    frame = pd.read_csv(uploaded_file).fillna("")
+    frame.columns = [
+        re.sub(r"[^a-z0-9]+", "_", str(column).strip().casefold()).strip("_")
+        for column in frame.columns
+    ]
+    if "name" not in frame.columns:
+        raise ValueError("The CSV must contain a Name column.")
+    frame = frame[frame["name"].astype(str).str.strip() != ""].copy()
+    if frame.empty:
+        raise ValueError("The CSV does not contain any named records.")
+    if len(frame) > 5000:
+        raise ValueError("The CSV exceeds the 5,000-row import limit.")
+
+    conn = connect()
+    try:
+        cur = conn.cursor()
+        if record_type == "Builders / Clients":
+            columns = [
+                "type", "name", "contact_name", "phone", "email", "address",
+                "qbcc", "abn", "terms", "notes",
+            ]
+            for column in columns:
+                if column not in frame.columns:
+                    frame[column] = ""
+            rows = [
+                tuple(str(row[column]).strip() for column in columns)
+                + (str(row["name"]).strip().casefold(),)
+                for _, row in frame.iterrows()
+            ]
+            cur.executemany("""
+                INSERT INTO builders_clients
+                (type, name, contact_name, phone, email, address, qbcc, abn,
+                 terms, notes, normalised_name)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(name) DO UPDATE SET
+                    type = excluded.type,
+                    contact_name = excluded.contact_name,
+                    phone = excluded.phone,
+                    email = excluded.email,
+                    address = excluded.address,
+                    qbcc = excluded.qbcc,
+                    abn = excluded.abn,
+                    terms = excluded.terms,
+                    notes = excluded.notes,
+                    normalised_name = excluded.normalised_name
+            """, rows)
+        elif record_type == "Employees":
+            text_columns = ["name", "role", "phone", "status", "notes"]
+            for column in text_columns:
+                if column not in frame.columns:
+                    frame[column] = ""
+            for column in ["base_hourly_rate", "rate_plus_10"]:
+                if column not in frame.columns:
+                    frame[column] = 0
+                frame[column] = pd.to_numeric(frame[column], errors="coerce").fillna(0)
+            rows = [
+                (
+                    str(row["name"]).strip(),
+                    str(row["role"]).strip(),
+                    str(row["phone"]).strip(),
+                    float(row["base_hourly_rate"]),
+                    float(row["rate_plus_10"]),
+                    str(row["status"]).strip() or "Active",
+                    str(row["notes"]).strip(),
+                )
+                for _, row in frame.iterrows()
+            ]
+            cur.executemany("""
+                INSERT INTO employees
+                (name, role, phone, base_hourly_rate, rate_plus_10, status, notes)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(name) DO UPDATE SET
+                    role = excluded.role,
+                    phone = excluded.phone,
+                    base_hourly_rate = excluded.base_hourly_rate,
+                    rate_plus_10 = excluded.rate_plus_10,
+                    status = excluded.status,
+                    notes = excluded.notes
+            """, rows)
+        else:
+            raise ValueError("Unsupported master-data type.")
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+
+    record_audit_event(
+        "protected_master_csv_imported",
+        record_type.casefold().replace(" ", "_"),
+        "",
+        {"rows": len(rows), "file_name": safe_file_name(uploaded_file.name)},
+    )
+    return len(rows)
 
 
 def user_access_page():
@@ -2982,28 +3665,127 @@ def user_access_page():
 
     st.divider()
 
-    st.markdown("### Restore Master Builders/Clients & Employees")
-    st.caption("Use this if builders, clients, employee names, or employee logins are missing.")
+    st.markdown("### Protected Master-Data Import")
+    st.caption(
+        "Real customer and payroll data is no longer embedded in the app source. "
+        "Import an administrator-controlled CSV when master data needs to be restored."
+    )
 
     rc1, rc2 = st.columns(2)
     rc1.metric("Builders/clients currently in database", builders_clients_count())
     rc2.metric("Employees currently in database", employees_count())
 
-    restore_master_confirm = st.text_input(
-        "To restore the saved master builders/clients and employees, type: RESTORE MASTER DATA",
-        key="restore_master_data_confirm"
+    master_record_type = st.radio(
+        "Import type",
+        ["Builders / Clients", "Employees"],
+        horizontal=True,
+        key="protected_master_import_type",
     )
-
-    if st.button("Restore Builders/Clients & Employees", key="restore_builders_clients_employees_btn"):
-        if restore_master_confirm.strip().upper() != "RESTORE MASTER DATA":
-            st.error("Type RESTORE MASTER DATA exactly before restoring.")
+    st.caption(
+        "Required column: Name. Optional builder columns: Type, Contact Name, Phone, Email, "
+        "Address, QBCC, ABN, Terms, Notes. Optional employee columns: Role, Phone, "
+        "Base Hourly Rate, Rate Plus 10, Status, Notes. Passwords are never imported."
+    )
+    master_upload = st.file_uploader(
+        "Choose protected master-data CSV",
+        type=["csv"],
+        key="protected_master_data_csv",
+    )
+    master_confirm = st.text_input(
+        "Type IMPORT MASTER DATA to continue",
+        key="protected_master_data_confirm",
+    )
+    if st.button("Validate and Import Master Data", key="protected_master_import_button"):
+        if master_confirm.strip().upper() != "IMPORT MASTER DATA":
+            st.error("Type IMPORT MASTER DATA exactly before importing.")
+        elif master_upload is None:
+            st.error("Choose a CSV file first.")
         else:
-            restored_builders, restored_employees = restore_builders_clients_and_employees()
-            st.success(
-                f"Restored/updated {restored_builders} builders/clients and {restored_employees} employees. "
-                "Missing employee login accounts were recreated where needed."
+            try:
+                imported_rows = import_protected_master_csv(master_upload, master_record_type)
+                st.success(f"Imported or updated {imported_rows} {master_record_type.lower()} record(s).")
+                refresh()
+            except Exception as exc:
+                st.error(f"Master-data import failed: {exc}")
+
+    st.divider()
+
+    st.markdown("### Employee Job Access")
+    st.caption(
+        "Employees automatically see jobs where they are the leading hand or appear on the staff schedule. "
+        "Use this section for additional explicit access."
+    )
+    access_employee_options = get_employee_options(active_only=True)
+    access_job_options = get_job_options()
+    if not access_employee_options or not access_job_options:
+        st.info("Create at least one active employee and one job to manage explicit access.")
+    else:
+        access_col1, access_col2 = st.columns(2)
+        access_employee_label = access_col1.selectbox(
+            "Employee",
+            list(access_employee_options.keys()),
+            key="explicit_job_access_employee",
+        )
+        access_job_label = access_col2.selectbox(
+            "Job",
+            list(access_job_options.keys()),
+            key="explicit_job_access_job",
+        )
+        selected_access_employee_id = access_employee_options[access_employee_label]
+        selected_access_job_id = access_job_options[access_job_label]
+        grant_col, revoke_col = st.columns(2)
+        if grant_col.button("Grant Additional Access", key="grant_explicit_job_access"):
+            current_user = get_current_user() or {}
+            execute("""
+                INSERT INTO job_employee_access
+                    (job_id, employee_id, access_role, granted_by, created_at)
+                VALUES (?, ?, 'Assigned', ?, ?)
+                ON CONFLICT(job_id, employee_id) DO UPDATE SET
+                    access_role = excluded.access_role,
+                    granted_by = excluded.granted_by,
+                    created_at = excluded.created_at
+            """, (
+                selected_access_job_id,
+                selected_access_employee_id,
+                current_user.get("username", ""),
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            ))
+            record_audit_event(
+                "employee_job_access_granted",
+                "job",
+                selected_access_job_id,
+                {"employee_id": selected_access_employee_id},
             )
+            st.success("Additional job access granted.")
             refresh()
+        if revoke_col.button("Revoke Additional Access", key="revoke_explicit_job_access"):
+            execute(
+                "DELETE FROM job_employee_access WHERE job_id = ? AND employee_id = ?",
+                (selected_access_job_id, selected_access_employee_id),
+            )
+            record_audit_event(
+                "employee_job_access_revoked",
+                "job",
+                selected_access_job_id,
+                {"employee_id": selected_access_employee_id},
+            )
+            st.success("Additional access removed. Schedule or leading-hand access may still apply.")
+            refresh()
+
+        explicit_access_df = df_query("""
+            SELECT j.job_no AS 'Job No',
+                   j.job_name AS 'Job Name',
+                   e.name AS 'Employee',
+                   a.access_role AS 'Access',
+                   a.granted_by AS 'Granted By',
+                   a.created_at AS 'Granted At'
+            FROM job_employee_access a
+            JOIN jobs j ON j.id = a.job_id
+            JOIN employees e ON e.id = a.employee_id
+            ORDER BY j.job_no, e.name
+        """)
+        if not explicit_access_df.empty:
+            st.dataframe(explicit_access_df, width="stretch", hide_index=True)
 
     st.divider()
 
@@ -3058,20 +3840,58 @@ def user_access_page():
             if submitted:
                 if not username or not password:
                     st.error("Username and password are required.")
-                elif len(password) < 6:
-                    st.error("Password must be at least 6 characters.")
                 else:
-                    employee_id = employee_options.get(employee_label) if employee_label != "Not linked" else None
-                    try:
-                        execute("""
-                            INSERT INTO app_users
-                            (username, password_hash, role, employee_id, active, notes)
-                            VALUES (?, ?, ?, ?, ?, ?)
-                        """, (username.strip(), hash_password(password), role, employee_id, 1, notes))
-                        st.success(f"Created user {username}.")
-                        refresh()
-                    except Exception as e:
-                        st.error(f"Could not create user: {e}")
+                    errors = password_strength_errors(password, username)
+                    if errors:
+                        for error in errors:
+                            st.error(error)
+                    else:
+                        employee_id = employee_options.get(employee_label) if employee_label != "Not linked" else None
+                        try:
+                            username_match = df_query("""
+                                SELECT id
+                                FROM app_users
+                                WHERE LOWER(TRIM(username)) = LOWER(TRIM(?))
+                                LIMIT 1
+                            """, (username.strip(),))
+                            employee_match = (
+                                df_query(
+                                    "SELECT id FROM app_users WHERE employee_id = ? LIMIT 1",
+                                    (employee_id,),
+                                )
+                                if employee_id is not None
+                                else pd.DataFrame()
+                            )
+                            if not username_match.empty:
+                                st.error("That username is already in use.")
+                            elif not employee_match.empty:
+                                st.error("That employee is already linked to another login.")
+                            else:
+                                execute("""
+                                    INSERT INTO app_users
+                                    (username, password_hash, role, employee_id, active, notes,
+                                     must_change_password, password_changed_at)
+                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                """, (
+                                    username.strip(),
+                                    hash_password(password),
+                                    role,
+                                    employee_id,
+                                    1,
+                                    notes,
+                                    1,
+                                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                ))
+                                record_audit_event(
+                                    "user_created",
+                                    "app_user",
+                                    username.strip(),
+                                    {"role": role, "employee_id": employee_id},
+                                )
+                                st.success(f"Created user {username}. They must change the password at first login.")
+                                refresh()
+                        except Exception as e:
+                            st.error(f"Could not create user: {e}")
 
     with tab_edit:
         st.subheader("Edit / Disable User")
@@ -3111,8 +3931,14 @@ def user_access_page():
                     employee_id = employee_options.get(employee_label) if employee_label != "Not linked" else None
                     active = 1 if active_label == "Active" else 0
 
-                    if new_password and len(new_password) < 6:
-                        st.error("Password must be at least 6 characters.")
+                    password_errors = (
+                        password_strength_errors(new_password, username)
+                        if new_password
+                        else []
+                    )
+                    if password_errors:
+                        for error in password_errors:
+                            st.error(error)
                     else:
                         success, message = safe_update_user_account(
                             selected_user_id=selected_user_id,
@@ -3125,7 +3951,22 @@ def user_access_page():
 
                         if success:
                             if new_password:
-                                execute("UPDATE app_users SET password_hash = ? WHERE id = ?", (hash_password(new_password), selected_user_id))
+                                execute("""
+                                    UPDATE app_users
+                                    SET password_hash = ?, must_change_password = 1,
+                                        failed_login_count = 0, locked_until = '',
+                                        password_changed_at = ?
+                                    WHERE id = ?
+                                """, (
+                                    hash_password(new_password),
+                                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                    selected_user_id,
+                                ))
+                                record_audit_event(
+                                    "password_reset_by_admin",
+                                    "app_user",
+                                    selected_user_id,
+                                )
                             st.success(message)
                             refresh()
                         else:
@@ -3284,6 +4125,40 @@ def user_access_page():
 
                     refresh()
 
+    st.divider()
+    st.markdown("### Security and Change Audit")
+    audit_tab, login_tab = st.tabs(["Application Changes", "Login Activity"])
+    with audit_tab:
+        audit_df = df_query("""
+            SELECT created_at AS 'Time',
+                   username AS 'User',
+                   action AS 'Action',
+                   entity_type AS 'Record Type',
+                   entity_id AS 'Record ID',
+                   details AS 'Details'
+            FROM audit_events
+            ORDER BY created_at DESC, id DESC
+            LIMIT 500
+        """)
+        if audit_df.empty:
+            st.info("No application audit events have been recorded yet.")
+        else:
+            st.dataframe(audit_df, width="stretch", hide_index=True)
+    with login_tab:
+        login_audit_df = df_query("""
+            SELECT created_at AS 'Time',
+                   username AS 'Username',
+                   CASE WHEN success = 1 THEN 'Success' ELSE 'Failed' END AS 'Result',
+                   reason AS 'Reason'
+            FROM login_audit_events
+            ORDER BY created_at DESC, id DESC
+            LIMIT 500
+        """)
+        if login_audit_df.empty:
+            st.info("No login events have been recorded yet.")
+        else:
+            st.dataframe(login_audit_df, width="stretch", hide_index=True)
+
 
 
 def mark_seeded_if_existing_data_present():
@@ -3307,8 +4182,10 @@ def mark_seeded_if_existing_data_present():
         # This stops old/deleted jobs reappearing on first run after this update.
         if job_count > 0 or builder_count > 0 or employee_count > 0:
             cur.execute("""
-                INSERT OR REPLACE INTO app_settings (setting_key, setting_value)
+                INSERT INTO app_settings (setting_key, setting_value)
                 VALUES (?, ?)
+                ON CONFLICT(setting_key) DO UPDATE SET
+                    setting_value = excluded.setting_value
             """, ("starter_data_seeded", "yes"))
             conn.commit()
 
@@ -3320,38 +4197,42 @@ def mark_seeded_if_existing_data_present():
 
 def clear_all_jobs_and_linked_data():
     conn = connect()
-    cur = conn.cursor()
-
-    # Delete all job-linked records first
-    for table in [
-        "material_entries",
-        "wage_entries",
-        "timesheet_entries",
-        "equipment_entries",
-        "equipment_checklist_records",
-        "imported_material_entries",
-        "job_photos",
-        "job_documents",
-    ]:
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT id, job_no FROM jobs ORDER BY id")
+        jobs_to_delete = [(int(row[0]), str(row[1] or "")) for row in cur.fetchall()]
+        for job_id, _job_number in jobs_to_delete:
+            _delete_job_rows(cur, job_id)
+        cur.execute("""
+            INSERT INTO app_settings (setting_key, setting_value)
+            VALUES (?, ?)
+            ON CONFLICT(setting_key) DO UPDATE SET
+                setting_value = excluded.setting_value
+        """, ("starter_data_seeded", "yes"))
+        conn.commit()
+    except Exception:
         try:
-            cur.execute(f"DELETE FROM {table}")
+            conn.rollback()
         except Exception:
             pass
+        raise
+    finally:
+        conn.close()
 
-    # Delete all jobs
-    cur.execute("DELETE FROM jobs")
-
-    # Make sure starter/demo jobs do not reseed after clearing jobs
-    try:
-        cur.execute("""
-            INSERT OR REPLACE INTO app_settings (setting_key, setting_value)
-            VALUES (?, ?)
-        """, ("starter_data_seeded", "yes"))
-    except Exception:
-        pass
-
-    conn.commit()
-    conn.close()
+    file_archives = [
+        _archive_deleted_job_files(job_number)
+        for _job_id, job_number in jobs_to_delete
+    ]
+    record_audit_event(
+        "all_jobs_permanently_deleted",
+        "job_register",
+        "",
+        {
+            "jobs_deleted": len(jobs_to_delete),
+            "file_archives": [value for value in file_archives if value],
+        },
+    )
+    return len(jobs_to_delete)
 
 
 
@@ -3372,6 +4253,24 @@ def get_job_no_for_id(job_id):
 
 
 def save_photo_to_job_folder(job_id, uploaded_file, max_size=(1600, 1600), quality=80):
+    if uploaded_file_size(uploaded_file) > MAX_PHOTO_UPLOAD_BYTES:
+        raise ValueError("Photo is larger than the 15 MB upload limit.")
+    uploaded_file.seek(0)
+    try:
+        with Image.open(uploaded_file) as image_probe:
+            if image_probe.format not in {"JPEG", "PNG", "WEBP"}:
+                raise ValueError("Only genuine JPEG, PNG or WebP images are accepted.")
+            if int(image_probe.width) * int(image_probe.height) > MAX_IMAGE_PIXELS:
+                raise ValueError("The image dimensions are too large to process safely.")
+            image_probe.verify()
+    except (Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
+        raise ValueError("The image dimensions are too large to process safely.") from exc
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise ValueError("The uploaded file is not a valid supported image.") from exc
+    uploaded_file.seek(0)
+
     job_no = get_job_no_for_id(job_id)
 
     job_folder = get_job_folder(job_no)
@@ -3379,6 +4278,7 @@ def save_photo_to_job_folder(job_id, uploaded_file, max_size=(1600, 1600), quali
     os.makedirs(photos_folder, exist_ok=True)
 
     image = Image.open(uploaded_file)
+    image.load()
 
     if image.mode not in ["RGB", "L"]:
         image = image.convert("RGB")
@@ -3399,6 +4299,14 @@ def save_photo_to_job_folder(job_id, uploaded_file, max_size=(1600, 1600), quali
     return file_path, "image/jpeg"
 
 
+def resolve_trusted_storage_file(file_path):
+    resolved = Path(str(file_path or "")).resolve()
+    allowed_roots = [Path(JOB_FILES_DIR).resolve(), Path(PHOTOS_DIR).resolve()]
+    if not any(resolved == root or root in resolved.parents for root in allowed_roots):
+        raise ValueError("Stored file path is outside JobHub storage.")
+    return resolved
+
+
 def photo_data_to_bytes(photo_data):
     """
     Supports both:
@@ -3412,7 +4320,8 @@ def photo_data_to_bytes(photo_data):
 
     if photo_data.startswith("FILEPATH:"):
         file_path = photo_data.replace("FILEPATH:", "", 1)
-        with open(file_path, "rb") as f:
+        trusted_path = resolve_trusted_storage_file(file_path)
+        with open(trusted_path, "rb") as f:
             return f.read()
 
     return base64.b64decode(photo_data.encode("utf-8"))
@@ -3452,9 +4361,9 @@ def delete_job_photo(photo_id):
         if not photo_df.empty:
             photo_data = str(photo_df.iloc[0]["photo_data"] or "")
             if photo_data.startswith("FILEPATH:"):
-                file_path = photo_data.replace("FILEPATH:", "", 1)
-                if os.path.exists(file_path):
-                    os.remove(file_path)
+                file_path = resolve_trusted_storage_file(photo_data.replace("FILEPATH:", "", 1))
+                if file_path.exists():
+                    file_path.unlink()
     except Exception:
         pass
 
@@ -3465,10 +4374,18 @@ def job_photos_page(employee_restricted=False):
     st.header("Job Photos")
     st.caption("Upload photos against a specific job. Photos will appear in Job Pack reports.")
 
-    job_options = get_job_options()
+    if employee_restricted:
+        current_user = get_current_user() or {}
+        job_options = get_employee_job_options(current_user.get("employee_id"))
+    else:
+        job_options = get_job_options()
 
     if not job_options:
-        st.info("Create a job first, then upload photos.")
+        st.info(
+            "No assigned jobs are available."
+            if employee_restricted
+            else "Create a job first, then upload photos."
+        )
         return
 
     tab_upload, tab_view = st.tabs(["Upload Photos", "View / Delete Photos"])
@@ -3576,44 +4493,180 @@ def job_photos_page(employee_restricted=False):
 # =============================
 def calculate_hours_from_times(start_time, finish_time, break_minutes):
     try:
-        if not start_time or not finish_time:
-            return 0.0
-        sh, sm = [int(x) for x in str(start_time).split(":")[:2]]
-        fh, fm = [int(x) for x in str(finish_time).split(":")[:2]]
-        start_minutes = sh * 60 + sm
-        finish_minutes = fh * 60 + fm
-        if finish_minutes < start_minutes:
-            finish_minutes += 24 * 60
-        total_minutes = finish_minutes - start_minutes - float(break_minutes or 0)
-        return max(round(total_minutes / 60, 2), 0.0)
-    except Exception:
+        return calculate_shift_hours(start_time, finish_time, break_minutes)
+    except ValueError:
         return 0.0
+
+
+def review_acceptance_checkbox(key_prefix, payload, label):
+    """Reset confirmation whenever any reviewed value changes."""
+    fingerprint = hashlib.sha256(
+        json.dumps(payload, default=str, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    fingerprint_key = f"{key_prefix}_review_fingerprint"
+    accepted_key = f"{key_prefix}_review_accepted"
+    if st.session_state.get(fingerprint_key) != fingerprint:
+        st.session_state[fingerprint_key] = fingerprint
+        st.session_state[accepted_key] = False
+    return st.checkbox(label, key=accepted_key)
 
 
 def save_timesheet_entry(job_id, employee_id, work_date, start_time, finish_time, break_minutes, total_hours, work_type, notes):
     user = get_current_user() or {}
     submitted_by = user.get("username", "")
     submitted_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn = connect()
+    try:
+        cur = conn.cursor()
+        insert_sql = """
+            INSERT INTO timesheet_entries
+            (job_id, employee_id, work_date, start_time, finish_time, break_minutes, total_hours,
+             work_type, submitted_by, submitted_at, status, notes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        if USE_POSTGRES:
+            insert_sql += " RETURNING id"
+        cur.execute(insert_sql, (
+            job_id,
+            employee_id,
+            work_date,
+            start_time,
+            finish_time,
+            break_minutes,
+            total_hours,
+            work_type,
+            submitted_by,
+            submitted_at,
+            "Submitted",
+            notes,
+        ))
+        timesheet_id = int(cur.fetchone()[0]) if USE_POSTGRES else int(cur.lastrowid)
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
 
-    execute("""
-        INSERT INTO timesheet_entries
-        (job_id, employee_id, work_date, start_time, finish_time, break_minutes, total_hours,
-         work_type, submitted_by, submitted_at, status, notes)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (job_id, employee_id, work_date, start_time, finish_time, break_minutes, total_hours,
-          work_type, submitted_by, submitted_at, "Submitted", notes))
+    record_audit_event(
+        "timesheet_submitted",
+        "timesheet",
+        timesheet_id,
+        {"job_id": job_id, "employee_id": employee_id, "hours": total_hours},
+    )
+    return timesheet_id
 
-    execute("""
-        INSERT INTO wage_entries (job_id, employee_id, work_date, hours, notes)
-        VALUES (?, ?, ?, ?, ?)
-    """, (job_id, employee_id, work_date, total_hours,
-          f"Timesheet: {start_time}-{finish_time}, break {break_minutes} min. {notes}"))
+
+def set_timesheet_status(timesheet_id, status):
+    """Approve/pay/reject a timesheet and keep its labour-cost posting consistent."""
+    status = str(status or "").title()
+    if status not in {"Approved", "Paid", "Rejected"}:
+        raise ValueError("Unsupported timesheet status.")
+
+    conn = connect()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT t.job_id, t.employee_id, t.work_date, t.start_time, t.finish_time,
+                   t.break_minutes, t.total_hours, t.notes,
+                   COALESCE(e.rate_plus_10, e.base_hourly_rate, 0)
+            FROM timesheet_entries t
+            JOIN employees e ON e.id = t.employee_id
+            WHERE t.id = ?
+        """, (int(timesheet_id),))
+        row = cur.fetchone()
+        if not row:
+            raise ValueError("Timesheet not found.")
+
+        job_id, employee_id, work_date, start_time, finish_time, break_minutes, total_hours, notes, hourly_rate = row
+        user = get_current_user() or {}
+        approved_by = str(user.get("username") or "")
+        approved_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        cur.execute("""
+            UPDATE timesheet_entries
+            SET status = ?, approved_by = ?, approved_at = ?
+            WHERE id = ?
+        """, (status, approved_by, approved_at, int(timesheet_id)))
+
+        if status in {"Approved", "Paid"}:
+            cur.execute("""
+                INSERT INTO wage_entries
+                (job_id, employee_id, work_date, hours, notes, timesheet_id,
+                 hourly_rate_snapshot, source)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(timesheet_id) DO UPDATE SET
+                    job_id = excluded.job_id,
+                    employee_id = excluded.employee_id,
+                    work_date = excluded.work_date,
+                    hours = excluded.hours,
+                    notes = excluded.notes,
+                    hourly_rate_snapshot = excluded.hourly_rate_snapshot,
+                    source = excluded.source
+            """, (
+                int(job_id),
+                int(employee_id),
+                work_date,
+                float(total_hours or 0),
+                f"Approved timesheet {timesheet_id}: {start_time}-{finish_time}, "
+                f"break {break_minutes} min. {notes or ''}".strip(),
+                int(timesheet_id),
+                float(hourly_rate or 0),
+                "Approved Timesheet",
+            ))
+        else:
+            cur.execute("DELETE FROM wage_entries WHERE timesheet_id = ?", (int(timesheet_id),))
+
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+
+    record_audit_event(
+        f"timesheet_{status.casefold()}",
+        "timesheet",
+        timesheet_id,
+        {"hours": total_hours, "hourly_rate_snapshot": hourly_rate},
+    )
+
+
+def delete_timesheet_entry(timesheet_id):
+    conn = connect()
+    try:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM wage_entries WHERE timesheet_id = ?", (int(timesheet_id),))
+        cur.execute("DELETE FROM timesheet_entries WHERE id = ?", (int(timesheet_id),))
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+    record_audit_event("timesheet_deleted", "timesheet", timesheet_id)
 
 
 def timesheet_entry_form(employee_id=None, employee_restricted=False, key_prefix="timesheet"):
-    job_options = get_job_options()
+    job_options = (
+        get_employee_job_options(employee_id)
+        if employee_restricted and employee_id is not None
+        else get_job_options()
+    )
     if not job_options:
-        st.info("Create a job first, then timesheets can be submitted.")
+        st.info(
+            "No assigned jobs are available for timesheet submission."
+            if employee_restricted
+            else "Create a job first, then timesheets can be submitted."
+        )
         return
 
     if employee_id is None:
@@ -3624,37 +4677,151 @@ def timesheet_entry_form(employee_id=None, employee_restricted=False, key_prefix
     else:
         employee_options = None
 
-    with st.form(f"{key_prefix}_form"):
-        selected_job = st.selectbox("Job", list(job_options.keys()), key=f"{key_prefix}_job")
+    selected_job = st.selectbox(
+        "Job",
+        list(job_options.keys()),
+        key=f"{key_prefix}_job",
+    )
 
-        if employee_restricted and employee_id is not None:
-            employee_df = df_query("SELECT name FROM employees WHERE id = ?", (employee_id,))
-            employee_name = employee_df.iloc[0]["name"] if not employee_df.empty else "Current Employee"
-            st.text_input("Employee", value=str(employee_name), disabled=True, key=f"{key_prefix}_employee_name")
-            selected_employee_id = employee_id
-        else:
-            selected_employee = st.selectbox("Employee", list(employee_options.keys()), key=f"{key_prefix}_employee")
-            selected_employee_id = employee_options[selected_employee]
+    if employee_restricted and employee_id is not None:
+        employee_df = df_query("SELECT name FROM employees WHERE id = ?", (employee_id,))
+        employee_name = (
+            str(employee_df.iloc[0]["name"])
+            if not employee_df.empty
+            else "Current Employee"
+        )
+        st.text_input(
+            "Employee",
+            value=employee_name,
+            disabled=True,
+            key=f"{key_prefix}_employee_name",
+        )
+        selected_employee_id = int(employee_id)
+        selected_employee_label = employee_name
+    else:
+        selected_employee_label = st.selectbox(
+            "Employee",
+            list(employee_options.keys()),
+            key=f"{key_prefix}_employee",
+        )
+        selected_employee_id = employee_options[selected_employee_label]
 
-        col1, col2, col3, col4 = st.columns(4)
-        work_date = col1.text_input("Date", value=str(date.today()), key=f"{key_prefix}_date")
-        start_time = col2.text_input("Start Time", value="07:00", key=f"{key_prefix}_start")
-        finish_time = col3.text_input("Finish Time", value="15:30", key=f"{key_prefix}_finish")
-        break_minutes = col4.number_input("Break Minutes", min_value=0.0, step=15.0, value=30.0, key=f"{key_prefix}_break")
+    col1, col2, col3, col4 = st.columns(4)
+    work_date_value = col1.date_input(
+        "Date",
+        value=date.today(),
+        key=f"{key_prefix}_date",
+    )
+    start_time_value = col2.time_input(
+        "Start Time",
+        value=time(7, 0),
+        step=timedelta(minutes=15),
+        key=f"{key_prefix}_start",
+    )
+    finish_time_value = col3.time_input(
+        "Finish Time",
+        value=time(15, 30),
+        step=timedelta(minutes=15),
+        key=f"{key_prefix}_finish",
+    )
+    break_minutes = int(col4.number_input(
+        "Break Minutes",
+        min_value=0,
+        max_value=300,
+        step=15,
+        value=30,
+        key=f"{key_prefix}_break",
+    ))
 
-        calculated_hours = calculate_hours_from_times(start_time, finish_time, break_minutes)
-        total_hours = st.number_input("Total Hours", min_value=0.0, step=0.25, value=float(calculated_hours), key=f"{key_prefix}_hours")
-        work_type = st.selectbox("Work Type", ["Painting", "Prep", "Spraying", "Touch-ups", "Travel", "Site Setup", "Other"], key=f"{key_prefix}_work_type")
-        notes = st.text_area("Notes", key=f"{key_prefix}_notes")
-        submitted = st.form_submit_button("Submit Timesheet")
+    start_text = start_time_value.strftime("%H:%M")
+    finish_text = finish_time_value.strftime("%H:%M")
+    calculation_error = ""
+    try:
+        total_hours = calculate_shift_hours(
+            start_time_value,
+            finish_time_value,
+            break_minutes,
+        )
+    except ValueError as exc:
+        total_hours = 0.0
+        calculation_error = str(exc)
 
-        if submitted:
-            if total_hours <= 0:
-                st.error("Total hours must be greater than 0.")
-            else:
-                save_timesheet_entry(job_options[selected_job], selected_employee_id, work_date, start_time, finish_time, break_minutes, total_hours, work_type, notes)
-                st.success("Timesheet submitted and linked to the selected job.")
-                refresh()
+    overnight = finish_time_value < start_time_value
+    metric_col1, metric_col2 = st.columns(2)
+    metric_col1.metric("Calculated Total Hours", f"{total_hours:.2f}")
+    metric_col2.metric("Shift Type", "Overnight" if overnight else "Same day")
+    st.caption(
+        f"Automatic calculation: {start_text} to {finish_text}, less "
+        f"{break_minutes} break minutes. Total hours cannot be manually overwritten."
+    )
+    if calculation_error:
+        st.error(calculation_error)
+
+    work_type = st.selectbox(
+        "Work Type",
+        ["Painting", "Prep", "Spraying", "Touch-ups", "Travel", "Site Setup", "Other"],
+        key=f"{key_prefix}_work_type",
+    )
+    notes = st.text_area("Notes", key=f"{key_prefix}_notes")
+
+    review_payload = {
+        "job_id": job_options[selected_job],
+        "job": selected_job,
+        "employee_id": selected_employee_id,
+        "employee": selected_employee_label,
+        "date": work_date_value.isoformat(),
+        "start": start_text,
+        "finish": finish_text,
+        "break_minutes": break_minutes,
+        "calculated_hours": total_hours,
+        "work_type": work_type,
+        "notes": notes,
+    }
+
+    st.markdown("### Review Timesheet")
+    with st.container(border=True):
+        st.dataframe(
+            pd.DataFrame([{
+                "Job": selected_job,
+                "Employee": selected_employee_label,
+                "Date": work_date_value.isoformat(),
+                "Start": start_text,
+                "Finish": finish_text,
+                "Break": f"{break_minutes} min",
+                "Calculated Hours": f"{total_hours:.2f}",
+                "Work Type": work_type,
+                "Notes": notes,
+            }]),
+            width="stretch",
+            hide_index=True,
+        )
+        accepted = review_acceptance_checkbox(
+            key_prefix,
+            review_payload,
+            "I have reviewed these selections and accept that they are correct.",
+        )
+
+    submitted = st.button(
+        "Submit Timesheet",
+        key=f"{key_prefix}_submit",
+        type="primary",
+        disabled=not accepted or total_hours <= 0 or bool(calculation_error),
+    )
+    if submitted:
+        timesheet_id = save_timesheet_entry(
+            job_options[selected_job],
+            selected_employee_id,
+            work_date_value.isoformat(),
+            start_text,
+            finish_text,
+            break_minutes,
+            total_hours,
+            work_type,
+            notes,
+        )
+        st.session_state[f"{key_prefix}_review_fingerprint"] = ""
+        st.success(f"Timesheet #{timesheet_id} submitted and linked to the selected job.")
+        refresh()
 
 
 def timesheets_page(employee_restricted=False):
@@ -3706,17 +4873,35 @@ def timesheets_page(employee_restricted=False):
             options = {f"{r['Date']} - {r['Employee']} - {r['Job No']} - {r['Hours']} hrs": int(r["id"]) for _, r in df.iterrows()}
             selected = st.selectbox("Select timesheet to approve/delete", list(options.keys()))
             selected_id = options[selected]
-            col1, col2, col3 = st.columns(3)
-            if col1.button("Mark Approved"):
-                execute("UPDATE timesheet_entries SET status = 'Approved' WHERE id = ?", (selected_id,))
+            selected_review = df[df["id"].astype(int) == int(selected_id)].drop(
+                columns=["id"],
+                errors="ignore",
+            )
+            st.markdown("### Selection Review")
+            st.dataframe(selected_review, width="stretch", hide_index=True)
+            accepted_action = review_acceptance_checkbox(
+                "timesheet_admin_action",
+                selected_review.to_dict(orient="records"),
+                (
+                    "I have reviewed this timesheet and accept that the action I choose "
+                    "will update its status and labour-cost posting."
+                ),
+            )
+            col1, col2, col3, col4 = st.columns(4)
+            if col1.button("Mark Approved", disabled=not accepted_action):
+                set_timesheet_status(selected_id, "Approved")
                 st.success("Timesheet approved.")
                 refresh()
-            if col2.button("Mark Paid"):
-                execute("UPDATE timesheet_entries SET status = 'Paid' WHERE id = ?", (selected_id,))
+            if col2.button("Mark Paid", disabled=not accepted_action):
+                set_timesheet_status(selected_id, "Paid")
                 st.success("Timesheet marked as paid.")
                 refresh()
-            if col3.button("Delete Timesheet"):
-                execute("DELETE FROM timesheet_entries WHERE id = ?", (selected_id,))
+            if col3.button("Reject", disabled=not accepted_action):
+                set_timesheet_status(selected_id, "Rejected")
+                st.success("Timesheet rejected and any labour-cost posting was reversed.")
+                refresh()
+            if col4.button("Delete Timesheet", disabled=not accepted_action):
+                delete_timesheet_entry(selected_id)
                 st.success("Timesheet deleted.")
                 refresh()
     with tab_by_job:
@@ -3738,8 +4923,31 @@ def timesheets_page(employee_restricted=False):
             if by_job.empty:
                 st.info("No timesheets saved for this job.")
             else:
-                st.metric("Total Hours for Job", f"{float(by_job['Hours'].fillna(0).sum()):.2f}")
-                st.dataframe(by_job, width="stretch", hide_index=True)
+                total_job_hours = float(by_job["Hours"].fillna(0).sum())
+                st.markdown("### Selection Review")
+                st.dataframe(
+                    pd.DataFrame([{
+                        "Selected Job": selected_job,
+                        "Timesheet Count": len(by_job),
+                        "Total Hours": f"{total_job_hours:.2f}",
+                    }]),
+                    width="stretch",
+                    hide_index=True,
+                )
+                accepted_job_review = review_acceptance_checkbox(
+                    "timesheet_by_job_review",
+                    {
+                        "job_id": selected_job_id,
+                        "timesheet_count": len(by_job),
+                        "total_hours": total_job_hours,
+                    },
+                    "I have reviewed and accept this job selection.",
+                )
+                if accepted_job_review:
+                    st.metric("Total Hours for Job", f"{total_job_hours:.2f}")
+                    st.dataframe(by_job, width="stretch", hide_index=True)
+                else:
+                    st.info("Accept the selected job review to display its timesheets.")
 
 
 # =============================
@@ -3992,7 +5200,12 @@ def estimating_rate_library_page():
         )
         if uploaded is not None:
             try:
+                if uploaded_file_size(uploaded) > MAX_CSV_UPLOAD_BYTES:
+                    raise ValueError("CSV is larger than the 5 MB upload limit.")
+                uploaded.seek(0)
                 preview_df = pd.read_csv(uploaded)
+                if len(preview_df) > MAX_CSV_IMPORT_ROWS:
+                    raise ValueError("CSV contains more than 10,000 rows.")
                 st.dataframe(preview_df.head(25), width="stretch", hide_index=True)
                 st.caption(f"{len(preview_df):,} row(s) detected.")
                 if st.button("Import Rate Library", type="primary", key="estimating_rate_library_import_button"):
@@ -4316,8 +5529,12 @@ def render_estimate_line_item_csv_importer(selected_estimate_id):
             return
 
         try:
+            if uploaded_file_size(uploaded) > MAX_CSV_UPLOAD_BYTES:
+                raise ValueError("CSV is larger than the 5 MB upload limit.")
             uploaded.seek(0)
             source_df = pd.read_csv(uploaded)
+            if len(source_df) > MAX_CSV_IMPORT_ROWS:
+                raise ValueError("CSV contains more than 10,000 rows.")
             prepared_df = _prepare_estimate_line_import_dataframe(source_df)
             st.dataframe(prepared_df, width="stretch", hide_index=True)
             st.metric(
@@ -4384,27 +5601,34 @@ def render_estimate_line_item_csv_importer(selected_estimate_id):
             st.error(f"Could not import this estimate working sheet: {exc}")
 
 
-def estimate_totals(estimate_id, labour_hours, labour_rate, material_allowance, access_equipment_allowance, subcontractor_allowance, sundries_allowance, margin_percent, contingency_percent, gst_percent):
+def estimate_totals(
+    estimate_id,
+    labour_hours,
+    labour_rate,
+    material_allowance,
+    access_equipment_allowance,
+    subcontractor_allowance,
+    sundries_allowance,
+    margin_percent,
+    contingency_percent,
+    gst_percent,
+    pricing_method="Target Gross Margin",
+):
     line_df = df_query("SELECT COALESCE(SUM(line_total), 0) AS line_total FROM estimate_line_items WHERE estimate_id = ?", (estimate_id,))
     line_total = float(line_df.iloc[0]["line_total"] or 0) if not line_df.empty else 0.0
-    labour_total = float(labour_hours or 0) * float(labour_rate or 0)
-    direct_total = line_total + labour_total + float(material_allowance or 0) + float(access_equipment_allowance or 0) + float(subcontractor_allowance or 0) + float(sundries_allowance or 0)
-    contingency_amount = direct_total * (float(contingency_percent or 0) / 100)
-    subtotal = direct_total + contingency_amount
-    margin_amount = subtotal * (float(margin_percent or 0) / 100)
-    total_ex_gst = subtotal + margin_amount
-    gst_amount = total_ex_gst * (float(gst_percent or 0) / 100)
-    total_inc_gst = total_ex_gst + gst_amount
-    return {
-        "line_total": round(line_total, 2),
-        "labour_total": round(labour_total, 2),
-        "direct_total": round(direct_total, 2),
-        "contingency_amount": round(contingency_amount, 2),
-        "margin_amount": round(margin_amount, 2),
-        "total_ex_gst": round(total_ex_gst, 2),
-        "gst_amount": round(gst_amount, 2),
-        "total_inc_gst": round(total_inc_gst, 2),
-    }
+    return calculate_estimate_pricing(
+        line_total=line_total,
+        labour_hours=labour_hours,
+        labour_rate=labour_rate,
+        material_allowance=material_allowance,
+        access_equipment_allowance=access_equipment_allowance,
+        subcontractor_allowance=subcontractor_allowance,
+        sundries_allowance=sundries_allowance,
+        pricing_percent=margin_percent,
+        contingency_percent=contingency_percent,
+        gst_percent=gst_percent,
+        pricing_method=pricing_method,
+    )
 
 
 def recalc_estimate_totals(estimate_id):
@@ -4415,7 +5639,9 @@ def recalc_estimate_totals(estimate_id):
     totals = estimate_totals(
         estimate_id,
         r["labour_hours"], r["labour_rate"], r["material_allowance"], r["access_equipment_allowance"],
-        r["subcontractor_allowance"], r["sundries_allowance"], r["margin_percent"], r["contingency_percent"], r["gst_percent"]
+        r["subcontractor_allowance"], r["sundries_allowance"], r["margin_percent"],
+        r["contingency_percent"], r["gst_percent"],
+        r.get("pricing_method") or "Markup",
     )
     execute("""
         UPDATE estimate_working_sheets
@@ -4571,10 +5797,16 @@ def estimate_working_sheet_page():
                     INSERT INTO estimate_working_sheets
                     (job_id, estimate_no, estimate_date, revision, status, labour_hours, labour_rate,
                      material_allowance, access_equipment_allowance, subcontractor_allowance, sundries_allowance,
-                     margin_percent, contingency_percent, gst_percent, total_ex_gst, gst_amount, total_inc_gst,
+                     margin_percent, contingency_percent, gst_percent, pricing_method,
+                     total_ex_gst, gst_amount, total_inc_gst,
                      created_at, updated_at, notes)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (selected_job_id, estimate_no, estimate_date, revision, "Draft", 0, 120, 0, 0, 0, 0, 20, 0, 10, 0, 0, 0, now, now, notes))
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    selected_job_id, estimate_no, estimate_date, revision, "Draft",
+                    0, 120, 0, 0, 0, 0, 35, 0, 10, "Target Gross Margin",
+                    0, 0, 0, now, now, notes,
+                ))
+                record_audit_event("estimate_created", "estimate", estimate_no, {"job_id": selected_job_id})
                 st.success("Estimate working sheet created.")
                 refresh()
 
@@ -4633,19 +5865,48 @@ def estimate_working_sheet_page():
             subcontractor_allowance = col9.number_input("Subcontractor Allowance", min_value=0.0, step=100.0, value=float(current["subcontractor_allowance"] or 0))
             sundries_allowance = col10.number_input("Sundries / Consumables", min_value=0.0, step=50.0, value=float(current["sundries_allowance"] or 0))
 
-            col11, col12, col13 = st.columns(3)
-            margin_percent = col11.number_input("Margin %", min_value=0.0, step=1.0, value=float(current["margin_percent"] or 0))
-            contingency_percent = col12.number_input("Contingency %", min_value=0.0, step=1.0, value=float(current["contingency_percent"] or 0))
-            gst_percent = col13.number_input("GST %", min_value=0.0, step=1.0, value=float(current["gst_percent"] or 10))
+            col11, col12, col13, col14 = st.columns(4)
+            pricing_methods = ["Target Gross Margin", "Markup"]
+            current_pricing_method = str(current.get("pricing_method") or "Markup")
+            if current_pricing_method not in pricing_methods:
+                current_pricing_method = "Markup"
+            pricing_method = col11.selectbox(
+                "Pricing Method",
+                pricing_methods,
+                index=pricing_methods.index(current_pricing_method),
+                help="Gross margin divides by 1 − margin rate. Markup adds a percentage to cost.",
+            )
+            pricing_label = (
+                "Target Gross Margin %"
+                if pricing_method == "Target Gross Margin"
+                else "Markup %"
+            )
+            margin_percent = col12.number_input(
+                pricing_label,
+                min_value=0.0,
+                max_value=99.0 if pricing_method == "Target Gross Margin" else 500.0,
+                step=1.0,
+                value=min(
+                    float(current["margin_percent"] or 0),
+                    99.0 if pricing_method == "Target Gross Margin" else 500.0,
+                ),
+            )
+            contingency_percent = col13.number_input("Contingency %", min_value=0.0, max_value=100.0, step=1.0, value=float(current["contingency_percent"] or 0))
+            gst_percent = col14.number_input("GST %", min_value=0.0, max_value=100.0, step=1.0, value=float(current["gst_percent"] or 10))
             notes = st.text_area("Notes / Scope Notes", value=str(current["notes"] or ""))
 
-            preview = estimate_totals(selected_estimate_id, labour_hours, labour_rate, material_allowance, access_equipment_allowance, subcontractor_allowance, sundries_allowance, margin_percent, contingency_percent, gst_percent)
+            preview = estimate_totals(
+                selected_estimate_id, labour_hours, labour_rate, material_allowance,
+                access_equipment_allowance, subcontractor_allowance, sundries_allowance,
+                margin_percent, contingency_percent, gst_percent, pricing_method,
+            )
             st.markdown("### Pricing Preview")
-            c1, c2, c3, c4 = st.columns(4)
+            c1, c2, c3, c4, c5 = st.columns(5)
             c1.metric("Direct Cost", f"${preview['direct_total']:,.2f}")
-            c2.metric("Margin", f"${preview['margin_amount']:,.2f}")
+            c2.metric("Pricing Addition", f"${preview['margin_amount']:,.2f}")
             c3.metric("Total Ex GST", f"${preview['total_ex_gst']:,.2f}")
             c4.metric("Total Inc GST", f"${preview['total_inc_gst']:,.2f}")
+            c5.metric("Achieved Gross Margin", f"{preview['achieved_margin_percent']:,.2f}%")
 
             saved = st.form_submit_button("Save Estimate Summary")
             if saved:
@@ -4653,13 +5914,24 @@ def estimate_working_sheet_page():
                     UPDATE estimate_working_sheets
                     SET estimate_no = ?, estimate_date = ?, revision = ?, status = ?, labour_hours = ?, labour_rate = ?,
                         material_allowance = ?, access_equipment_allowance = ?, subcontractor_allowance = ?, sundries_allowance = ?,
-                        margin_percent = ?, contingency_percent = ?, gst_percent = ?, total_ex_gst = ?, gst_amount = ?, total_inc_gst = ?,
+                        margin_percent = ?, contingency_percent = ?, gst_percent = ?, pricing_method = ?,
+                        total_ex_gst = ?, gst_amount = ?, total_inc_gst = ?,
                         updated_at = ?, notes = ?
                     WHERE id = ?
                 """, (estimate_no, estimate_date, revision, status, labour_hours, labour_rate, material_allowance,
                       access_equipment_allowance, subcontractor_allowance, sundries_allowance, margin_percent, contingency_percent,
-                      gst_percent, preview["total_ex_gst"], preview["gst_amount"], preview["total_inc_gst"],
+                      gst_percent, pricing_method, preview["total_ex_gst"], preview["gst_amount"], preview["total_inc_gst"],
                       datetime.now().strftime("%Y-%m-%d %H:%M:%S"), notes, selected_estimate_id))
+                record_audit_event(
+                    "estimate_pricing_updated",
+                    "estimate",
+                    selected_estimate_id,
+                    {
+                        "pricing_method": pricing_method,
+                        "pricing_percent": margin_percent,
+                        "total_ex_gst": preview["total_ex_gst"],
+                    },
+                )
                 st.success("Estimate summary saved.")
                 refresh()
 
@@ -4770,9 +6042,15 @@ def restore_product_list():
     restored = 0
     for row in products:
         execute("""
-            INSERT OR REPLACE INTO products
+            INSERT INTO products
             (product_code, product_name, supplier, unit, price_ex_gst, notes)
             VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(product_code) DO UPDATE SET
+                product_name = excluded.product_name,
+                supplier = excluded.supplier,
+                unit = excluded.unit,
+                price_ex_gst = excluded.price_ex_gst,
+                notes = excluded.notes
         """, row)
         restored += 1
 
@@ -4795,9 +6073,15 @@ def restore_taubmans_product_list():
     restored = 0
     for product_name, product_code, taubmans_sku, unit, price_ex_gst in products:
         execute("""
-            INSERT OR REPLACE INTO products
+            INSERT INTO products
             (product_code, product_name, supplier, unit, price_ex_gst, notes)
             VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(product_code) DO UPDATE SET
+                product_name = excluded.product_name,
+                supplier = excluded.supplier,
+                unit = excluded.unit,
+                price_ex_gst = excluded.price_ex_gst,
+                notes = excluded.notes
         """, (
             product_code,
             product_name,
@@ -4830,9 +6114,15 @@ def restore_haymes_and_taubmans_product_lists():
     restored = 0
     for product_code, product_name, supplier, unit, price_ex_gst, notes in products:
         execute("""
-            INSERT OR REPLACE INTO products
+            INSERT INTO products
             (product_code, product_name, supplier, unit, price_ex_gst, notes)
             VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(product_code) DO UPDATE SET
+                product_name = excluded.product_name,
+                supplier = excluded.supplier,
+                unit = excluded.unit,
+                price_ex_gst = excluded.price_ex_gst,
+                notes = excluded.notes
         """, (
             product_code,
             product_name,
@@ -4867,36 +6157,12 @@ def combined_paint_product_count():
 
 
 def restore_builders_clients_and_employees():
-    builders = [('Builder', 'Ausmar Homes Pty Ltd', 'Compliance Team', '07 5319 1500', 'compliance@ausmargroup.com.au', '8 Flinders Lane, Maroochydore QLD 4558', '1083000', '55 087 236 208', '30 Days', 'Annual Period Trade Contract'), ('Developer / Builder', 'OneLife Property Group', 'Bryce Curran', '0421 069 817', 'brycecurran@hotmail.com', 'Sunshine Coast', '', '', '30 Days', 'Multi-residential complexes'), ('Builder', 'Thompson Homes', '', '', '', '', '', '', '30 Days', 'Existing JobHub builder'), ('Client / Developer', 'Palm Lakes', '', '', '', 'Pelican Waters', '', '', '30 Days', 'Palm Lakes Pelican Waters'), ('Interior Designer', 'Box Clever Interiors', 'Design Team', '07 5309 5640', 'info@boxcleverinteriors.com.au', 'PO Box 208, Moffat Beach QLD 4551', '', '08 007 428 613', '', 'Bannister project designer'), ('Interior Designer', 'Inka Interiors', 'Sheena Hanks', '0438 308 672', 'info@inkainteriors.com.au', 'Basement Level, 811 Stanley St, Woolloongabba', '', '', '', 'Cunningham project designer'), ('Painting Contractor', 'Emerald Painting Company Pty Ltd', 'Anthony Des Johnston', '0410 949 719', 'des@emeraldpainting.com.au', '20 Warenna Crescent, Glenvale QLD 4350', '', '85 169 333 957', '', 'Industry contact'), ('Supplier', 'Dulux Australia', '', '07 5443 7255', '', 'Cnr Amaroo St & Maroochydore Rd, Maroochydore QLD 4558', '', '67 000 049 427', '', 'Supplier'), ('Builder', 'Greenrock Building', '', '', '', '', '', '', '30 Days', 'Client history'), ('Builder', 'Rejuvenate Group', '', '', '', '', '', '', '30 Days', 'School works'), ('Builder', 'Adlar Homes', '', '', '', 'Maroochydore', '', '', '30 Days', 'Client history'), ('Builder', 'Darren Hunt Homes', '', '', '', '', '', '', '30 Days', 'Custom homes'), ('Builder', 'Watherston Building', '', '', '', '', '', '', '30 Days', 'Custom homes'), ('Commercial Client', 'Stockland Aura', '', '', '', 'Aura', '', '', '', 'Commercial developments'), ('Commercial Builder', 'FDC Constructions', 'Simon Hawkins / Adam Pickering', '', '', '', '', '', '', 'Outreach'), ('Commercial Client', 'Comiskey Group', 'Paul / David / Rob & team', '', '', 'Sunshine Coast', '', '', '', 'Hospitality venue'), ('Education Client', 'Nambour State College', '', '', '', 'Nambour', '', '', '', 'School works'), ('Education Client', 'Currimundi State School', '', '', '', 'Currimundi', '', '', '', 'School works'), ('Education Client', 'Currimundi Special School', '', '', '', 'Currimindi', '', '', '', 'School works'), ('Education Client', 'Gympie South State School', '', '', '', 'Gympie', '', '', '', 'School works'), ('Education Client', 'Good Shepherd Lutheran School', '', '', '', '', '', '', '', 'School works')]
+    """Historical embedded master data was removed for privacy and safety."""
+    raise RuntimeError(
+        "Embedded customer and employee data has been removed. "
+        "Use the protected CSV import workflow instead."
+    )
 
-    employees = [('Bryce', '', '', 60.0, 66.0, 'Active', ''), ('Brodrick', '', '', 45.0, 49.5, 'Active', ''), ('Sol', '', '', 50.0, 55.0, 'Active', ''), ('Critter', '', '', 40.0, 44.0, 'Active', ''), ('Greg', '', '', 46.0, 50.6, 'Active', ''), ('Chris Nagy', '', '', 50.0, 55.0, 'Active', ''), ('Isaac', '', '', 46.0, 50.6, 'Active', ''), ('Rob Pullin', '', '', 45.0, 49.5, 'Active', ''), ('Ian', '', '', 46.0, 50.6, 'Active', ''), ('Tim', '', '', 45.0, 49.5, 'Active', ''), ('Anth', '', '', 35.0, 38.5, 'Active', ''), ('River', '', '', 32.5, 35.75, 'Active', ''), ('Dipper', '', '', 45.0, 49.5, 'Active', ''), ('Vlad 1', '', '', 45.0, 49.5, 'Active', ''), ('Vlad 2', '', '', 45.0, 49.5, 'Active', ''), ('Ryan', '', '', 45.0, 49.5, 'Active', '')]
-
-    restored_builders = 0
-    restored_employees = 0
-
-    for row in builders:
-        execute("""
-            INSERT OR REPLACE INTO builders_clients
-            (type, name, contact_name, phone, email, address, qbcc, abn, terms, notes)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, row)
-        restored_builders += 1
-
-    for row in employees:
-        execute("""
-            INSERT OR REPLACE INTO employees
-            (name, role, phone, base_hourly_rate, rate_plus_10, status, notes)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, row)
-        restored_employees += 1
-
-    # Recreate employee login accounts where missing, without duplicating existing logins.
-    try:
-        seed_app_users()
-    except Exception:
-        pass
-
-    return restored_builders, restored_employees
 
 
 def builders_clients_count():
@@ -5586,7 +6852,8 @@ def job_cost_summary_dataframe():
 
     materials = df_query("""
         SELECT m.job_id,
-               COALESCE(SUM(COALESCE(m.qty_required, 0) * COALESCE(m.custom_unit_price, p.price_ex_gst, 0)), 0) AS 'Actual Material Cost',
+               COALESCE(SUM(COALESCE(m.qty_required, 0) * COALESCE(m.custom_unit_price, p.price_ex_gst, 0)), 0) AS 'Committed Material Cost',
+               COALESCE(SUM(COALESCE(m.qty_received, 0) * COALESCE(m.custom_unit_price, p.price_ex_gst, 0)), 0) AS 'Actual Material Cost',
                COALESCE(SUM(COALESCE(m.qty_required, 0)), 0) AS 'Material Qty Required',
                COALESCE(SUM(COALESCE(m.qty_received, 0)), 0) AS 'Material Qty Received',
                COUNT(*) AS 'Material Lines'
@@ -5598,7 +6865,10 @@ def job_cost_summary_dataframe():
     wages = df_query("""
         SELECT w.job_id,
                COALESCE(SUM(COALESCE(w.hours, 0)), 0) AS 'Wage Hours',
-               COALESCE(SUM(COALESCE(w.hours, 0) * COALESCE(e.rate_plus_10, e.base_hourly_rate, 0)), 0) AS 'Actual Labour Cost',
+               COALESCE(SUM(
+                   COALESCE(w.hours, 0) *
+                   COALESCE(NULLIF(w.hourly_rate_snapshot, 0), e.rate_plus_10, e.base_hourly_rate, 0)
+               ), 0) AS 'Actual Labour Cost',
                COUNT(*) AS 'Wage Lines'
         FROM wage_entries w
         LEFT JOIN employees e ON e.id = w.employee_id
@@ -5629,6 +6899,8 @@ def job_cost_summary_dataframe():
         JOIN (
             SELECT job_id, MAX(id) AS max_id
             FROM estimate_working_sheets
+            WHERE COALESCE(archived, 0) = 0
+              AND COALESCE(status, 'Draft') NOT IN ('Lost', 'Superseded')
             GROUP BY job_id
         ) latest ON latest.max_id = e.id
     """)
@@ -5639,7 +6911,7 @@ def job_cost_summary_dataframe():
             df = df.merge(extra, on="job_id", how="left")
 
     number_cols = [
-        "Contract Value", "Actual Material Cost", "Material Qty Required", "Material Qty Received",
+        "Contract Value", "Committed Material Cost", "Actual Material Cost", "Material Qty Required", "Material Qty Received",
         "Material Lines", "Wage Hours", "Actual Labour Cost", "Wage Lines", "Timesheet Hours",
         "Timesheet Lines", "Estimated Labour Hours", "Estimated Labour Rate", "Estimated Materials",
         "Estimated Access / Equipment", "Estimated Subcontractor", "Estimated Sundries",
@@ -5889,11 +7161,14 @@ def jobhub_ai_context(selected_job_id=None):
                 LIMIT 50
             """, (selected_job_id,))
             if not materials.empty:
+                if not ai_personal_data_enabled():
+                    materials = materials.drop(columns=["Notes"], errors="ignore")
                 lines.append("\nMATERIALS")
                 lines.append(materials.to_csv(index=False))
 
             timesheets = df_query("""
-                SELECT e.name AS 'Employee',
+                SELECT t.employee_id AS 'Employee ID',
+                       e.name AS 'Employee',
                        t.work_date AS 'Date',
                        t.total_hours AS 'Hours',
                        t.work_type AS 'Work Type',
@@ -5906,6 +7181,14 @@ def jobhub_ai_context(selected_job_id=None):
                 LIMIT 50
             """, (selected_job_id,))
             if not timesheets.empty:
+                if not ai_personal_data_enabled():
+                    timesheets["Employee"] = timesheets["Employee ID"].map(
+                        lambda value: f"Staff #{int(value)}"
+                    )
+                    timesheets = timesheets.drop(
+                        columns=["Employee ID", "Notes"],
+                        errors="ignore",
+                    )
                 lines.append("\nTIMESHEETS")
                 lines.append(timesheets.to_csv(index=False))
     else:
@@ -5920,103 +7203,8 @@ def jobhub_ai_context(selected_job_id=None):
     return "\n".join(lines)[:18000]
 
 
-def jobhub_ai_answer(question, context_text):
-    api_key = jobhub_ai_api_key()
-    if not api_key:
-        return None, "OPENAI_API_KEY is missing. Add it in Streamlit Secrets first."
-
-    payload = {
-        "model": jobhub_ai_model(),
-        "input": (
-            "You are JobHub AI for Premier Brushworks, a painting and decorating business. "
-            "Use only the JobHub context provided. Give practical, direct advice for quoting, job costs, scheduling, materials, "
-            "staffing, risks and next actions. If data is missing, say what is missing. Do not invent details.\n\n"
-            "JOBHUB CONTEXT:\n" + context_text + "\n\nUSER QUESTION:\n" + str(question)
-        ),
-    }
-
-    try:
-        response = requests.post(
-            "https://api.openai.com/v1/responses",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json=payload,
-            timeout=60,
-        )
-        if response.status_code >= 400:
-            return None, f"OpenAI API error {response.status_code}: {response.text[:1000]}"
-
-        data = response.json()
-        if data.get("output_text"):
-            return data["output_text"], None
-
-        parts = []
-        for item in data.get("output", []) or []:
-            for content in item.get("content", []) or []:
-                if isinstance(content, dict) and content.get("text"):
-                    parts.append(str(content["text"]))
-
-        return "\n".join(parts) if parts else json.dumps(data)[:3000], None
-    except Exception as e:
-        return None, f"OpenAI request failed: {e}"
 
 
-def jobhub_ai_assistant_page():
-    st.header("JobHub AI Assistant")
-    st.caption("Ask an AI assistant about your JobHub data, job costs, quotes, scheduling and risks.")
-
-    if not jobhub_ai_api_key():
-        st.warning("OPENAI_API_KEY is not set yet. Add it in Streamlit Secrets.")
-        st.code('OPENAI_API_KEY = "sk-..."\nOPENAI_MODEL = "gpt-5.5"', language="toml")
-        return
-
-    job_options = get_job_options()
-    mode = st.radio("Context", ["All Jobs Overview", "Selected Job"], horizontal=True, key="ai_context_mode")
-    selected_job_id = None
-
-    if mode == "Selected Job":
-        if not job_options:
-            st.info("Create a job first.")
-            return
-        selected_job = st.selectbox("Select Job", list(job_options.keys()), key="ai_selected_job")
-        selected_job_id = job_options[selected_job]
-
-    quick = st.selectbox(
-        "Quick Question",
-        [
-            "Custom",
-            "Which jobs are at risk of running over budget?",
-            "What should I check before quoting this job?",
-            "How many painters do I need to finish this job on time?",
-            "What materials or timesheets look unusual?",
-            "Give me a director-level summary for this week.",
-        ],
-        key="ai_quick_question",
-    )
-    default_question = "" if quick == "Custom" else quick
-
-    question = st.text_area(
-        "Ask JobHub AI",
-        value=default_question,
-        height=120,
-        placeholder="Example: Review this job and tell me the margin risk, labour pressure and next actions.",
-        key="ai_question",
-    )
-
-    context_text = jobhub_ai_context(selected_job_id)
-    if st.checkbox("Show data being sent to AI", value=False, key="ai_show_context"):
-        st.text_area("Context Preview", value=context_text, height=300)
-
-    if st.button("Ask JobHub AI", key="ask_jobhub_ai"):
-        if not question.strip():
-            st.error("Enter a question first.")
-        else:
-            with st.spinner("JobHub AI is reviewing your data..."):
-                answer, error = jobhub_ai_answer(question, context_text)
-            if error:
-                st.error(error)
-            else:
-                st.markdown("### Answer")
-                st.write(answer)
 
 
 
@@ -6121,259 +7309,8 @@ def save_app_builder_note(topic, note, source="Manual / AI"):
     """, (topic, note, source, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
 
 
-def app_builder_ai_call(question, include_web=False, require_web=False, selected_mode="Code Helper"):
-    api_key = jobhub_ai_api_key()
-    if not api_key:
-        return None, "OPENAI_API_KEY is missing. Add it in Streamlit Secrets first."
-
-    file_tree = "\n".join(app_builder_file_tree())
-    reqs = app_builder_read_file("requirements.txt", max_chars=6000)
-    schema = app_builder_read_file("SUPABASE_SCHEMA_MANUAL_BACKUP.sql", max_chars=12000)
-    snippets = app_builder_relevant_code_snippets(question)
-    saved_notes = app_builder_notes_context()
-
-    system_prompt = f"""
-You are App Builder AI inside Premier Brushworks JobHub.
-You help the owner improve and maintain this Streamlit + Supabase business app.
-
-Rules:
-- Be practical and direct.
-- Help design features, find likely bugs, improve speed, improve database structure, and plan safe changes.
-- If asked to change the app, provide a clear build plan and exact code/pseudocode sections.
-- Do NOT pretend you have already changed GitHub or deployed the app.
-- Do NOT expose or ask for secrets.
-- If live web research is enabled, use current public documentation and include citations in the answer where available.
-- If something is risky, say so and suggest the safest next step.
-- This AI can learn by saving notes in app_builder_notes. It does not retrain model weights.
-Mode: {selected_mode}
-"""
-
-    context = f"""
-APP FILE TREE:
-{file_tree}
-
-REQUIREMENTS:
-{reqs}
-
-DATABASE SCHEMA EXCERPT:
-{schema}
-
-RELEVANT CURRENT APP CODE SNIPPETS:
-{snippets}
-
-SAVED APP BUILDER LEARNINGS:
-{saved_notes}
-"""
-
-    payload = {
-        "model": jobhub_ai_model(),
-        "input": system_prompt + "\n\n" + context + "\n\nUSER REQUEST:\n" + str(question),
-    }
-
-    if include_web:
-        payload["tools"] = [{"type": "web_search"}]
-        payload["tool_choice"] = "required" if require_web else "auto"
-
-    try:
-        response = requests.post(
-            "https://api.openai.com/v1/responses",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json=payload,
-            timeout=90,
-        )
-        if response.status_code >= 400:
-            return None, f"OpenAI API error {response.status_code}: {response.text[:1200]}"
-
-        data = response.json()
-
-        if data.get("output_text"):
-            return data["output_text"], None
-
-        parts = []
-        for item in data.get("output", []) or []:
-            for content in item.get("content", []) or []:
-                if isinstance(content, dict):
-                    if content.get("text"):
-                        parts.append(str(content["text"]))
-                    elif content.get("type") == "output_text" and content.get("text"):
-                        parts.append(str(content["text"]))
-
-        return "\n".join(parts) if parts else json.dumps(data)[:4000], None
-    except Exception as e:
-        return None, f"OpenAI request failed: {e}"
 
 
-def app_builder_ai_page():
-    st.header("App Builder AI")
-    st.caption("Use this to help build, improve and research the JobHub app. It can use live internet research and save learnings for later.")
-
-    if not jobhub_ai_api_key():
-        st.warning("OPENAI_API_KEY is not set yet. Add it in Streamlit Secrets.")
-        st.code('OPENAI_API_KEY = "sk-..."\nOPENAI_MODEL = "gpt-5.5"', language="toml")
-        return
-
-    section = st.radio(
-        "Section",
-        ["Build / Fix the App", "Self-Edit Code", "Internet Learning", "Saved Learnings"],
-        horizontal=True,
-        key="app_builder_section",
-    )
-
-    if section == "Build / Fix the App":
-        st.subheader("Build / Fix the App")
-        mode = st.selectbox(
-            "Mode",
-            ["Code Helper", "Bug Fixer", "Feature Planner", "Speed Optimiser", "Database / Supabase Helper", "Streamlit UI Helper"],
-            key="app_builder_mode",
-        )
-
-        include_web = st.checkbox("Allow live internet research", value=True, key="app_builder_include_web")
-        require_web = st.checkbox("Force web search for this request", value=False, key="app_builder_require_web")
-
-        quick = st.selectbox(
-            "Quick request",
-            [
-                "Custom",
-                "Review this app and suggest the next 5 improvements",
-                "Help me make the app faster",
-                "Help me add a new feature safely",
-                "Review the latest Streamlit/Supabase/OpenAI docs before answering",
-                "Tell me what code files need changing for this feature",
-            ],
-            key="app_builder_quick",
-        )
-        default_question = "" if quick == "Custom" else quick
-
-        question = st.text_area(
-            "What do you want to build or fix?",
-            value=default_question,
-            height=150,
-            placeholder="Example: Add a daily dashboard showing jobs starting this week, overdue invoices, missing timesheets and jobs at margin risk.",
-            key="app_builder_question",
-        )
-
-        if st.checkbox("Show app code context being sent", value=False, key="app_builder_show_context"):
-            st.markdown("### File tree")
-            st.code("\n".join(app_builder_file_tree()))
-            st.markdown("### Relevant snippets")
-            st.code(app_builder_relevant_code_snippets(question or "jobhub app"))
-
-        if st.button("Ask App Builder AI", key="ask_app_builder_ai"):
-            if not question.strip():
-                st.error("Enter a build/fix request first.")
-            else:
-                with st.spinner("App Builder AI is reviewing JobHub..."):
-                    answer, error = app_builder_ai_call(
-                        question=question,
-                        include_web=include_web,
-                        require_web=require_web,
-                        selected_mode=mode,
-                    )
-
-                if error:
-                    st.error(error)
-                else:
-                    st.markdown("### App Builder AI")
-                    st.write(answer)
-
-                    with st.expander("Save this as a learning note"):
-                        note_topic = st.text_input("Topic", value=question[:80], key="save_ai_learning_topic")
-                        note_text = st.text_area("Note to save", value=answer[:4000], height=200, key="save_ai_learning_text")
-                        if st.button("Save Learning Note", key="save_ai_learning_button"):
-                            save_app_builder_note(note_topic, note_text, source="App Builder AI")
-                            st.success("Learning note saved.")
-
-    elif section == "Self-Edit Code":
-        app_builder_self_edit_section()
-
-    elif section == "Internet Learning":
-        st.subheader("Internet Learning")
-        st.caption("Ask the AI to research current docs or ideas online, then save the best findings into JobHub's learning notes.")
-
-        topic = st.text_input(
-            "Research topic",
-            value="Latest Streamlit performance best practices for database apps",
-            key="internet_learning_topic",
-        )
-        focus = st.text_area(
-            "What should it learn?",
-            value="Find current practical guidance that would help improve Premier Brushworks JobHub. Keep it focused on Streamlit, Supabase, OpenAI, security, speed and maintainability.",
-            height=120,
-            key="internet_learning_focus",
-        )
-
-        if st.button("Research Internet and Summarise", key="internet_learning_button"):
-            prompt = (
-                f"Research this topic using current web sources: {topic}\n\n"
-                f"Focus: {focus}\n\n"
-                "Return practical findings, implementation notes for this app, risks, and links/citations where available. "
-                "Then finish with a short 'Save this learning' summary."
-            )
-            with st.spinner("Researching online..."):
-                answer, error = app_builder_ai_call(
-                    question=prompt,
-                    include_web=True,
-                    require_web=True,
-                    selected_mode="Internet Researcher",
-                )
-
-            if error:
-                st.error(error)
-            else:
-                st.markdown("### Research Summary")
-                st.write(answer)
-
-                with st.expander("Save research into JobHub learning notes", expanded=True):
-                    note_topic = st.text_input("Topic to save", value=topic, key="save_research_topic")
-                    note_text = st.text_area("Research note", value=answer[:6000], height=250, key="save_research_note")
-                    if st.button("Save Research Learning", key="save_research_button"):
-                        save_app_builder_note(note_topic, note_text, source="Internet Research")
-                        st.success("Research learning saved.")
-
-    else:
-        st.subheader("Saved Learnings")
-        notes = df_query("""
-            SELECT id AS 'ID',
-                   topic AS 'Topic',
-                   source AS 'Source',
-                   created_at AS 'Created',
-                   note AS 'Note'
-            FROM app_builder_notes
-            ORDER BY id DESC
-        """)
-
-        if notes.empty:
-            st.info("No saved learnings yet.")
-        else:
-            st.dataframe(notes[["ID", "Topic", "Source", "Created"]], width="stretch", hide_index=True)
-
-            note_options = {f"{row['Topic']} | {row['Source']} | ID {row['ID']}": int(row["ID"]) for _, row in notes.iterrows()}
-            selected = st.selectbox("Open learning note", list(note_options.keys()), key="open_learning_note")
-            selected_id = note_options[selected]
-            row = notes[notes["ID"].astype(int) == selected_id].iloc[0]
-            st.markdown(f"### {row['Topic']}")
-            st.caption(f"{row['Source']} • {row['Created']}")
-            st.write(row["Note"])
-
-            col1, col2 = st.columns(2)
-            if col1.button("Delete This Learning Note", key="delete_learning_note"):
-                execute("DELETE FROM app_builder_notes WHERE id = ?", (selected_id,))
-                st.success("Learning note deleted.")
-                refresh()
-
-        with st.expander("Add manual learning note"):
-            with st.form("manual_learning_note_form"):
-                topic = st.text_input("Topic")
-                source = st.text_input("Source", value="Manual")
-                note = st.text_area("Note", height=180)
-                submitted = st.form_submit_button("Save Manual Learning")
-                if submitted:
-                    if not topic.strip() or not note.strip():
-                        st.error("Topic and note are required.")
-                    else:
-                        save_app_builder_note(topic, note, source=source)
-                        st.success("Learning note saved.")
-                        refresh()
 
 
 
@@ -6386,6 +7323,14 @@ SELF_EDIT_ALLOWED_FILES = {
     "SUPABASE_SCHEMA_MANUAL_BACKUP.sql",
     ".streamlit/config.toml",
 }
+
+
+def self_edit_enabled():
+    return (
+        is_admin()
+        and str(os.getenv("JOBHUB_ENABLE_SELF_EDIT", "")).strip().casefold()
+        in {"1", "true", "yes", "on"}
+    )
 
 
 def self_edit_safe_path(target_file):
@@ -6500,7 +7445,22 @@ def self_edit_apply_replacements(replacements):
     backup_root.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    touched_files = set()
+    backup_map = {}
+
+    def restore_every_touched_file():
+        restored = []
+        for original, backup in backup_map.items():
+            try:
+                shutil.copy2(backup, original)
+                restored.append(original)
+            except Exception as restore_error:
+                result["messages"].append(
+                    f"Could not restore {original}: {restore_error}"
+                )
+        if restored:
+            result["messages"].append(
+                "Restored all touched files: " + ", ".join(sorted(restored))
+            )
 
     try:
         for item in replacements:
@@ -6512,12 +7472,14 @@ def self_edit_apply_replacements(replacements):
             if error:
                 raise RuntimeError(error)
 
-            if str(path) not in touched_files:
-                backup_path = backup_root / f"{path.name}.{stamp}.bak"
+            path = path.resolve()
+            if str(path) not in backup_map:
+                safe_backup_name = re.sub(r"[^A-Za-z0-9._-]", "_", str(path))
+                backup_path = backup_root / f"{safe_backup_name}.{stamp}.bak"
                 backup_path.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(path, backup_path)
                 result["backups"].append(str(backup_path))
-                touched_files.add(str(path))
+                backup_map[str(path)] = str(backup_path)
 
             current = path.read_text(encoding="utf-8", errors="ignore")
             updated = current.replace(find, replace, 1)
@@ -6531,20 +7493,17 @@ def self_edit_apply_replacements(replacements):
                 py_compile.compile("pb_jobhub_app.py", doraise=True)
                 result["messages"].append("Python compile check passed after self-edit.")
             except Exception as compile_error:
-                # Restore all backups.
-                for backup in result["backups"]:
-                    backup_path = Path(backup)
-                    original_name = backup_path.name.split(".")[0]
-                    if original_name == "pb_jobhub_app":
-                        # backup filename is pb_jobhub_app.py.TIMESTAMP.bak
-                        shutil.copy2(backup_path, Path("pb_jobhub_app.py"))
-                result["messages"].append(f"Compile failed. Restored backup. Error: {compile_error}")
+                restore_every_touched_file()
+                result["messages"].append(
+                    f"Compile failed. Every touched file was rolled back. Error: {compile_error}"
+                )
                 return result
 
         result["success"] = True
         return result
 
     except Exception as e:
+        restore_every_touched_file()
         result["messages"].append(f"Self-edit failed: {e}")
         return result
 
@@ -6607,6 +7566,12 @@ USER REQUEST:
 
 
 def app_builder_self_edit_section():
+    if not self_edit_enabled():
+        st.error(
+            "Runtime source editing is disabled in production. "
+            "Use App Builder AI to prepare a patch, then review, test and deploy it through version control."
+        )
+        return
     st.subheader("Controlled Self-Edit")
     st.warning(
         "This lets App Builder AI apply exact code replacements to the running app files. "
@@ -6788,8 +7753,9 @@ def ai_provider():
 
 def ai_disabled_message():
     return (
-        "AI is switched off on this hosted Render app because no OpenAI API key is configured. "
-        "Add AI_PROVIDER=openai and OPENAI_API_KEY in Render Environment to use online AI. "
+        "External AI is switched off unless it is explicitly enabled. "
+        "After approving your privacy policy, add AI_PROVIDER=openai, OPENAI_API_KEY and "
+        "JOBHUB_ALLOW_EXTERNAL_AI=true in the hosting environment. "
         "For free Ollama AI, run JobHub locally on the same computer as Ollama."
     )
 
@@ -6813,6 +7779,18 @@ def openai_enabled():
     return bool(str(jobhub_ai_api_key() or "").strip())
 
 
+def external_ai_enabled():
+    return str(ai_secret("JOBHUB_ALLOW_EXTERNAL_AI", "false")).strip().casefold() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def ai_personal_data_enabled():
+    return str(ai_secret("JOBHUB_AI_INCLUDE_PERSONAL_DATA", "false")).strip().casefold() in {
+        "1", "true", "yes", "on",
+    }
+
+
 def ollama_status():
     try:
         response = requests.get(f"{ollama_base_url()}/api/tags", timeout=5)
@@ -6830,8 +7808,13 @@ def ai_backend_ready():
         return False, ai_disabled_message()
 
     if provider == "openai":
-        if openai_enabled():
+        if openai_enabled() and external_ai_enabled():
             return True, f"Using OpenAI online model {jobhub_ai_model()}."
+        if not external_ai_enabled():
+            return False, (
+                "External AI is disabled. Set JOBHUB_ALLOW_EXTERNAL_AI=true only after "
+                "approving the organisation's AI data policy."
+            )
         return False, "AI_PROVIDER is openai but OPENAI_API_KEY is missing."
 
     if provider == "ollama":
@@ -6879,6 +7862,11 @@ def ollama_generate(prompt, system="", context="", model=None, timeout=None):
 
 
 def openai_responses_answer(prompt, context_text="", include_web=False, require_web=False, system_text=""):
+    if not external_ai_enabled():
+        return None, (
+            "External AI is disabled by policy. An administrator must explicitly set "
+            "JOBHUB_ALLOW_EXTERNAL_AI=true before JobHub can send data to OpenAI."
+        )
     api_key = jobhub_ai_api_key()
     if not api_key:
         return None, "OPENAI_API_KEY is missing."
@@ -6907,6 +7895,16 @@ def openai_responses_answer(prompt, context_text="", include_web=False, require_
             return None, f"OpenAI API error {response.status_code}: {response.text[:1000]}"
 
         data = response.json()
+        record_audit_event(
+            "external_ai_request",
+            "ai_request",
+            "",
+            {
+                "model": jobhub_ai_model(),
+                "context_characters": len(str(context_text or "")),
+                "web_search": bool(include_web),
+            },
+        )
         if data.get("output_text"):
             return data["output_text"], None
 
@@ -7005,26 +8003,62 @@ def fetch_web_page_text(url, max_chars=18000):
     Free URL fetcher for internet learning.
     The user provides URLs. JobHub fetches the page and local Ollama summarises it.
     """
-    url = str(url or "").strip()
-    if not url:
+    current_url = str(url or "").strip()
+    if not current_url:
         return "", "URL is blank."
 
-    parsed = urlparse(url)
-    if parsed.scheme not in ["http", "https"]:
-        return "", "Only http and https URLs are allowed."
-
     try:
-        response = requests.get(
-            url,
-            timeout=20,
-            headers={
-                "User-Agent": "PremierBrushworksJobHubLearningBot/1.0"
-            }
-        )
-        if response.status_code >= 400:
-            return "", f"Could not fetch URL. Status {response.status_code}"
+        raw_content = b""
+        response_encoding = "utf-8"
+        for redirect_count in range(4):
+            valid, validation_error = validate_public_http_url(current_url)
+            if not valid:
+                return "", validation_error
 
-        text = response.text
+            with requests.get(
+                current_url,
+                timeout=(5, 20),
+                headers={"User-Agent": "PremierBrushworksJobHubLearningBot/2.0"},
+                allow_redirects=False,
+                stream=True,
+            ) as response:
+                if response.status_code in {301, 302, 303, 307, 308}:
+                    location = response.headers.get("Location", "")
+                    if not location:
+                        return "", "The URL redirected without a destination."
+                    current_url = urljoin(current_url, location)
+                    if redirect_count >= 3:
+                        return "", "The URL exceeded the redirect safety limit."
+                    continue
+                if response.status_code >= 400:
+                    return "", f"Could not fetch URL. Status {response.status_code}"
+
+                content_type = str(response.headers.get("Content-Type", "")).casefold()
+                if not any(
+                    allowed in content_type
+                    for allowed in ("text/", "application/json", "application/xml", "application/xhtml")
+                ):
+                    return "", "Only text, HTML, JSON and XML pages can be learned from."
+                content_length = int(response.headers.get("Content-Length", "0") or 0)
+                if content_length > 1_000_000:
+                    return "", "The web page exceeds the 1 MB safety limit."
+
+                chunks = []
+                bytes_read = 0
+                for chunk in response.iter_content(chunk_size=16_384):
+                    if not chunk:
+                        continue
+                    bytes_read += len(chunk)
+                    if bytes_read > 1_000_000:
+                        return "", "The web page exceeds the 1 MB safety limit."
+                    chunks.append(chunk)
+                raw_content = b"".join(chunks)
+                response_encoding = response.encoding or "utf-8"
+                break
+        else:
+            return "", "The URL could not be fetched safely."
+
+        text = raw_content.decode(response_encoding, errors="replace")
         text = re.sub(r"(?is)<script.*?>.*?</script>", " ", text)
         text = re.sub(r"(?is)<style.*?>.*?</style>", " ", text)
         text = re.sub(r"(?is)<noscript.*?>.*?</noscript>", " ", text)
@@ -7038,6 +8072,12 @@ def fetch_web_page_text(url, max_chars=18000):
         if len(text) > max_chars:
             text = text[:max_chars] + "\n...[trimmed]..."
 
+        record_audit_event(
+            "external_url_fetched",
+            "learning_source",
+            current_url,
+            {"bytes": len(raw_content)},
+        )
         return text, None
     except Exception as e:
         return "", f"Fetch failed: {e}"
@@ -7107,7 +8147,9 @@ def free_local_ai_setup_page():
         'OLLAMA_BASE_URL = "http://localhost:11434"\n'
         'OLLAMA_MODEL = "llama3.2:3b"\n'
         'OLLAMA_TIMEOUT = "120"\n\n'
-        '# Optional paid fallback only if you ever want it:\n'
+        '# Optional external AI, only after privacy approval:\n'
+        '# JOBHUB_ALLOW_EXTERNAL_AI = "true"\n'
+        '# JOBHUB_AI_INCLUDE_PERSONAL_DATA = "false"\n'
         '# OPENAI_API_KEY = "sk-..."\n'
         '# OPENAI_MODEL = "gpt-5.5"\n',
         language="toml",
@@ -7141,9 +8183,17 @@ def app_builder_ai_page():
         st.warning(status_message)
         st.info("Open the Free Local AI Setup tab for install and connection steps.")
 
+    app_builder_sections = [
+        "Build / Fix the App",
+        "Internet Learning",
+        "Saved Learnings",
+        "Free Local AI Setup",
+    ]
+    if self_edit_enabled():
+        app_builder_sections.insert(1, "Self-Edit Code")
     section = st.radio(
         "Section",
-        ["Build / Fix the App", "Self-Edit Code", "Internet Learning", "Saved Learnings", "Free Local AI Setup"],
+        app_builder_sections,
         horizontal=True,
         key="app_builder_section",
     )
@@ -7158,10 +8208,16 @@ def app_builder_ai_page():
 
         include_web = False
         require_web = False
+        app_builder_external_consent = True
 
         if ai_provider() == "openai" or (ai_provider() == "auto" and openai_enabled()):
             include_web = st.checkbox("Allow OpenAI live internet research", value=True, key="app_builder_include_web")
             require_web = st.checkbox("Force OpenAI web search for this request", value=False, key="app_builder_require_web")
+            app_builder_external_consent = st.checkbox(
+                "I confirm the displayed code context may be sent to the configured external AI provider",
+                value=False,
+                key="app_builder_external_consent",
+            )
         else:
             st.info("Free local Ollama mode is active. For internet learning, use the Internet Learning tab with URLs.")
 
@@ -7196,6 +8252,8 @@ def app_builder_ai_page():
         if st.button("Ask App Builder AI", key="ask_app_builder_ai"):
             if not question.strip():
                 st.error("Enter a build/fix request first.")
+            elif not app_builder_external_consent:
+                st.error("Review the code context and confirm external AI data sharing first.")
             else:
                 with st.spinner("App Builder AI is reviewing JobHub..."):
                     answer, error = app_builder_ai_call(
@@ -7388,9 +8446,19 @@ def jobhub_ai_assistant_page():
     if st.checkbox("Show data being sent to AI", value=False, key="ai_show_context"):
         st.text_area("Context Preview", value=context_text, height=300)
 
+    external_consent = True
+    if ai_provider() == "openai":
+        external_consent = st.checkbox(
+            "I confirm this reviewed context may be sent to the configured external AI provider",
+            value=False,
+            key="ai_external_data_consent",
+        )
+
     if st.button("Ask JobHub AI", key="ask_jobhub_ai"):
         if not question.strip():
             st.error("Enter a question first.")
+        elif not external_consent:
+            st.error("Review the context and confirm external AI data sharing first.")
         else:
             with st.spinner("JobHub AI is reviewing your data..."):
                 answer, error = jobhub_ai_answer(question, context_text)
@@ -7448,13 +8516,25 @@ def pb_business_days(start_value, end_value):
 
 
 def pb_next_variation_no(job_id):
-    df = df_query("SELECT COUNT(*) AS c FROM job_variations WHERE job_id = ?", (job_id,))
-    return f"VAR-{int(df.iloc[0]['c']) + 1:03d}" if not df.empty else "VAR-001"
+    df = df_query(
+        "SELECT variation_no FROM job_variations WHERE job_id = ?",
+        (job_id,),
+    )
+    return next_scoped_number(
+        df["variation_no"].tolist() if not df.empty else [],
+        "VAR",
+    )
 
 
 def pb_next_claim_no(job_id):
-    df = df_query("SELECT COUNT(*) AS c FROM invoice_claims WHERE job_id = ?", (job_id,))
-    return f"CLAIM-{int(df.iloc[0]['c']) + 1:03d}" if not df.empty else "CLAIM-001"
+    df = df_query(
+        "SELECT claim_no FROM invoice_claims WHERE job_id = ?",
+        (job_id,),
+    )
+    return next_scoped_number(
+        df["claim_no"].tolist() if not df.empty else [],
+        "CLAIM",
+    )
 
 
 def pb_job_cost_frame():
@@ -7479,7 +8559,8 @@ def pb_job_cost_frame():
 
     materials = df_query("""
         SELECT m.job_id,
-               COALESCE(SUM(COALESCE(m.qty_required, 0) * COALESCE(m.custom_unit_price, p.price_ex_gst, 0)), 0) AS 'Material Cost',
+               COALESCE(SUM(COALESCE(m.qty_required, 0) * COALESCE(m.custom_unit_price, p.price_ex_gst, 0)), 0) AS 'Committed Material Cost',
+               COALESCE(SUM(COALESCE(m.qty_received, 0) * COALESCE(m.custom_unit_price, p.price_ex_gst, 0)), 0) AS 'Material Cost',
                COALESCE(SUM(COALESCE(m.qty_required, 0)), 0) AS 'Material Qty Required',
                COALESCE(SUM(COALESCE(m.qty_received, 0)), 0) AS 'Material Qty Received',
                COUNT(*) AS 'Material Lines'
@@ -7491,7 +8572,10 @@ def pb_job_cost_frame():
     wages = df_query("""
         SELECT w.job_id,
                COALESCE(SUM(COALESCE(w.hours, 0)), 0) AS 'Wage Hours',
-               COALESCE(SUM(COALESCE(w.hours, 0) * COALESCE(e.rate_plus_10, e.base_hourly_rate, 0)), 0) AS 'Labour Cost'
+               COALESCE(SUM(
+                   COALESCE(w.hours, 0) *
+                   COALESCE(NULLIF(w.hourly_rate_snapshot, 0), e.rate_plus_10, e.base_hourly_rate, 0)
+               ), 0) AS 'Labour Cost'
         FROM wage_entries w
         LEFT JOIN employees e ON e.id = w.employee_id
         GROUP BY w.job_id
@@ -7530,7 +8614,13 @@ def pb_job_cost_frame():
 
     claims = df_query("""
         SELECT job_id,
-               COALESCE(SUM(COALESCE(amount_ex_gst, 0)), 0) AS 'Claimed Amount',
+               COALESCE(SUM(
+                   CASE
+                       WHEN status NOT IN ('Draft', 'Void', 'Cancelled')
+                       THEN COALESCE(amount_ex_gst, 0)
+                       ELSE 0
+                   END
+               ), 0) AS 'Claimed Amount',
                COALESCE(SUM(CASE WHEN status = 'Paid' THEN COALESCE(amount_ex_gst, 0) ELSE 0 END), 0) AS 'Paid Amount',
                COUNT(*) AS 'Claim Count'
         FROM invoice_claims
@@ -7543,7 +8633,7 @@ def pb_job_cost_frame():
             df = df.merge(extra, on="job_id", how="left")
 
     numeric_cols = [
-        "Contract Value", "Material Cost", "Material Qty Required", "Material Qty Received", "Material Lines",
+        "Contract Value", "Committed Material Cost", "Material Cost", "Material Qty Required", "Material Qty Received", "Material Lines",
         "Wage Hours", "Labour Cost", "Timesheet Hours", "Timesheet Lines", "Budget Labour Hours",
         "Budget Labour Cost", "Budget Materials", "Budget Access", "Budget Subcontractors", "Budget Sundries",
         "Target GP %", "Variation Value", "Approved Variation Value", "Variation Count", "Claimed Amount",
@@ -7931,22 +9021,52 @@ def pb_control_timesheet_approval():
     selected = st.multiselect("Select timesheets", list(options.keys()), key="approve_timesheets_select")
     selected_ids = [options[x] for x in selected]
 
+    accepted_bulk_action = False
+    if selected_ids:
+        selected_review = pending[pending["ID"].astype(int).isin(selected_ids)].copy()
+        st.markdown("### Selection Review")
+        st.dataframe(selected_review, width="stretch", hide_index=True)
+        selected_hours = float(selected_review["Hours"].fillna(0).sum())
+        st.caption(
+            f"{len(selected_review)} timesheet(s) selected, "
+            f"{selected_hours:.2f} total calculated hours."
+        )
+        accepted_bulk_action = review_acceptance_checkbox(
+            "control_timesheet_bulk_action",
+            selected_review.to_dict(orient="records"),
+            (
+                "I have reviewed every selected timesheet and accept that the chosen "
+                "bulk action will update their statuses and labour-cost postings."
+            ),
+        )
+    else:
+        st.info("Select one or more timesheets to display the review and acceptance box.")
+
     c1, c2, c3 = st.columns(3)
-    if c1.button("Approve Selected Timesheets"):
-        for ts_id in selected_ids:
-            execute("UPDATE timesheet_entries SET status = 'Approved' WHERE id = ?", (ts_id,))
-        st.success(f"Approved {len(selected_ids)} timesheet(s).")
-        refresh()
-    if c2.button("Reject Selected Timesheets"):
-        for ts_id in selected_ids:
-            execute("UPDATE timesheet_entries SET status = 'Rejected' WHERE id = ?", (ts_id,))
-        st.warning(f"Rejected {len(selected_ids)} timesheet(s).")
-        refresh()
-    if c3.button("Mark Selected As Paid/Processed"):
-        for ts_id in selected_ids:
-            execute("UPDATE timesheet_entries SET status = 'Processed' WHERE id = ?", (ts_id,))
-        st.info(f"Marked {len(selected_ids)} timesheet(s) as processed.")
-        refresh()
+    if c1.button("Approve Selected Timesheets", disabled=not accepted_bulk_action):
+        if not selected_ids:
+            st.error("Select at least one timesheet.")
+        else:
+            for ts_id in selected_ids:
+                set_timesheet_status(ts_id, "Approved")
+            st.success(f"Approved and posted {len(selected_ids)} timesheet(s).")
+            refresh()
+    if c2.button("Reject Selected Timesheets", disabled=not accepted_bulk_action):
+        if not selected_ids:
+            st.error("Select at least one timesheet.")
+        else:
+            for ts_id in selected_ids:
+                set_timesheet_status(ts_id, "Rejected")
+            st.warning(f"Rejected and reversed {len(selected_ids)} timesheet(s).")
+            refresh()
+    if c3.button("Mark Selected As Paid", disabled=not accepted_bulk_action):
+        if not selected_ids:
+            st.error("Select at least one timesheet.")
+        else:
+            for ts_id in selected_ids:
+                set_timesheet_status(ts_id, "Paid")
+            st.info(f"Marked {len(selected_ids)} timesheet(s) as paid.")
+            refresh()
 
 
 def pb_control_ai_job_review(df):
@@ -8201,7 +9321,7 @@ def render_job_linked_info(job_id, expanded=True):
     job_name = str(job_details.iloc[0]["Job Name"])
     st.markdown(f"## {job_no} - {job_name}")
     material_details = safe_df_query("""
-    
+
         SELECT m.id AS "ID",
                COALESCE(NULLIF(m.custom_product_code, ''), p.product_code, '') AS "Product Code",
                COALESCE(NULLIF(m.custom_product_name, ''), p.product_name, '') AS "Product Name",
@@ -8242,7 +9362,9 @@ def render_job_linked_info(job_id, expanded=True):
                w.hours AS "Hours",
                e.base_hourly_rate AS "Base Rate",
                e.rate_plus_10 AS "Rate + 10%",
-               ROUND(w.hours * e.rate_plus_10, 2) AS "Total Wage Cost",
+               COALESCE(w.hours, 0) *
+               COALESCE(NULLIF(w.hourly_rate_snapshot, 0), e.rate_plus_10, e.base_hourly_rate, 0)
+                   AS "Total Wage Cost",
                w.notes AS "Notes"
         FROM wage_entries w
         JOIN employees e ON e.id = w.employee_id
@@ -8518,7 +9640,7 @@ def render_job_linked_info(job_id, expanded=True):
             st.info("No equipment checklist detail saved for this job.")
         else:
             st.dataframe(equipment_detail, width="stretch", hide_index=True)
- 
+
     with tab_control:
         st.markdown("### Variations")
 
@@ -8537,6 +9659,24 @@ def render_job_linked_info(job_id, expanded=True):
         st.divider()
 
         st.markdown("### Generate Job PDFs")
+
+        if st.button(
+            "Generate Day Labour Sheet",
+            key=f"generate_day_labour_pdf_{job_id}",
+        ):
+            try:
+                pdf_path = generate_day_labour_sheet_pdf(job_id)
+                st.success("Day Labour Sheet generated and attached to this job.")
+                with open(pdf_path, "rb") as f:
+                    st.download_button(
+                        "Download Day Labour Sheet",
+                        data=f,
+                        file_name=os.path.basename(pdf_path),
+                        mime="application/pdf",
+                        key=f"download_day_labour_pdf_{job_id}",
+                    )
+            except Exception as e:
+                st.error(f"Could not generate Day Labour Sheet: {e}")
 
         pdf_col1, pdf_col2, pdf_col3 = st.columns(3)
 
@@ -8642,8 +9782,12 @@ def render_job_linked_info(job_id, expanded=True):
 
                 file_path = str(doc["file_path"])
 
-                if os.path.exists(file_path):
-                    with open(file_path, "rb") as f:
+                try:
+                    trusted_path = resolve_trusted_storage_file(file_path)
+                except ValueError:
+                    trusted_path = None
+                if trusted_path and trusted_path.exists():
+                    with open(trusted_path, "rb") as f:
                         st.download_button(
                             label=f"Download {doc['File Name']}",
                             data=f,
@@ -8653,7 +9797,7 @@ def render_job_linked_info(job_id, expanded=True):
                         )
                 else:
                     st.warning("File path not found on disk.")
-    
+
     with tab_photos:
         st.markdown("### Photo Register")
         if photos_meta.empty:
@@ -8830,9 +9974,7 @@ def job_folders_page():
 # START APP
 # =============================
 init_db()
-set_app_setting("starter_jobs_disabled", "yes")
-set_app_setting("starter_data_seeded", "yes")
-mark_seeded_if_existing_data_present()
+apply_schema_migrations()
 seed_data()
 seed_app_users()
 require_login()
@@ -9105,21 +10247,30 @@ elif menu == "Jobs":
             contract_value = col5.number_input("Contract Value Ex GST", min_value=0.0, step=100.0)
 
             col6, col7 = st.columns(2)
-            start_date = col6.text_input("Start Date", placeholder="DD/MM/YYYY")
-            end_date = col7.text_input("End Date", placeholder="DD/MM/YYYY")
+            start_date_value = col6.date_input("Start Date", value=None)
+            end_date_value = col7.date_input("End Date", value=None)
+            start_date = start_date_value.isoformat() if start_date_value else ""
+            end_date = end_date_value.isoformat() if end_date_value else ""
 
             notes = st.text_area("Notes")
             submitted = st.form_submit_button("Save Job")
 
             if submitted and job_no:
                 builder_id = builder_options.get(builder_label) if builder_label else None
-                execute("""
-                    INSERT OR REPLACE INTO jobs
-                    (job_no, job_name, builder_client_id, site_address, status, leading_hand, start_date, end_date, contract_value, notes)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (job_no, job_name, builder_id, site_address, status, leading_hand, start_date, end_date, contract_value, notes))
-                st.success(f"Saved job {job_no}")
-                refresh()
+                if start_date_value and end_date_value and end_date_value < start_date_value:
+                    st.error("End Date cannot be before Start Date.")
+                else:
+                    try:
+                        execute("""
+                            INSERT INTO jobs
+                            (job_no, job_name, builder_client_id, site_address, status, leading_hand, start_date, end_date, contract_value, notes)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (job_no.strip(), job_name, builder_id, site_address, status, leading_hand, start_date, end_date, contract_value, notes))
+                        record_audit_event("job_created", "job", job_no.strip())
+                        st.success(f"Saved job {job_no}")
+                        refresh()
+                    except Exception:
+                        st.error("That job number already exists or the job could not be saved. Use Edit Existing Job for updates.")
 
     with tab_edit:
         st.subheader("Edit Existing Job")
@@ -9171,17 +10322,32 @@ elif menu == "Jobs":
 
                 if submitted:
                     edit_builder_id = builder_options.get(edit_builder_label) if edit_builder_label else None
-                    execute("""
+                    current_version = int(current["row_version"] or 1)
+                    updated_rows = execute_with_rowcount("""
                         UPDATE jobs
                         SET job_no = ?, job_name = ?, builder_client_id = ?, site_address = ?, status = ?,
-                            leading_hand = ?, start_date = ?, end_date = ?, contract_value = ?, notes = ?
-                        WHERE id = ?
+                            leading_hand = ?, start_date = ?, end_date = ?, contract_value = ?, notes = ?,
+                            row_version = COALESCE(row_version, 1) + 1
+                        WHERE id = ? AND COALESCE(row_version, 1) = ?
                     """, (
                         edit_job_no, edit_job_name, edit_builder_id, edit_site_address, edit_status,
-                        edit_leading_hand, edit_start_date, edit_end_date, edit_contract_value, edit_notes, selected_id
+                        edit_leading_hand, edit_start_date, edit_end_date, edit_contract_value, edit_notes,
+                        selected_id, current_version,
                     ))
-                    st.success(f"Updated job {edit_job_no}")
-                    refresh()
+                    if updated_rows == 0:
+                        st.error(
+                            "This job changed after you opened the form. Reload it and review the latest values "
+                            "before saving again."
+                        )
+                    else:
+                        record_audit_event(
+                            "job_updated",
+                            "job",
+                            selected_id,
+                            {"previous_row_version": current_version},
+                        )
+                        st.success(f"Updated job {edit_job_no}")
+                        refresh()
 
     with tab_remove:
         st.subheader("Remove or Archive Job")
@@ -9196,24 +10362,40 @@ elif menu == "Jobs":
 
             col1, col2 = st.columns(2)
             if col1.button("Archive Job"):
-                execute("UPDATE jobs SET status = 'Archived' WHERE id = ?", (selected_id,))
+                user = get_current_user() or {}
+                execute("""
+                    UPDATE jobs
+                    SET status = 'Archived', archived_at = ?, archived_by = ?,
+                        row_version = COALESCE(row_version, 1) + 1
+                    WHERE id = ?
+                """, (
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    str(user.get("username") or ""),
+                    selected_id,
+                ))
+                record_audit_event("job_archived", "job", selected_id)
                 st.success("Job archived.")
                 refresh()
 
             if col2.button("Delete Job"):
-                linked = (
-                    has_related_records("material_entries", "job_id", selected_id)
-                    or has_related_records("wage_entries", "job_id", selected_id)
-                    or has_related_records("timesheet_entries", "job_id", selected_id)
-                    or has_related_records("estimate_working_sheets", "job_id", selected_id)
-                    or has_related_records("equipment_entries", "job_id", selected_id)
-                    or has_related_records("equipment_checklist_records", "job_id", selected_id)
-                )
+                linked = any(value > 0 for value in linked_job_counts(selected_id).values())
                 if linked:
-                    execute("UPDATE jobs SET status = 'Archived' WHERE id = ?", (selected_id,))
+                    user = get_current_user() or {}
+                    execute("""
+                        UPDATE jobs
+                        SET status = 'Archived', archived_at = ?, archived_by = ?,
+                            row_version = COALESCE(row_version, 1) + 1
+                        WHERE id = ?
+                    """, (
+                        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        str(user.get("username") or ""),
+                        selected_id,
+                    ))
+                    record_audit_event("job_archived", "job", selected_id)
                     st.info("This job has linked records, so it was archived instead of deleted.")
                 else:
                     execute("DELETE FROM jobs WHERE id = ?", (selected_id,))
+                    record_audit_event("empty_job_deleted", "job", selected_id)
                     st.success("Job deleted.")
                 refresh()
 
@@ -9318,28 +10500,48 @@ elif menu == "Jobs":
 
                 if update_archived:
                     edit_builder_id = builder_options_archived.get(edit_builder_label) if edit_builder_label else None
-                    execute("""
+                    current_version = int(current["row_version"] or 1)
+                    updated_rows = execute_with_rowcount("""
                         UPDATE jobs
                         SET job_no = ?, job_name = ?, builder_client_id = ?, site_address = ?, status = ?,
-                            leading_hand = ?, start_date = ?, end_date = ?, contract_value = ?, notes = ?
-                        WHERE id = ?
+                            leading_hand = ?, start_date = ?, end_date = ?, contract_value = ?, notes = ?,
+                            row_version = COALESCE(row_version, 1) + 1
+                        WHERE id = ? AND COALESCE(row_version, 1) = ?
                     """, (
                         edit_job_no, edit_job_name, edit_builder_id, edit_site_address, edit_status,
                         edit_leading_hand, edit_start_date, edit_end_date, edit_contract_value, edit_notes,
-                        selected_archived_id
+                        selected_archived_id, current_version,
                     ))
 
-                    if edit_status != "Archived":
-                        st.success(f"Updated and restored job {edit_job_no}.")
+                    if updated_rows == 0:
+                        st.error(
+                            "This job changed after you opened the form. Reload it and review the latest values "
+                            "before saving again."
+                        )
                     else:
-                        st.success(f"Updated archived job {edit_job_no}.")
-                    refresh()
+                        record_audit_event(
+                            "archived_job_updated",
+                            "job",
+                            selected_archived_id,
+                            {"previous_row_version": current_version},
+                        )
+                        if edit_status != "Archived":
+                            st.success(f"Updated and restored job {edit_job_no}.")
+                        else:
+                            st.success(f"Updated archived job {edit_job_no}.")
+                        refresh()
 
             st.markdown("### Restore or Permanently Delete")
             col_restore, col_delete = st.columns(2)
 
             if col_restore.button("Restore Archived Job to Active"):
-                execute("UPDATE jobs SET status = 'Active' WHERE id = ?", (selected_archived_id,))
+                execute("""
+                    UPDATE jobs
+                    SET status = 'Active', archived_at = '', archived_by = '',
+                        row_version = COALESCE(row_version, 1) + 1
+                    WHERE id = ?
+                """, (selected_archived_id,))
+                record_audit_event("job_restored", "job", selected_archived_id)
                 st.success("Job restored to Active.")
                 refresh()
 
@@ -9464,13 +10666,25 @@ elif menu == "Builders & Clients":
             submitted = st.form_submit_button("Save Builder / Client")
 
             if submitted and name:
-                execute("""
-                    INSERT OR REPLACE INTO builders_clients
-                    (type, name, contact_name, phone, email, address, qbcc, abn, terms, notes)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (typ, name, contact, phone, email, address, qbcc, abn, terms, notes))
-                st.success(f"Saved {name}")
-                refresh()
+                normalised_name = name.strip().casefold()
+                duplicate = df_query(
+                    "SELECT id FROM builders_clients WHERE LOWER(TRIM(name)) = ? LIMIT 1",
+                    (normalised_name,),
+                )
+                if not duplicate.empty:
+                    st.error("A builder/client with that name already exists. Edit or merge the existing record.")
+                else:
+                    try:
+                        execute("""
+                            INSERT INTO builders_clients
+                            (type, name, contact_name, phone, email, address, qbcc, abn, terms, notes, normalised_name)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (typ, name.strip(), contact, phone, email, address, qbcc, abn, terms, notes, normalised_name))
+                        record_audit_event("builder_client_created", "builder_client", name.strip())
+                        st.success(f"Saved {name}")
+                        refresh()
+                    except Exception:
+                        st.error("The builder/client could not be saved. Check for an existing duplicate.")
 
     with tab_edit:
         st.subheader("Edit Builder / Client")
@@ -9503,9 +10717,13 @@ elif menu == "Builders & Clients":
                     execute("""
                         UPDATE builders_clients
                         SET type = ?, name = ?, contact_name = ?, phone = ?, email = ?, address = ?,
-                            qbcc = ?, abn = ?, terms = ?, notes = ?
+                            qbcc = ?, abn = ?, terms = ?, notes = ?, normalised_name = LOWER(TRIM(?))
                         WHERE id = ?
-                    """, (typ, name, contact, phone, email, address, qbcc, abn, terms, notes, selected_id))
+                    """, (
+                        typ, name, contact, phone, email, address, qbcc, abn, terms,
+                        notes, name, selected_id,
+                    ))
+                    record_audit_event("builder_client_updated", "builder_client", selected_id)
                     st.success(f"Updated {name}")
                     refresh()
 
@@ -9751,13 +10969,17 @@ elif menu == "Employees":
             if submitted and name:
                 if rate_plus == 0 and base_rate > 0:
                     rate_plus = round(base_rate * 1.10, 2)
-                execute("""
-                    INSERT OR REPLACE INTO employees
-                    (name, role, phone, base_hourly_rate, rate_plus_10, status, notes)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                """, (name, role, phone, base_rate, rate_plus, status, notes))
-                st.success(f"Saved {name}")
-                refresh()
+                try:
+                    execute("""
+                        INSERT INTO employees
+                        (name, role, phone, base_hourly_rate, rate_plus_10, status, notes)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """, (name.strip(), role, phone, base_rate, rate_plus, status, notes))
+                    record_audit_event("employee_created", "employee", name.strip())
+                    st.success(f"Saved {name}")
+                    refresh()
+                except Exception:
+                    st.error("An employee with that name already exists. Use Edit Employee for updates.")
 
     with tab_edit:
         st.subheader("Edit Employee")
@@ -9961,10 +11183,17 @@ elif menu == "Products":
 
             if submitted and code:
                 execute("""
-                    INSERT OR REPLACE INTO products
+                    INSERT INTO products
                     (product_code, product_name, supplier, unit, price_ex_gst, notes)
                     VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(product_code) DO UPDATE SET
+                        product_name = excluded.product_name,
+                        supplier = excluded.supplier,
+                        unit = excluded.unit,
+                        price_ex_gst = excluded.price_ex_gst,
+                        notes = excluded.notes
                 """, (code, product_name, supplier, unit, price, notes))
+                record_audit_event("product_upserted", "product", code)
                 st.success(f"Saved product {code}")
                 refresh()
 
@@ -10322,7 +11551,9 @@ elif menu == "Wages":
                w.hours AS 'Hours',
                e.base_hourly_rate AS 'Base Rate',
                e.rate_plus_10 AS 'Rate + 10%',
-               ROUND(w.hours * e.rate_plus_10, 2) AS 'Total Wage Cost',
+               COALESCE(w.hours, 0) *
+               COALESCE(NULLIF(w.hourly_rate_snapshot, 0), e.rate_plus_10, e.base_hourly_rate, 0)
+                   AS 'Total Wage Cost',
                w.notes AS 'Notes'
         FROM wage_entries w
         JOIN jobs j ON j.id = w.job_id
@@ -10702,10 +11933,15 @@ elif menu == "Equipment":
 
             if submitted and item_name:
                 execute("""
-                    INSERT OR REPLACE INTO equipment_checklist_items
+                    INSERT INTO equipment_checklist_items
                     (category, item_name, default_qty, notes)
                     VALUES (?, ?, ?, ?)
+                    ON CONFLICT(item_name) DO UPDATE SET
+                        category = excluded.category,
+                        default_qty = excluded.default_qty,
+                        notes = excluded.notes
                 """, (category, item_name, default_qty, notes))
+                record_audit_event("equipment_item_upserted", "equipment_item", item_name)
                 st.success(f"Saved checklist item: {item_name}")
                 refresh()
 
@@ -10856,7 +12092,9 @@ elif menu == "Reports / Export":
                        w.hours AS 'Hours',
                        e.base_hourly_rate AS 'Base Rate',
                        e.rate_plus_10 AS 'Rate + 10%',
-                       ROUND(w.hours * e.rate_plus_10, 2) AS 'Total Wage Cost',
+                       COALESCE(w.hours, 0) *
+                       COALESCE(NULLIF(w.hourly_rate_snapshot, 0), e.rate_plus_10, e.base_hourly_rate, 0)
+                           AS 'Total Wage Cost',
                        w.notes AS 'Notes'
                 FROM wage_entries w
                 JOIN jobs j ON j.id = w.job_id
@@ -11266,7 +12504,9 @@ elif menu == "Reports / Export":
                        w.work_date,
                        w.hours,
                        e.rate_plus_10,
-                       ROUND(w.hours * e.rate_plus_10, 2) AS total_cost,
+                       COALESCE(w.hours, 0) *
+                       COALESCE(NULLIF(w.hourly_rate_snapshot, 0), e.rate_plus_10, e.base_hourly_rate, 0)
+                           AS total_cost,
                        w.notes
                 FROM wage_entries w
                 JOIN jobs j ON j.id = w.job_id

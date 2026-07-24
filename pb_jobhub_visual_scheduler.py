@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-import hmac
 import os
 import sqlite3
 from contextlib import contextmanager
@@ -13,6 +11,12 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+from jobhub_core import (
+    hash_password,
+    is_known_default_password_hash,
+    password_needs_rehash,
+    verify_password as core_verify_password,
+)
 
 try:
     import psycopg2
@@ -264,26 +268,25 @@ def init_linked_schema() -> None:
 # Authentication shared with JobHub
 # -----------------------------------------------------------------------------
 
-def verify_password(password: str, stored_hash: str) -> bool:
-    try:
-        stored_hash = str(stored_hash or "")
-        if stored_hash.startswith("pbkdf2_sha256$"):
-            _, iterations_text, salt, expected = stored_hash.split("$", 3)
-            digest = hashlib.pbkdf2_hmac(
-                "sha256", password.encode("utf-8"), bytes.fromhex(salt), int(iterations_text)
-            ).hex()
-            return hmac.compare_digest(digest, expected)
-        jobhub_hash = hashlib.sha256(password.encode("utf-8")).hexdigest()
-        return hmac.compare_digest(jobhub_hash, stored_hash)
-    except (ValueError, TypeError):
-        return False
-
-
 def authenticate(username: str, password: str):
+    user_columns = table_columns("app_users")
+    security_columns = {
+        "failed_login_count",
+        "locked_until",
+        "must_change_password",
+        "last_login_at",
+    }
+    has_security_columns = security_columns.issubset(user_columns)
+    security_select = (
+        ", u.failed_login_count, u.locked_until, u.must_change_password, u.last_login_at"
+        if has_security_columns
+        else ""
+    )
     df = query_df(
-        """
+        f"""
         SELECT u.id, u.username, u.password_hash, u.role, u.employee_id, u.active,
                e.name AS employee_name
+               {security_select}
         FROM app_users u
         LEFT JOIN employees e ON e.id=u.employee_id
         WHERE LOWER(TRIM(u.username))=LOWER(TRIM(?)) AND COALESCE(u.active,1)=1
@@ -293,7 +296,48 @@ def authenticate(username: str, password: str):
     if df.empty:
         return None
     row = df.iloc[0].to_dict()
-    return row if verify_password(password, row.get("password_hash", "")) else None
+    stored_hash = str(row.get("password_hash", "") or "")
+    if is_known_default_password_hash(stored_hash):
+        return None
+
+    if has_security_columns:
+        locked_until = str(row.get("locked_until", "") or "").strip()
+        if locked_until:
+            try:
+                if datetime.fromisoformat(locked_until) > datetime.now():
+                    return None
+            except ValueError:
+                pass
+
+    if not core_verify_password(password, stored_hash):
+        if has_security_columns:
+            failures = int(row.get("failed_login_count", 0) or 0) + 1
+            lock_value = (
+                (datetime.now() + timedelta(minutes=15)).strftime("%Y-%m-%d %H:%M:%S")
+                if failures >= 5
+                else ""
+            )
+            execute(
+                "UPDATE app_users SET failed_login_count=?, locked_until=? WHERE id=?",
+                (failures, lock_value, int(row["id"])),
+            )
+        return None
+
+    if has_security_columns and int(row.get("must_change_password", 0) or 0) == 1:
+        st.session_state["linked_login_reason"] = "password_change_required"
+        return None
+
+    if has_security_columns:
+        new_hash = hash_password(password) if password_needs_rehash(stored_hash) else stored_hash
+        execute(
+            """
+            UPDATE app_users
+            SET password_hash=?, failed_login_count=0, locked_until='', last_login_at=?
+            WHERE id=?
+            """,
+            (new_hash, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), int(row["id"])),
+        )
+    return row
 
 
 def login_screen() -> None:
@@ -310,10 +354,13 @@ def login_screen() -> None:
             password = st.text_input("Password", type="password")
             submitted = st.form_submit_button("Sign in", type="primary", use_container_width=True)
         if submitted:
+            st.session_state.pop("linked_login_reason", None)
             user = authenticate(username, password)
             if user:
                 st.session_state["linked_user"] = user
                 st.rerun()
+            elif st.session_state.get("linked_login_reason") == "password_change_required":
+                st.error("Change the temporary password in JobHub before signing in to the scheduler.")
             else:
                 st.error("Incorrect JobHub username or password.")
         if JOBHUB_URL:
@@ -1451,4 +1498,3 @@ def render_jobhub_staff_scheduler(user: dict | None = None) -> None:
             page_my_schedule(user)
         else:
             page_my_leave(user)
-

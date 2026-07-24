@@ -1,0 +1,13 @@
+.env
+.streamlit/secrets.toml
+*.db
+*.db-*
+*.bak
+*.pyc
+__pycache__/
+.pytest_cache/
+.testdeps/
+job_files/
+photos/
+exports/
+deleted_jobs/
