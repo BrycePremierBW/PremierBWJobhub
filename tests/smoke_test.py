@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import os
-import py_compile
 import tempfile
 import sys
 from pathlib import Path
@@ -11,10 +10,12 @@ ROOT = Path(__file__).resolve().parents[1]
 os.chdir(ROOT)
 sys.path.insert(0, str(ROOT))
 os.environ.setdefault("DATA_DIR", tempfile.mkdtemp(prefix="jobhub_smoke_"))
+TEST_ADMIN_PASSWORD = "JobHub-Smoke-Test-Only-2026!"
+os.environ.setdefault("JOBHUB_BOOTSTRAP_ADMIN_PASSWORD", TEST_ADMIN_PASSWORD)
 
 for source in ROOT.rglob("*.py"):
     if "__pycache__" not in source.parts:
-        py_compile.compile(str(source), doraise=True)
+        compile(source.read_text(encoding="utf-8"), str(source), "exec")
 
 from streamlit.testing.v1 import AppTest
 
@@ -31,7 +32,7 @@ at = AppTest.from_file(str(ROOT / "pb_jobhub_app.py"), default_timeout=60)
 at.run(timeout=60)
 assert not at.exception, [e.value for e in at.exception]
 at.text_input[0].set_value("admin")
-at.text_input[1].set_value("admin123")
+at.text_input[1].set_value(TEST_ADMIN_PASSWORD)
 at.button[0].click()
 at.run(timeout=60)
 assert not at.exception, [e.value for e in at.exception]

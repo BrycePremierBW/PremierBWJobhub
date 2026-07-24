@@ -1,16 +1,13 @@
 [server]
 headless = true
-fileWatcherType = "none"
-websocketPingInterval = 30
-disconnectedSessionTTL = 600
-enableWebsocketCompression = true
-enableXsrfProtection = true
-
-[runner]
-fastReruns = false
+maxUploadSize = 25
 
 [browser]
 gatherUsageStats = false
 
 [theme]
 base = "light"
+primaryColor = "#8B6F47"
+backgroundColor = "#F7F3ED"
+secondaryBackgroundColor = "#EDE5DA"
+textColor = "#26211C"
