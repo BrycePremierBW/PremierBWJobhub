@@ -4725,6 +4725,176 @@ def delete_timesheet_entry(timesheet_id):
     record_audit_event("timesheet_deleted", "timesheet", timesheet_id)
 
 
+
+
+# PB_JOBHUB_BULK_TIMESHEET_STATUS_FILTERS_V1
+TIMESHEET_STATUS_OPTIONS = ["All", "Submitted", "Approved", "Rejected", "Paid"]
+
+
+def normalise_timesheet_statuses(timesheet_df):
+    """Return a copy with blank/null timesheet statuses treated as Submitted."""
+    work = timesheet_df.copy()
+    if "Status" in work.columns:
+        work["Status"] = (
+            work["Status"]
+            .fillna("Submitted")
+            .astype(str)
+            .str.strip()
+            .replace("", "Submitted")
+            .str.title()
+        )
+    return work
+
+
+def filter_timesheets_by_status(timesheet_df, selected_status):
+    work = normalise_timesheet_statuses(timesheet_df)
+    if selected_status != "All" and "Status" in work.columns:
+        work = work[work["Status"].astype(str) == selected_status]
+    return work.reset_index(drop=True)
+
+
+def timesheet_status_filter(label, key, default="All"):
+    default_index = (
+        TIMESHEET_STATUS_OPTIONS.index(default)
+        if default in TIMESHEET_STATUS_OPTIONS
+        else 0
+    )
+    return st.selectbox(
+        label,
+        TIMESHEET_STATUS_OPTIONS,
+        index=default_index,
+        key=key,
+    )
+
+
+def render_timesheet_bulk_actions(timesheet_df, key_prefix, empty_message="No timesheets match this selection."):
+    """Render a checkbox column and safe bulk status/delete actions."""
+    if timesheet_df.empty:
+        st.info(empty_message)
+        return []
+
+    work = normalise_timesheet_statuses(timesheet_df)
+    if "id" not in work.columns:
+        st.error("Timesheet IDs are unavailable, so bulk actions cannot be performed.")
+        return []
+
+    table_fingerprint = hashlib.sha256(
+        json.dumps(
+            work[["id", "Status"]].to_dict(orient="records"),
+            default=str,
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()[:12]
+
+    selector_df = work.copy()
+    selector_df.insert(0, "Select", False)
+    ordered_columns = ["Select"] + [column for column in selector_df.columns if column != "Select"]
+
+    edited_df = st.data_editor(
+        selector_df[ordered_columns],
+        width="stretch",
+        hide_index=True,
+        disabled=[column for column in ordered_columns if column != "Select"],
+        column_config={
+            "Select": st.column_config.CheckboxColumn(
+                "Select",
+                help="Tick each timesheet to include in the bulk action.",
+                default=False,
+            ),
+            "id": None,
+        },
+        key=f"{key_prefix}_checkbox_table_{table_fingerprint}",
+    )
+
+    selected_ids = (
+        edited_df.loc[edited_df["Select"].fillna(False), "id"]
+        .astype(int)
+        .tolist()
+    )
+
+    if not selected_ids:
+        st.info("Tick one or more timesheets in the Select column.")
+        return []
+
+    selected_review = work[work["id"].astype(int).isin(selected_ids)].copy()
+    visible_review = selected_review.drop(columns=["id"], errors="ignore")
+    selected_hours = float(visible_review["Hours"].fillna(0).sum()) if "Hours" in visible_review.columns else 0.0
+
+    st.markdown("### Selected Timesheets Review")
+    st.dataframe(visible_review, width="stretch", hide_index=True)
+    st.caption(
+        f"{len(selected_ids)} timesheet(s) selected, "
+        f"{selected_hours:.2f} total calculated hours."
+    )
+
+    accepted_action = review_acceptance_checkbox(
+        f"{key_prefix}_bulk_action",
+        selected_review.to_dict(orient="records"),
+        (
+            "I have reviewed every selected timesheet and accept that the chosen "
+            "bulk action will update statuses and labour-cost postings."
+        ),
+    )
+
+    selected_fingerprint = hashlib.sha256(
+        json.dumps(sorted(selected_ids)).encode("utf-8")
+    ).hexdigest()
+    delete_fingerprint_key = f"{key_prefix}_delete_selection_fingerprint"
+    delete_confirm_key = f"{key_prefix}_delete_confirmed"
+    if st.session_state.get(delete_fingerprint_key) != selected_fingerprint:
+        st.session_state[delete_fingerprint_key] = selected_fingerprint
+        st.session_state[delete_confirm_key] = False
+
+    delete_confirmed = st.checkbox(
+        "I understand deleting selected timesheets also removes their linked wage postings.",
+        key=delete_confirm_key,
+    )
+
+    approve_col, paid_col, reject_col, delete_col = st.columns(4)
+
+    if approve_col.button(
+        "Approve Selected",
+        key=f"{key_prefix}_approve",
+        type="primary",
+        disabled=not accepted_action,
+    ):
+        for timesheet_id in selected_ids:
+            set_timesheet_status(timesheet_id, "Approved")
+        st.success(f"Approved {len(selected_ids)} selected timesheet(s).")
+        refresh()
+
+    if paid_col.button(
+        "Mark Selected Paid",
+        key=f"{key_prefix}_paid",
+        disabled=not accepted_action,
+    ):
+        for timesheet_id in selected_ids:
+            set_timesheet_status(timesheet_id, "Paid")
+        st.success(f"Marked {len(selected_ids)} selected timesheet(s) as paid.")
+        refresh()
+
+    if reject_col.button(
+        "Reject Selected",
+        key=f"{key_prefix}_reject",
+        disabled=not accepted_action,
+    ):
+        for timesheet_id in selected_ids:
+            set_timesheet_status(timesheet_id, "Rejected")
+        st.warning(f"Rejected {len(selected_ids)} selected timesheet(s).")
+        refresh()
+
+    if delete_col.button(
+        "Delete Selected",
+        key=f"{key_prefix}_delete",
+        disabled=not accepted_action or not delete_confirmed,
+    ):
+        for timesheet_id in selected_ids:
+            delete_timesheet_entry(timesheet_id)
+        st.success(f"Deleted {len(selected_ids)} selected timesheet(s).")
+        refresh()
+
+    return selected_ids
+
 def timesheet_entry_form(employee_id=None, employee_restricted=False, key_prefix="timesheet"):
     job_options = (
         get_employee_job_options(employee_id)
@@ -4894,6 +5064,7 @@ def timesheet_entry_form(employee_id=None, employee_restricted=False, key_prefix
         refresh()
 
 
+
 def timesheets_page(employee_restricted=False):
     st.header("Timesheets")
     st.caption("Employee hours linked directly to specific jobs.")
@@ -4909,26 +5080,41 @@ def timesheets_page(employee_restricted=False):
             timesheet_entry_form(employee_id=current_employee_id, employee_restricted=True, key_prefix="employee_timesheet")
         with tab_my:
             my_df = df_query("""
-                SELECT t.work_date AS 'Date', j.job_no AS 'Job No', j.job_name AS 'Job Name',
+                SELECT t.id, t.work_date AS 'Date', j.job_no AS 'Job No', j.job_name AS 'Job Name',
                        t.start_time AS 'Start', t.finish_time AS 'Finish', t.break_minutes AS 'Break Minutes',
-                       t.total_hours AS 'Hours', t.work_type AS 'Work Type', t.status AS 'Status', t.notes AS 'Notes'
+                       t.total_hours AS 'Hours', t.work_type AS 'Work Type',
+                       COALESCE(t.status, 'Submitted') AS 'Status', t.notes AS 'Notes'
                 FROM timesheet_entries t
                 JOIN jobs j ON j.id = t.job_id
                 WHERE t.employee_id = ?
                 ORDER BY t.work_date DESC, t.id DESC
                 LIMIT 100
             """, (current_employee_id,))
-            st.dataframe(my_df, width="stretch", hide_index=True)
+            selected_status = timesheet_status_filter(
+                "Show My Timesheets",
+                "employee_timesheet_status_filter",
+                default="All",
+            )
+            my_filtered = filter_timesheets_by_status(my_df, selected_status)
+            st.caption(f"{len(my_filtered)} timesheet(s) shown.")
+            st.dataframe(
+                my_filtered.drop(columns=["id"], errors="ignore"),
+                width="stretch",
+                hide_index=True,
+            )
         return
 
     tab_submit, tab_review, tab_by_job = st.tabs(["Add Timesheet", "Review Timesheets", "Timesheets by Job"])
+
     with tab_submit:
         timesheet_entry_form(key_prefix="admin_timesheet")
+
     with tab_review:
         df = df_query("""
             SELECT t.id, t.work_date AS 'Date', j.job_no AS 'Job No', j.job_name AS 'Job Name', e.name AS 'Employee',
                    t.start_time AS 'Start', t.finish_time AS 'Finish', t.break_minutes AS 'Break Minutes',
-                   t.total_hours AS 'Hours', t.work_type AS 'Work Type', t.status AS 'Status',
+                   t.total_hours AS 'Hours', t.work_type AS 'Work Type',
+                   COALESCE(t.status, 'Submitted') AS 'Status',
                    t.submitted_by AS 'Submitted By', t.submitted_at AS 'Submitted At', t.notes AS 'Notes'
             FROM timesheet_entries t
             JOIN jobs j ON j.id = t.job_id
@@ -4936,69 +5122,69 @@ def timesheets_page(employee_restricted=False):
             ORDER BY t.work_date DESC, t.id DESC
             LIMIT 500
         """)
+
         if df.empty:
             st.info("No timesheets submitted yet.")
         else:
-            st.dataframe(df.drop(columns=["id"]), width="stretch", hide_index=True)
-            options = {f"{r['Date']} - {r['Employee']} - {r['Job No']} - {r['Hours']} hrs": int(r["id"]) for _, r in df.iterrows()}
-            selected = st.selectbox("Select timesheet to approve/delete", list(options.keys()))
-            selected_id = options[selected]
-            selected_review = df[df["id"].astype(int) == int(selected_id)].drop(
-                columns=["id"],
-                errors="ignore",
+            selected_status = timesheet_status_filter(
+                "Show Timesheets With Status",
+                "admin_timesheet_status_filter",
+                default="Submitted",
             )
-            st.markdown("### Selection Review")
-            st.dataframe(selected_review, width="stretch", hide_index=True)
-            accepted_action = review_acceptance_checkbox(
-                "timesheet_admin_action",
-                selected_review.to_dict(orient="records"),
-                (
-                    "I have reviewed this timesheet and accept that the action I choose "
-                    "will update its status and labour-cost posting."
-                ),
+            filtered_df = filter_timesheets_by_status(df, selected_status)
+            st.caption(
+                f"Showing {len(filtered_df)} of {len(df)} timesheet(s): {selected_status}."
             )
-            col1, col2, col3, col4 = st.columns(4)
-            if col1.button("Mark Approved", disabled=not accepted_action):
-                set_timesheet_status(selected_id, "Approved")
-                st.success("Timesheet approved.")
-                refresh()
-            if col2.button("Mark Paid", disabled=not accepted_action):
-                set_timesheet_status(selected_id, "Paid")
-                st.success("Timesheet marked as paid.")
-                refresh()
-            if col3.button("Reject", disabled=not accepted_action):
-                set_timesheet_status(selected_id, "Rejected")
-                st.success("Timesheet rejected and any labour-cost posting was reversed.")
-                refresh()
-            if col4.button("Delete Timesheet", disabled=not accepted_action):
-                delete_timesheet_entry(selected_id)
-                st.success("Timesheet deleted.")
-                refresh()
+            render_timesheet_bulk_actions(
+                filtered_df,
+                key_prefix=f"admin_timesheet_review_{selected_status.lower().replace(' ', '_')}",
+                empty_message=f"No {selected_status.lower()} timesheets found.",
+            )
+
     with tab_by_job:
         job_options = get_job_options()
         if not job_options:
             st.info("No jobs found.")
         else:
-            selected_job = st.selectbox("Select Job", list(job_options.keys()), key="timesheet_by_job_select")
+            selected_job = st.selectbox(
+                "Select Job",
+                list(job_options.keys()),
+                key="timesheet_by_job_select",
+            )
             selected_job_id = job_options[selected_job]
+            selected_status = timesheet_status_filter(
+                "Show Timesheets With Status",
+                "timesheet_by_job_status_filter",
+                default="All",
+            )
             by_job = df_query("""
-                SELECT t.work_date AS 'Date', e.name AS 'Employee', t.start_time AS 'Start', t.finish_time AS 'Finish',
-                       t.break_minutes AS 'Break Minutes', t.total_hours AS 'Hours', t.work_type AS 'Work Type',
-                       t.status AS 'Status', t.notes AS 'Notes'
+                SELECT t.id, t.work_date AS 'Date', e.name AS 'Employee',
+                       t.start_time AS 'Start', t.finish_time AS 'Finish',
+                       t.break_minutes AS 'Break Minutes', t.total_hours AS 'Hours',
+                       t.work_type AS 'Work Type',
+                       COALESCE(t.status, 'Submitted') AS 'Status',
+                       t.notes AS 'Notes'
                 FROM timesheet_entries t
                 JOIN employees e ON e.id = t.employee_id
                 WHERE t.job_id = ?
-                ORDER BY t.work_date DESC, e.name
+                ORDER BY t.work_date DESC, t.id DESC
             """, (selected_job_id,))
-            if by_job.empty:
-                st.info("No timesheets saved for this job.")
+            filtered_by_job = filter_timesheets_by_status(by_job, selected_status)
+
+            if filtered_by_job.empty:
+                st.info(
+                    f"No {selected_status.lower()} timesheets are saved for this job."
+                    if selected_status != "All"
+                    else "No timesheets are saved for this job."
+                )
             else:
-                total_job_hours = float(by_job["Hours"].fillna(0).sum())
+                total_job_hours = float(filtered_by_job["Hours"].fillna(0).sum())
                 st.markdown("### Selection Review")
                 st.dataframe(
                     pd.DataFrame([{
                         "Selected Job": selected_job,
-                        "Timesheet Count": len(by_job),
+                        "Status Filter": selected_status,
+                        "Timesheet Count": len(filtered_by_job),
                         "Total Hours": f"{total_job_hours:.2f}",
                     }]),
                     width="stretch",
@@ -5008,17 +5194,25 @@ def timesheets_page(employee_restricted=False):
                     "timesheet_by_job_review",
                     {
                         "job_id": selected_job_id,
-                        "timesheet_count": len(by_job),
+                        "status_filter": selected_status,
+                        "timesheet_ids": filtered_by_job["id"].astype(int).tolist(),
+                        "timesheet_count": len(filtered_by_job),
                         "total_hours": total_job_hours,
                     },
-                    "I have reviewed and accept this job selection.",
+                    "I have reviewed and accept this job and status selection.",
                 )
+
                 if accepted_job_review:
                     st.metric("Total Hours for Job", f"{total_job_hours:.2f}")
-                    st.dataframe(by_job, width="stretch", hide_index=True)
+                    render_timesheet_bulk_actions(
+                        filtered_by_job,
+                        key_prefix=(
+                            f"timesheet_by_job_{selected_job_id}_"
+                            f"{selected_status.lower().replace(' ', '_')}"
+                        ),
+                    )
                 else:
-                    st.info("Accept the selected job review to display its timesheets.")
-
+                    st.info("Accept the selected job review to display and select its timesheets.")
 
 # =============================
 # ESTIMATE WORKING SHEET
@@ -9058,12 +9252,16 @@ def pb_control_staff_schedule():
     st.dataframe(schedule, width="stretch", hide_index=True)
 
 
+
 def pb_control_timesheet_approval():
     st.subheader("Timesheet Approval")
-    st.caption("Approve or reject submitted timesheets before they are treated as final.")
+    st.caption(
+        "Filter timesheets by status, tick multiple lines, then approve, reject, "
+        "mark paid or delete them together."
+    )
 
-    pending = df_query("""
-        SELECT t.id AS 'ID',
+    timesheets = df_query("""
+        SELECT t.id,
                t.work_date AS 'Date',
                e.name AS 'Employee',
                j.job_no AS 'Job No',
@@ -9078,66 +9276,28 @@ def pb_control_timesheet_approval():
         FROM timesheet_entries t
         JOIN jobs j ON j.id = t.job_id
         JOIN employees e ON e.id = t.employee_id
-        WHERE COALESCE(t.status, 'Submitted') = 'Submitted'
         ORDER BY t.work_date DESC, t.id DESC
+        LIMIT 500
     """)
 
-    if pending.empty:
-        st.success("No submitted timesheets waiting for approval.")
+    if timesheets.empty:
+        st.info("No timesheets have been submitted.")
         return
 
-    st.dataframe(pending, width="stretch", hide_index=True)
-    options = {f"{row['Date']} | {row['Employee']} | {row['Job No']} | {row['Hours']} hrs | ID {row['ID']}": int(row["ID"]) for _, row in pending.iterrows()}
-    selected = st.multiselect("Select timesheets", list(options.keys()), key="approve_timesheets_select")
-    selected_ids = [options[x] for x in selected]
-
-    accepted_bulk_action = False
-    if selected_ids:
-        selected_review = pending[pending["ID"].astype(int).isin(selected_ids)].copy()
-        st.markdown("### Selection Review")
-        st.dataframe(selected_review, width="stretch", hide_index=True)
-        selected_hours = float(selected_review["Hours"].fillna(0).sum())
-        st.caption(
-            f"{len(selected_review)} timesheet(s) selected, "
-            f"{selected_hours:.2f} total calculated hours."
-        )
-        accepted_bulk_action = review_acceptance_checkbox(
-            "control_timesheet_bulk_action",
-            selected_review.to_dict(orient="records"),
-            (
-                "I have reviewed every selected timesheet and accept that the chosen "
-                "bulk action will update their statuses and labour-cost postings."
-            ),
-        )
-    else:
-        st.info("Select one or more timesheets to display the review and acceptance box.")
-
-    c1, c2, c3 = st.columns(3)
-    if c1.button("Approve Selected Timesheets", disabled=not accepted_bulk_action):
-        if not selected_ids:
-            st.error("Select at least one timesheet.")
-        else:
-            for ts_id in selected_ids:
-                set_timesheet_status(ts_id, "Approved")
-            st.success(f"Approved and posted {len(selected_ids)} timesheet(s).")
-            refresh()
-    if c2.button("Reject Selected Timesheets", disabled=not accepted_bulk_action):
-        if not selected_ids:
-            st.error("Select at least one timesheet.")
-        else:
-            for ts_id in selected_ids:
-                set_timesheet_status(ts_id, "Rejected")
-            st.warning(f"Rejected and reversed {len(selected_ids)} timesheet(s).")
-            refresh()
-    if c3.button("Mark Selected As Paid", disabled=not accepted_bulk_action):
-        if not selected_ids:
-            st.error("Select at least one timesheet.")
-        else:
-            for ts_id in selected_ids:
-                set_timesheet_status(ts_id, "Paid")
-            st.info(f"Marked {len(selected_ids)} timesheet(s) as paid.")
-            refresh()
-
+    selected_status = timesheet_status_filter(
+        "Show Timesheets With Status",
+        "control_timesheet_status_filter",
+        default="Submitted",
+    )
+    filtered = filter_timesheets_by_status(timesheets, selected_status)
+    st.caption(
+        f"Showing {len(filtered)} of {len(timesheets)} timesheet(s): {selected_status}."
+    )
+    render_timesheet_bulk_actions(
+        filtered,
+        key_prefix=f"control_timesheets_{selected_status.lower().replace(' ', '_')}",
+        empty_message=f"No {selected_status.lower()} timesheets found.",
+    )
 
 def pb_control_ai_job_review(df):
     st.subheader("AI Job Review")
@@ -9889,21 +10049,97 @@ def render_job_linked_info(job_id, expanded=True):
                     st.caption(f"Uploaded: {photo_row['uploaded_at']} by {photo_row['uploaded_by']}")
 
 
+
 def job_lookup_links_page():
     st.header("Job Lookup / Links")
-    st.caption("Select a job number, job name, builder/client, address or leading hand and open all linked information for that job.")
+    st.caption(
+        "Filter by job status, then select a job number, job name, builder/client, "
+        "address or leading hand and open all linked information."
+    )
 
-    include_archived = st.checkbox("Include archived jobs", value=True, key="linked_include_archived")
+    filter_col1, filter_col2 = st.columns(2)
+    include_archived = filter_col1.checkbox(
+        "Include archived jobs",
+        value=True,
+        key="linked_include_archived",
+    )
     jobs_df = job_lookup_dataframe(include_archived=include_archived)
 
     if jobs_df.empty:
         st.info("No jobs found.")
         return
 
+    actual_statuses = [
+        status
+        for status in jobs_df["Status"].fillna("").astype(str).str.strip().unique().tolist()
+        if status
+    ]
+    preferred_status_order = [
+        "Not Started",
+        "Quoted",
+        "Booked",
+        "On Hold",
+        "Completed",
+        "Invoiced",
+        "Paid",
+        "Archived",
+    ]
+
+    status_options = ["All Statuses"]
+    for status in preferred_status_order[:3]:
+        if status in actual_statuses:
+            status_options.append(status)
+
+    if any(status in actual_statuses for status in ("Started", "Active")):
+        status_options.append("Started / Active")
+
+    for status in preferred_status_order[3:]:
+        if status in actual_statuses:
+            status_options.append(status)
+
+    known_statuses = set(preferred_status_order) | {"Started", "Active"}
+    status_options.extend(
+        sorted(status for status in actual_statuses if status not in known_statuses)
+    )
+
+    selected_job_status = filter_col2.selectbox(
+        "Job Status",
+        status_options,
+        key="linked_job_status_filter",
+    )
+
+    if selected_job_status == "Started / Active":
+        jobs_df = jobs_df[
+            jobs_df["Status"].fillna("").astype(str).isin(["Started", "Active"])
+        ].reset_index(drop=True)
+    elif selected_job_status != "All Statuses":
+        jobs_df = jobs_df[
+            jobs_df["Status"].fillna("").astype(str) == selected_job_status
+        ].reset_index(drop=True)
+
+    st.caption(
+        f"{len(jobs_df)} job(s) shown"
+        + (
+            f" with status {selected_job_status}."
+            if selected_job_status != "All Statuses"
+            else " across all statuses."
+        )
+    )
+
+    if jobs_df.empty:
+        st.info(f"No jobs found with status {selected_job_status}.")
+        return
+
     mode_options = ["Open Job", "Jobs by Builder / Client", "Jobs by Leading Hand", "Search Anything"]
     requested_mode = st.session_state.get("linked_view_mode", "Open Job")
     mode_index = mode_options.index(requested_mode) if requested_mode in mode_options else 0
-    mode = st.radio("Lookup Mode", mode_options, index=mode_index, horizontal=True, key="linked_view_mode_radio")
+    mode = st.radio(
+        "Lookup Mode",
+        mode_options,
+        index=mode_index,
+        horizontal=True,
+        key="linked_view_mode_radio",
+    )
     st.session_state["linked_view_mode"] = mode
 
     selected_job_id = None
@@ -9914,7 +10150,7 @@ def job_lookup_links_page():
             jobs_df,
             "Select job number / job name / builder / address",
             key="linked_open_job_select",
-            default_job_id=default_job_id
+            default_job_id=default_job_id,
         )
 
     elif mode == "Jobs by Builder / Client":
@@ -9937,27 +10173,55 @@ def job_lookup_links_page():
                     builder_index = i
                     break
 
-        selected_builder = st.selectbox("Select builder/client", builder_names, index=builder_index, key="linked_builder_select")
+        selected_builder = st.selectbox(
+            "Select builder/client",
+            builder_names,
+            index=builder_index,
+            key="linked_builder_select",
+        )
         builder_id = builder_map[selected_builder]
         st.session_state["linked_view_selected_builder_id"] = int(builder_id)
 
-        builder_jobs = jobs_df[jobs_df["builder_id"].astype(int) == int(builder_id)]
+        builder_jobs = jobs_df[
+            jobs_df["builder_id"].astype(int) == int(builder_id)
+        ]
         st.markdown(f"### Jobs for {selected_builder}")
-        selected_job_id = display_job_table_with_open_button(builder_jobs, selected_builder, "linked_builder_jobs")
+        selected_job_id = display_job_table_with_open_button(
+            builder_jobs,
+            selected_builder,
+            "linked_builder_jobs",
+        )
 
     elif mode == "Jobs by Leading Hand":
-        leading_hands = sorted([x for x in jobs_df["Leading Hand"].dropna().astype(str).unique().tolist() if x.strip()])
+        leading_hands = sorted([
+            value
+            for value in jobs_df["Leading Hand"].dropna().astype(str).unique().tolist()
+            if value.strip()
+        ])
         if not leading_hands:
-            st.info("No leading hands saved against jobs yet.")
+            st.info("No leading hands are saved against the jobs matching this status filter.")
             return
 
-        selected_leading_hand = st.selectbox("Select leading hand", leading_hands, key="linked_leading_hand")
-        lh_jobs = jobs_df[jobs_df["Leading Hand"].astype(str) == selected_leading_hand]
+        selected_leading_hand = st.selectbox(
+            "Select leading hand",
+            leading_hands,
+            key="linked_leading_hand",
+        )
+        lh_jobs = jobs_df[
+            jobs_df["Leading Hand"].astype(str) == selected_leading_hand
+        ]
         st.markdown(f"### Jobs for {selected_leading_hand}")
-        selected_job_id = display_job_table_with_open_button(lh_jobs, selected_leading_hand, "linked_lh_jobs")
+        selected_job_id = display_job_table_with_open_button(
+            lh_jobs,
+            selected_leading_hand,
+            "linked_lh_jobs",
+        )
 
     else:
-        search_text = st.text_input("Search job number, job name, builder/client, address, status or leading hand", key="linked_any_search")
+        search_text = st.text_input(
+            "Search job number, job name, builder/client, address, status or leading hand",
+            key="linked_any_search",
+        )
         filtered_jobs = jobs_df.copy()
         if search_text.strip():
             haystack = (
@@ -9968,15 +10232,24 @@ def job_lookup_links_page():
                 filtered_jobs["Status"].astype(str) + " " +
                 filtered_jobs["Leading Hand"].astype(str)
             ).str.lower()
-            filtered_jobs = filtered_jobs[haystack.str.contains(search_text.strip().lower(), na=False)]
+            filtered_jobs = filtered_jobs[
+                haystack.str.contains(
+                    search_text.strip().lower(),
+                    na=False,
+                    regex=False,
+                )
+            ]
         st.markdown("### Search Results")
-        selected_job_id = display_job_table_with_open_button(filtered_jobs, "search results", "linked_search_jobs")
+        selected_job_id = display_job_table_with_open_button(
+            filtered_jobs,
+            "search results",
+            "linked_search_jobs",
+        )
 
     if selected_job_id:
         st.divider()
         st.session_state["linked_view_selected_job_id"] = int(selected_job_id)
         render_job_linked_info(selected_job_id)
-
 
 # =============================
 # JOB FOLDERS - MAIN JOB FILE VIEW
