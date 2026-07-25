@@ -273,6 +273,76 @@ def apply_pb_branding():
             -webkit-text-fill-color: #f6efe7 !important;
         }
 
+
+        /* PB_JOBHUB_DROPDOWN_VISIBILITY_FIX */
+        div[data-baseweb="popover"] {
+            z-index: 1000000 !important;
+            max-width: min(560px, calc(100vw - 20px)) !important;
+        }
+        div[data-baseweb="popover"] [role="listbox"],
+        div[data-baseweb="popover"] ul {
+            max-height: min(62vh, 560px) !important;
+            overflow-y: auto !important;
+            overflow-x: hidden !important;
+            overscroll-behavior: contain !important;
+            scrollbar-gutter: stable !important;
+            padding: 0.35rem !important;
+            background: #ffffff !important;
+            border-radius: 12px !important;
+        }
+        div[data-baseweb="popover"] [role="option"],
+        div[data-baseweb="popover"] li,
+        div[data-baseweb="popover"] [role="option"] *,
+        div[data-baseweb="popover"] li * {
+            min-height: 42px !important;
+            height: auto !important;
+            white-space: normal !important;
+            overflow: visible !important;
+            text-overflow: clip !important;
+            line-height: 1.3 !important;
+            color: #111111 !important;
+            -webkit-text-fill-color: #111111 !important;
+        }
+        div[data-baseweb="popover"] [role="option"],
+        div[data-baseweb="popover"] li {
+            padding: 0.65rem 0.75rem !important;
+            align-items: flex-start !important;
+            border-radius: 8px !important;
+        }
+        section[data-testid="stSidebar"] [data-testid="stSelectbox"],
+        section[data-testid="stSidebar"] [data-testid="stMultiSelect"] {
+            margin-bottom: 0.75rem !important;
+        }
+        section[data-testid="stSidebar"] [data-baseweb="select"] > div {
+            min-height: 48px !important;
+            height: auto !important;
+            border-radius: 11px !important;
+        }
+        section[data-testid="stSidebar"] [data-baseweb="select"] span,
+        section[data-testid="stSidebar"] [data-baseweb="select"] input {
+            white-space: normal !important;
+            overflow: visible !important;
+            text-overflow: clip !important;
+            line-height: 1.25 !important;
+        }
+        @media (min-width: 769px) {
+            section[data-testid="stSidebar"],
+            section[data-testid="stSidebar"] > div {
+                min-width: 330px !important;
+                width: 330px !important;
+            }
+        }
+        @media (max-width: 768px) {
+            section[data-testid="stSidebar"] {
+                width: min(92vw, 360px) !important;
+                min-width: min(92vw, 360px) !important;
+            }
+            div[data-baseweb="popover"] [role="listbox"],
+            div[data-baseweb="popover"] ul {
+                max-height: 56vh !important;
+            }
+        }
+
         h1, h2, h3, h4 {
             color: var(--pb-charcoal);
             letter-spacing: -0.02em;
@@ -1067,7 +1137,7 @@ def init_db():
         FOREIGN KEY(job_id) REFERENCES jobs(id)
     )
     """)
-
+   
     cur.execute("""
     CREATE TABLE IF NOT EXISTS job_documents (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1078,7 +1148,7 @@ def init_db():
         created_at TEXT,
         notes TEXT,
         FOREIGN KEY(job_id) REFERENCES jobs(id)
-
+   
     )
     """)
     cur.execute("""
@@ -2793,7 +2863,7 @@ def permanently_delete_job_and_linked_data(job_id):
         },
     )
     return {"counts": counts, "archived_files": archived_files}
-
+    
 # =============================
 # LOGIN / ACCESS CONTROL
 # =============================
@@ -9321,7 +9391,7 @@ def render_job_linked_info(job_id, expanded=True):
     job_name = str(job_details.iloc[0]["Job Name"])
     st.markdown(f"## {job_no} - {job_name}")
     material_details = safe_df_query("""
-
+    
         SELECT m.id AS "ID",
                COALESCE(NULLIF(m.custom_product_code, ''), p.product_code, '') AS "Product Code",
                COALESCE(NULLIF(m.custom_product_name, ''), p.product_name, '') AS "Product Name",
@@ -9640,7 +9710,7 @@ def render_job_linked_info(job_id, expanded=True):
             st.info("No equipment checklist detail saved for this job.")
         else:
             st.dataframe(equipment_detail, width="stretch", hide_index=True)
-
+ 
     with tab_control:
         st.markdown("### Variations")
 
@@ -9797,7 +9867,7 @@ def render_job_linked_info(job_id, expanded=True):
                         )
                 else:
                     st.warning("File path not found on disk.")
-
+    
     with tab_photos:
         st.markdown("### Photo Register")
         if photos_meta.empty:
