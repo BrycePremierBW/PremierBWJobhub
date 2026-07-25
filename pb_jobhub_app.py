@@ -245,6 +245,31 @@ def apply_pb_branding():
             background: rgba(255,255,255,0.08);
         }
 
+        /* PB_JOBHUB_SIDEBAR_MENU_FIX */
+        section[data-testid="stSidebar"] [role="radiogroup"] {
+            gap: 0.28rem !important;
+        }
+
+        section[data-testid="stSidebar"] [role="radiogroup"] label {
+            min-height: 42px !important;
+            width: 100% !important;
+            align-items: center !important;
+            border: 1px solid rgba(255,255,255,0.08) !important;
+            background: rgba(255,255,255,0.035) !important;
+        }
+
+        section[data-testid="stSidebar"] [role="radiogroup"] label:has(input:checked) {
+            background: rgba(216,200,184,0.24) !important;
+            border-color: rgba(216,200,184,0.55) !important;
+        }
+
+        section[data-testid="stSidebar"] [role="radiogroup"] label p {
+            white-space: normal !important;
+            overflow: visible !important;
+            text-overflow: clip !important;
+            line-height: 1.25 !important;
+        }
+
         section[data-testid="stSidebar"] div[data-baseweb="select"],
         section[data-testid="stSidebar"] div[data-baseweb="select"] > div,
         section[data-testid="stSidebar"] div[data-baseweb="select"] *,
@@ -10464,10 +10489,12 @@ if main_menu_choice == "Management":
     management_labels = list(management_menu_map.keys())
     if st.session_state.get("management_menu") not in management_labels:
         st.session_state["management_menu"] = management_labels[0] if management_labels else ""
-    selected_management_label = st.sidebar.selectbox(
+    # PB_JOBHUB_SIDEBAR_MENU_FIX: show every option instead of using a clipped dropdown.
+    selected_management_label = st.sidebar.radio(
         "Management Section",
         management_labels,
         key="management_menu",
+        label_visibility="collapsed",
     )
     menu = management_menu_map.get(selected_management_label, selected_management_label)
 elif main_menu_choice == "Estimating":
@@ -10475,10 +10502,12 @@ elif main_menu_choice == "Estimating":
     estimating_labels = list(estimating_menu_map.keys())
     if st.session_state.get("estimating_menu") not in estimating_labels:
         st.session_state["estimating_menu"] = estimating_labels[0] if estimating_labels else ""
-    selected_estimating_label = st.sidebar.selectbox(
+    # PB_JOBHUB_SIDEBAR_MENU_FIX: show every option instead of using a clipped dropdown.
+    selected_estimating_label = st.sidebar.radio(
         "Estimating Section",
         estimating_labels,
         key="estimating_menu",
+        label_visibility="collapsed",
     )
     menu = estimating_menu_map.get(selected_estimating_label, selected_estimating_label)
 elif main_menu_choice == "Site Operations":
@@ -10486,10 +10515,12 @@ elif main_menu_choice == "Site Operations":
     site_labels = list(site_operations_menu_map.keys())
     if st.session_state.get("site_operations_menu") not in site_labels:
         st.session_state["site_operations_menu"] = site_labels[0] if site_labels else ""
-    selected_site_label = st.sidebar.selectbox(
+    # PB_JOBHUB_SIDEBAR_MENU_FIX: show every option instead of using a clipped dropdown.
+    selected_site_label = st.sidebar.radio(
         "Site Section",
         site_labels,
         key="site_operations_menu",
+        label_visibility="collapsed",
     )
     menu = site_operations_menu_map.get(selected_site_label, selected_site_label)
 elif main_menu_choice == "AI Assistant":
@@ -10497,10 +10528,12 @@ elif main_menu_choice == "AI Assistant":
     ai_labels = list(ai_menu_map.keys())
     if st.session_state.get("ai_menu") not in ai_labels:
         st.session_state["ai_menu"] = ai_labels[0] if ai_labels else ""
-    selected_ai_label = st.sidebar.selectbox(
+    # PB_JOBHUB_SIDEBAR_MENU_FIX: show every option instead of using a clipped dropdown.
+    selected_ai_label = st.sidebar.radio(
         "AI Section",
         ai_labels,
         key="ai_menu",
+        label_visibility="collapsed",
     )
     menu = ai_menu_map.get(selected_ai_label, selected_ai_label)
 elif main_menu_choice == "Reports":
