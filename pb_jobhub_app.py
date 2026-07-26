@@ -10,7 +10,9 @@ import html
 import re
 import json
 import py_compile
-from pathlib import Path
+import mimetypes
+import zipfile
+from pathlib import Path, PurePosixPath
 from datetime import date, datetime, time, timedelta
 from io import BytesIO
 
@@ -39,6 +41,9 @@ MAX_PHOTO_UPLOAD_BYTES = 15 * 1024 * 1024
 MAX_PDF_UPLOAD_BYTES = 25 * 1024 * 1024
 MAX_CSV_UPLOAD_BYTES = 5 * 1024 * 1024
 MAX_CSV_IMPORT_ROWS = 10_000
+MAX_TAKEOFF_PACK_BYTES = 150 * 1024 * 1024
+MAX_TAKEOFF_PACK_EXTRACTED_BYTES = 350 * 1024 * 1024
+MAX_TAKEOFF_PACK_FILES = 300
 MAX_IMAGE_PIXELS = 25_000_000
 Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 
@@ -1595,6 +1600,49 @@ def apply_schema_migrations():
                 (migration_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
             )
 
+        takeoff_migration_id = "20260725_takeoff_job_pack_v1"
+        if takeoff_migration_id not in applied:
+            for column, definition in [
+                ("estimated_labour_hours", "REAL DEFAULT 0"),
+                ("material_allowance", "REAL DEFAULT 0"),
+                ("substrate", "TEXT"),
+                ("work_location", "TEXT"),
+                ("coating_system", "TEXT"),
+                ("colour_finish", "TEXT"),
+                ("source_pack", "TEXT"),
+            ]:
+                _migration_ensure_column(cur, "estimate_line_items", column, definition)
+
+            _migration_ensure_column(cur, "job_documents", "mime_type", "TEXT")
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS takeoff_pack_imports (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id INTEGER NOT NULL,
+                    pack_id TEXT NOT NULL,
+                    revision TEXT NOT NULL,
+                    source_file TEXT,
+                    imported_at TEXT NOT NULL,
+                    imported_by TEXT,
+                    estimate_id INTEGER,
+                    line_count INTEGER DEFAULT 0,
+                    material_count INTEGER DEFAULT 0,
+                    document_count INTEGER DEFAULT 0,
+                    manifest_json TEXT,
+                    UNIQUE(job_id, pack_id, revision),
+                    FOREIGN KEY(job_id) REFERENCES jobs(id),
+                    FOREIGN KEY(estimate_id) REFERENCES estimate_working_sheets(id)
+                )
+            """)
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_takeoff_pack_imports_job "
+                "ON takeoff_pack_imports(job_id, imported_at)"
+            )
+            cur.execute(
+                "INSERT INTO schema_migrations (migration_id, applied_at) VALUES (?, ?)",
+                (takeoff_migration_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+            )
+
         conn.commit()
         return True
     except Exception:
@@ -2464,11 +2512,12 @@ def fill_pdf_template(template_path, output_path, field_values):
     return output_path
 
 
-def attach_document_to_job(job_id, document_type, file_path, notes="Generated from JobHub"):
+def attach_document_to_job(job_id, document_type, file_path, notes="Generated from JobHub", mime_type=""):
+    resolved_mime = str(mime_type or mimetypes.guess_type(str(file_path))[0] or "application/octet-stream")
     execute("""
         INSERT INTO job_documents
-        (job_id, document_type, file_name, file_path, created_at, notes)
-        VALUES (?, ?, ?, ?, ?, ?)
+        (job_id, document_type, file_name, file_path, created_at, notes, mime_type)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
     """, (
         job_id,
         document_type,
@@ -2476,6 +2525,7 @@ def attach_document_to_job(job_id, document_type, file_path, notes="Generated fr
         file_path,
         datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         notes,
+        resolved_mime,
     ))
 
 
@@ -3285,7 +3335,8 @@ def employee_portal():
                        file_name AS 'File Name',
                        file_path,
                        created_at AS 'Created At',
-                       notes AS 'Notes'
+                       notes AS 'Notes',
+                       COALESCE(mime_type, 'application/octet-stream') AS 'Mime Type'
                 FROM job_documents
                 WHERE job_id = ?
                 ORDER BY id DESC
@@ -3307,7 +3358,7 @@ def employee_portal():
                                 label=f"Download {doc['File Name']}",
                                 data=f,
                                 file_name=doc["File Name"],
-                                mime="application/pdf",
+                                mime=str(doc.get("Mime Type") or "application/octet-stream"),
                                 key=f"employee_download_job_doc_{doc['id']}",
                             )
                     else:
@@ -5890,6 +5941,1148 @@ def render_estimate_line_item_csv_importer(selected_estimate_id):
             st.error(f"Could not import this estimate working sheet: {exc}")
 
 
+# =============================
+# TAKE-OFF JOB PACK IMPORTER
+# PB_JOBHUB_TAKEOFF_JOB_PACK_V1
+# =============================
+TAKEOFF_PACK_VERSION = "1.0"
+TAKEOFF_PACK_DATA_FILES = {
+    "job_manifest.json",
+    "takeoff_lines.csv",
+    "labour_budget.csv",
+    "material_allowances.csv",
+    "colour_schedule.csv",
+}
+TAKEOFF_PACK_DOCUMENT_EXTENSIONS = {
+    ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".csv", ".txt",
+    ".jpg", ".jpeg", ".png", ".webp",
+}
+
+
+def _takeoff_text(value, default=""):
+    if value is None:
+        return default
+    try:
+        if pd.isna(value):
+            return default
+    except Exception:
+        pass
+    value = str(value).strip()
+    return value if value else default
+
+
+def _takeoff_float(value, default=0.0):
+    if value is None:
+        return float(default)
+    try:
+        if pd.isna(value):
+            return float(default)
+    except Exception:
+        pass
+    if isinstance(value, (int, float)):
+        return float(value)
+    cleaned = str(value).strip().replace("$", "").replace(",", "")
+    cleaned = cleaned.replace(" hrs", "").replace(" hr", "")
+    if not cleaned:
+        return float(default)
+    try:
+        return float(cleaned)
+    except Exception:
+        match = re.search(r"[-+]?\d*\.?\d+", cleaned)
+        return float(match.group(0)) if match else float(default)
+
+
+def _takeoff_header(value):
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
+
+
+def _takeoff_value(mapping, *keys, default=""):
+    if not isinstance(mapping, dict):
+        return default
+    normalised = {_takeoff_header(key): value for key, value in mapping.items()}
+    for key in keys:
+        lookup = _takeoff_header(key)
+        if lookup in normalised and normalised[lookup] not in (None, ""):
+            return normalised[lookup]
+    return default
+
+
+def _takeoff_rename_columns(source_df, aliases):
+    work = source_df.copy()
+    rename_map = {}
+    for column in work.columns:
+        key = _takeoff_header(column)
+        if key in aliases:
+            rename_map[column] = aliases[key]
+    return work.rename(columns=rename_map)
+
+
+def _prepare_takeoff_lines_dataframe(source_df):
+    columns = [
+        "Section", "Item Description", "Qty", "Unit", "Unit Rate", "Line Total",
+        "Estimated Labour Hours", "Material Allowance", "Substrate", "Location",
+        "Coating System", "Colour / Finish", "Notes",
+    ]
+    if source_df is None or source_df.empty:
+        return pd.DataFrame(columns=columns)
+
+    aliases = {
+        "section": "Section",
+        "category": "Section",
+        "itemdescription": "Item Description",
+        "description": "Item Description",
+        "item": "Item Description",
+        "scopeitem": "Item Description",
+        "qty": "Qty",
+        "quantity": "Qty",
+        "measure": "Qty",
+        "unit": "Unit",
+        "unitrate": "Unit Rate",
+        "rate": "Unit Rate",
+        "linetotal": "Line Total",
+        "total": "Line Total",
+        "estimatedlabourhours": "Estimated Labour Hours",
+        "estimatedlaborhours": "Estimated Labour Hours",
+        "labourhours": "Estimated Labour Hours",
+        "laborhours": "Estimated Labour Hours",
+        "hours": "Estimated Labour Hours",
+        "materialallowance": "Material Allowance",
+        "materialcostallowance": "Material Allowance",
+        "substrate": "Substrate",
+        "location": "Location",
+        "area": "Location",
+        "coatingsystem": "Coating System",
+        "paintsystem": "Coating System",
+        "colourfinish": "Colour / Finish",
+        "colorfinish": "Colour / Finish",
+        "colour": "Colour / Finish",
+        "color": "Colour / Finish",
+        "notes": "Notes",
+        "scopenotes": "Notes",
+    }
+    work = _takeoff_rename_columns(source_df, aliases)
+    if "Item Description" not in work.columns:
+        raise ValueError("takeoff_lines.csv requires an Item Description or Description column.")
+
+    defaults = {
+        "Section": "Take-off",
+        "Qty": 0.0,
+        "Unit": "item",
+        "Unit Rate": 0.0,
+        "Line Total": None,
+        "Estimated Labour Hours": 0.0,
+        "Material Allowance": 0.0,
+        "Substrate": "",
+        "Location": "",
+        "Coating System": "",
+        "Colour / Finish": "",
+        "Notes": "",
+    }
+    for column, default in defaults.items():
+        if column not in work.columns:
+            work[column] = default
+
+    for column in ["Qty", "Unit Rate", "Line Total", "Estimated Labour Hours", "Material Allowance"]:
+        work[column] = work[column].map(_takeoff_float)
+    calculated_total = (work["Qty"] * work["Unit Rate"]).round(2)
+    work["Line Total"] = work["Line Total"].where(work["Line Total"] != 0, calculated_total)
+
+    for column in [
+        "Section", "Item Description", "Unit", "Substrate", "Location",
+        "Coating System", "Colour / Finish", "Notes",
+    ]:
+        work[column] = work[column].map(_takeoff_text)
+
+    work["Section"] = work["Section"].replace("", "Take-off")
+    work["Unit"] = work["Unit"].replace("", "item")
+    work = work[work["Item Description"] != ""].copy()
+    if len(work) > MAX_CSV_IMPORT_ROWS:
+        raise ValueError("takeoff_lines.csv contains more than 10,000 valid rows.")
+    return work[columns]
+
+
+def _prepare_takeoff_labour_dataframe(source_df):
+    columns = ["Item Description", "Estimated Labour Hours", "Labour Rate", "Notes"]
+    if source_df is None or source_df.empty:
+        return pd.DataFrame(columns=columns)
+    aliases = {
+        "itemdescription": "Item Description",
+        "description": "Item Description",
+        "item": "Item Description",
+        "estimatedlabourhours": "Estimated Labour Hours",
+        "estimatedlaborhours": "Estimated Labour Hours",
+        "labourhours": "Estimated Labour Hours",
+        "laborhours": "Estimated Labour Hours",
+        "hours": "Estimated Labour Hours",
+        "labourrate": "Labour Rate",
+        "laborrate": "Labour Rate",
+        "hourlyrate": "Labour Rate",
+        "notes": "Notes",
+    }
+    work = _takeoff_rename_columns(source_df, aliases)
+    if "Estimated Labour Hours" not in work.columns:
+        raise ValueError("labour_budget.csv requires an Estimated Labour Hours or Hours column.")
+    if "Item Description" not in work.columns:
+        work["Item Description"] = "Labour budget"
+    if "Labour Rate" not in work.columns:
+        work["Labour Rate"] = 0.0
+    if "Notes" not in work.columns:
+        work["Notes"] = ""
+    work["Estimated Labour Hours"] = work["Estimated Labour Hours"].map(_takeoff_float)
+    work["Labour Rate"] = work["Labour Rate"].map(_takeoff_float)
+    work["Item Description"] = work["Item Description"].map(_takeoff_text)
+    work["Notes"] = work["Notes"].map(_takeoff_text)
+    return work[columns]
+
+
+def _prepare_takeoff_material_dataframe(source_df):
+    columns = [
+        "Product Code / Ref", "Product / Material Name", "Supplier", "Unit",
+        "Unit Price Ex GST", "Colour / Finish", "Qty Required", "Location",
+        "Substrate", "Coating System", "Notes", "Line Cost Ex GST",
+    ]
+    if source_df is None or source_df.empty:
+        return pd.DataFrame(columns=columns)
+    aliases = {
+        "productcoderef": "Product Code / Ref",
+        "productcode": "Product Code / Ref",
+        "code": "Product Code / Ref",
+        "productmaterialname": "Product / Material Name",
+        "productname": "Product / Material Name",
+        "material": "Product / Material Name",
+        "product": "Product / Material Name",
+        "supplier": "Supplier",
+        "unit": "Unit",
+        "unitpriceexgst": "Unit Price Ex GST",
+        "unitprice": "Unit Price Ex GST",
+        "priceexgst": "Unit Price Ex GST",
+        "price": "Unit Price Ex GST",
+        "colourfinish": "Colour / Finish",
+        "colorfinish": "Colour / Finish",
+        "colour": "Colour / Finish",
+        "color": "Colour / Finish",
+        "qtyrequired": "Qty Required",
+        "quantity": "Qty Required",
+        "qty": "Qty Required",
+        "location": "Location",
+        "area": "Location",
+        "substrate": "Substrate",
+        "coatingsystem": "Coating System",
+        "paintsystem": "Coating System",
+        "notes": "Notes",
+    }
+    work = _takeoff_rename_columns(source_df, aliases)
+    if "Product / Material Name" not in work.columns:
+        raise ValueError("material_allowances.csv requires a Product / Material Name or Material column.")
+    defaults = {
+        "Product Code / Ref": "CUSTOM",
+        "Supplier": "",
+        "Unit": "each",
+        "Unit Price Ex GST": 0.0,
+        "Colour / Finish": "",
+        "Qty Required": 0.0,
+        "Location": "",
+        "Substrate": "",
+        "Coating System": "",
+        "Notes": "",
+    }
+    for column, default in defaults.items():
+        if column not in work.columns:
+            work[column] = default
+    for column in ["Unit Price Ex GST", "Qty Required"]:
+        work[column] = work[column].map(_takeoff_float)
+    for column in [
+        "Product Code / Ref", "Product / Material Name", "Supplier", "Unit",
+        "Colour / Finish", "Location", "Substrate", "Coating System", "Notes",
+    ]:
+        work[column] = work[column].map(_takeoff_text)
+    work["Product Code / Ref"] = work["Product Code / Ref"].replace("", "CUSTOM")
+    work["Unit"] = work["Unit"].replace("", "each")
+    work["Line Cost Ex GST"] = (work["Unit Price Ex GST"] * work["Qty Required"]).round(2)
+    work = work[work["Product / Material Name"] != ""].copy()
+    return work[columns]
+
+
+def _prepare_takeoff_colour_dataframe(source_df):
+    columns = ["Location", "Substrate", "Product / Material Name", "Colour / Finish", "Coating System", "Notes"]
+    if source_df is None or source_df.empty:
+        return pd.DataFrame(columns=columns)
+    aliases = {
+        "location": "Location",
+        "area": "Location",
+        "room": "Location",
+        "substrate": "Substrate",
+        "productmaterialname": "Product / Material Name",
+        "product": "Product / Material Name",
+        "material": "Product / Material Name",
+        "paint": "Product / Material Name",
+        "colourfinish": "Colour / Finish",
+        "colorfinish": "Colour / Finish",
+        "colour": "Colour / Finish",
+        "color": "Colour / Finish",
+        "coatingsystem": "Coating System",
+        "paintsystem": "Coating System",
+        "finish": "Coating System",
+        "notes": "Notes",
+    }
+    work = _takeoff_rename_columns(source_df, aliases)
+    defaults = {
+        "Location": "",
+        "Substrate": "",
+        "Product / Material Name": "Colour schedule",
+        "Colour / Finish": "",
+        "Coating System": "",
+        "Notes": "",
+    }
+    for column, default in defaults.items():
+        if column not in work.columns:
+            work[column] = default
+    for column in columns:
+        work[column] = work[column].map(_takeoff_text)
+    work["Product / Material Name"] = work["Product / Material Name"].replace("", "Colour schedule")
+    work = work[(work["Colour / Finish"] != "") | (work["Coating System"] != "") | (work["Location"] != "")].copy()
+    return work[columns]
+
+
+def _takeoff_safe_member_path(member_name):
+    clean_name = str(member_name or "").replace("\\", "/")
+    path = PurePosixPath(clean_name)
+    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+        raise ValueError(f"Unsafe ZIP member path: {member_name}")
+    return path
+
+
+def _takeoff_document_type(member_name):
+    lower = str(member_name or "").lower().replace("\\", "/")
+    name = PurePosixPath(lower).name
+    if "internal_job_sheet" in name or "job_sheet" in name:
+        return "Internal Job Sheet"
+    if "marked_up" in name or "markup" in name or "mark_up" in name:
+        return "Marked-up Plans"
+    if "/original_plans/" in f"/{lower}" or "plan" in name or "drawing" in name:
+        return "Plans / Drawings"
+    if "/specifications/" in f"/{lower}" or "specification" in name or "scope" in name:
+        return "Specification / Scope"
+    if "/colour_schedules/" in f"/{lower}" or "colour" in name or "color" in name or "finish_schedule" in name:
+        return "Colour / Finish Schedule"
+    if "/purchase_orders/" in f"/{lower}" or "purchase_order" in name or re.search(r"(^|[_-])po([_-]|\.)", name):
+        return "Purchase Order"
+    if "takeoff_report" in name or "take_off_report" in name:
+        return "Take-off Report"
+    return "Take-off Pack Document"
+
+
+def _takeoff_find_member(member_names, expected_name):
+    expected = expected_name.lower()
+    for member in member_names:
+        if member.lower() == expected or PurePosixPath(member).name.lower() == expected:
+            return member
+    return None
+
+
+def _takeoff_read_csv_from_zip(zf, member_names, expected_name):
+    member = _takeoff_find_member(member_names, expected_name)
+    if not member:
+        return pd.DataFrame()
+    info = zf.getinfo(member)
+    if info.file_size > MAX_CSV_UPLOAD_BYTES:
+        raise ValueError(f"{expected_name} is larger than the 5 MB CSV limit.")
+    raw = zf.read(member)
+    if not raw.strip():
+        return pd.DataFrame()
+    return pd.read_csv(BytesIO(raw))
+
+
+def parse_takeoff_job_pack(uploaded_file):
+    if uploaded_file is None:
+        raise ValueError("Choose a Take-off Job Pack ZIP first.")
+    if uploaded_file_size(uploaded_file) > MAX_TAKEOFF_PACK_BYTES:
+        raise ValueError("Take-off Job Pack is larger than the 150 MB upload limit.")
+    uploaded_file.seek(0)
+    source_bytes = uploaded_file.read()
+    uploaded_file.seek(0)
+
+    try:
+        zf = zipfile.ZipFile(BytesIO(source_bytes), "r")
+    except zipfile.BadZipFile as exc:
+        raise ValueError("The uploaded file is not a valid ZIP archive.") from exc
+
+    with zf:
+        file_infos = [info for info in zf.infolist() if not info.is_dir()]
+        if not file_infos:
+            raise ValueError("The ZIP does not contain any files.")
+        if len(file_infos) > MAX_TAKEOFF_PACK_FILES:
+            raise ValueError(f"The ZIP contains more than {MAX_TAKEOFF_PACK_FILES} files.")
+
+        total_uncompressed = 0
+        member_names = []
+        for info in file_infos:
+            _takeoff_safe_member_path(info.filename)
+            if info.flag_bits & 0x1:
+                raise ValueError(f"Encrypted ZIP member is not supported: {info.filename}")
+            file_type = (info.external_attr >> 16) & 0o170000
+            if file_type == 0o120000:
+                raise ValueError(f"Symbolic links are not allowed in Take-off Job Packs: {info.filename}")
+            total_uncompressed += int(info.file_size or 0)
+            if total_uncompressed > MAX_TAKEOFF_PACK_EXTRACTED_BYTES:
+                raise ValueError("The uncompressed Take-off Job Pack is larger than 350 MB.")
+            member_names.append(info.filename)
+
+        manifest = {}
+        manifest_member = _takeoff_find_member(member_names, "job_manifest.json")
+        if manifest_member:
+            raw_manifest = zf.read(manifest_member)
+            if len(raw_manifest) > 2 * 1024 * 1024:
+                raise ValueError("job_manifest.json is larger than 2 MB.")
+            try:
+                manifest = json.loads(raw_manifest.decode("utf-8-sig"))
+            except Exception as exc:
+                raise ValueError("job_manifest.json is not valid UTF-8 JSON.") from exc
+            if not isinstance(manifest, dict):
+                raise ValueError("job_manifest.json must contain one JSON object.")
+
+        lines_df = _prepare_takeoff_lines_dataframe(
+            _takeoff_read_csv_from_zip(zf, member_names, "takeoff_lines.csv")
+        )
+        labour_df = _prepare_takeoff_labour_dataframe(
+            _takeoff_read_csv_from_zip(zf, member_names, "labour_budget.csv")
+        )
+        materials_df = _prepare_takeoff_material_dataframe(
+            _takeoff_read_csv_from_zip(zf, member_names, "material_allowances.csv")
+        )
+        colours_df = _prepare_takeoff_colour_dataframe(
+            _takeoff_read_csv_from_zip(zf, member_names, "colour_schedule.csv")
+        )
+
+        # Where labour_budget.csv carries item-level hours, fill blank/zero hours
+        # against matching take-off descriptions without double-counting existing hours.
+        if not lines_df.empty and not labour_df.empty:
+            labour_by_item = {}
+            for _, labour_row in labour_df.iterrows():
+                item_key = _takeoff_header(labour_row.get("Item Description"))
+                if item_key:
+                    labour_by_item[item_key] = labour_by_item.get(item_key, 0.0) + _takeoff_float(
+                        labour_row.get("Estimated Labour Hours")
+                    )
+            for line_index, line_row in lines_df.iterrows():
+                if _takeoff_float(line_row.get("Estimated Labour Hours")) > 0:
+                    continue
+                matched_hours = labour_by_item.get(_takeoff_header(line_row.get("Item Description")), 0.0)
+                if matched_hours > 0:
+                    lines_df.at[line_index, "Estimated Labour Hours"] = matched_hours
+
+        if lines_df.empty and labour_df.empty and materials_df.empty and colours_df.empty:
+            raise ValueError(
+                "The ZIP has no usable takeoff_lines.csv, labour_budget.csv, "
+                "material_allowances.csv or colour_schedule.csv data."
+            )
+
+        ignored_names = TAKEOFF_PACK_DATA_FILES | {"readme.txt", "readme.md"}
+        documents = []
+        for member in member_names:
+            path = PurePosixPath(member)
+            if path.name.lower() in ignored_names:
+                continue
+            if path.suffix.lower() not in TAKEOFF_PACK_DOCUMENT_EXTENSIONS:
+                continue
+            documents.append({
+                "member": member,
+                "file_name": path.name,
+                "document_type": _takeoff_document_type(member),
+                "mime_type": mimetypes.guess_type(path.name)[0] or "application/octet-stream",
+                "size_bytes": int(zf.getinfo(member).file_size or 0),
+            })
+
+    job_manifest = manifest.get("job") if isinstance(manifest.get("job"), dict) else {}
+    estimate_manifest = manifest.get("estimate") if isinstance(manifest.get("estimate"), dict) else {}
+    budget_manifest = manifest.get("budget") if isinstance(manifest.get("budget"), dict) else {}
+
+    source_stem = Path(str(getattr(uploaded_file, "name", "takeoff_job_pack.zip"))).stem
+    pack_id = _takeoff_text(
+        _takeoff_value(manifest, "pack_id", "takeoff_id", default=source_stem),
+        source_stem,
+    )
+    revision = _takeoff_text(
+        _takeoff_value(manifest, "revision", default=_takeoff_value(estimate_manifest, "revision", default="1")),
+        "1",
+    )
+
+    line_hours = float(lines_df["Estimated Labour Hours"].sum()) if not lines_df.empty else 0.0
+    labour_file_hours = float(labour_df["Estimated Labour Hours"].sum()) if not labour_df.empty else 0.0
+    manifest_hours = _takeoff_float(
+        _takeoff_value(estimate_manifest, "labour_hours", "labor_hours", default=_takeoff_value(budget_manifest, "labour_hours", "labor_hours", default=0))
+    )
+    total_labour_hours = manifest_hours or line_hours or labour_file_hours
+
+    labour_rate_values = labour_df.loc[labour_df["Labour Rate"] > 0, "Labour Rate"] if not labour_df.empty else pd.Series(dtype=float)
+    labour_file_rate = float(labour_rate_values.iloc[0]) if not labour_rate_values.empty else 0.0
+    labour_rate = _takeoff_float(
+        _takeoff_value(estimate_manifest, "labour_rate", "labor_rate", default=_takeoff_value(budget_manifest, "labour_rate", "labor_rate", default=0))
+    ) or labour_file_rate or 60.0
+
+    material_file_total = float(materials_df["Line Cost Ex GST"].sum()) if not materials_df.empty else 0.0
+    line_material_total = float(lines_df["Material Allowance"].sum()) if not lines_df.empty else 0.0
+    manifest_materials = _takeoff_float(
+        _takeoff_value(estimate_manifest, "material_allowance", "materials", default=_takeoff_value(budget_manifest, "material_allowance", "materials", default=0))
+    )
+    material_allowance = manifest_materials or material_file_total or line_material_total
+
+    summary = {
+        "pack_id": pack_id,
+        "revision": revision,
+        "pack_version": _takeoff_text(_takeoff_value(manifest, "pack_version", default=TAKEOFF_PACK_VERSION), TAKEOFF_PACK_VERSION),
+        "job_no": _takeoff_text(_takeoff_value(job_manifest, "job_no", "job_number")),
+        "job_name": _takeoff_text(_takeoff_value(job_manifest, "job_name", "name")),
+        "site_address": _takeoff_text(_takeoff_value(job_manifest, "site_address", "address")),
+        "builder_client": _takeoff_text(_takeoff_value(job_manifest, "builder_client", "builder", "client")),
+        "estimate_no": _takeoff_text(_takeoff_value(estimate_manifest, "estimate_no", "estimate_number")),
+        "estimate_date": _takeoff_text(_takeoff_value(estimate_manifest, "estimate_date", "date"), str(date.today())),
+        "estimate_status": _takeoff_text(_takeoff_value(estimate_manifest, "status"), "Draft"),
+        "labour_hours": total_labour_hours,
+        "labour_rate": labour_rate,
+        "material_allowance": material_allowance,
+        "access_equipment_allowance": _takeoff_float(_takeoff_value(estimate_manifest, "access_equipment_allowance", "access_allowance", default=_takeoff_value(budget_manifest, "access_equipment_allowance", "access_allowance", default=0))),
+        "subcontractor_allowance": _takeoff_float(_takeoff_value(estimate_manifest, "subcontractor_allowance", default=_takeoff_value(budget_manifest, "subcontractor_allowance", default=0))),
+        "sundries_allowance": _takeoff_float(_takeoff_value(estimate_manifest, "sundries_allowance", "consumables_allowance", default=_takeoff_value(budget_manifest, "sundries_allowance", "consumables_allowance", default=0))),
+        "target_gp_percent": _takeoff_float(_takeoff_value(estimate_manifest, "target_gp_percent", "margin_percent", default=_takeoff_value(budget_manifest, "target_gp_percent", "margin_percent", default=35)), 35),
+        "contingency_percent": _takeoff_float(_takeoff_value(estimate_manifest, "contingency_percent", default=0)),
+        "gst_percent": _takeoff_float(_takeoff_value(estimate_manifest, "gst_percent", default=10), 10),
+        "pricing_method": _takeoff_text(_takeoff_value(estimate_manifest, "pricing_method"), "Target Gross Margin"),
+        "notes": _takeoff_text(_takeoff_value(estimate_manifest, "notes", default=_takeoff_value(manifest, "notes"))),
+        "line_pricing_total": float(lines_df["Line Total"].sum()) if not lines_df.empty else 0.0,
+    }
+    if summary["pricing_method"] not in {"Target Gross Margin", "Markup"}:
+        summary["pricing_method"] = "Target Gross Margin"
+
+    return {
+        "source_bytes": source_bytes,
+        "source_name": safe_file_name(str(getattr(uploaded_file, "name", "takeoff_job_pack.zip"))),
+        "member_names": member_names,
+        "manifest": manifest,
+        "summary": summary,
+        "lines": lines_df,
+        "labour": labour_df,
+        "materials": materials_df,
+        "colours": colours_df,
+        "documents": documents,
+    }
+
+
+def build_takeoff_job_pack_template():
+    manifest = {
+        "pack_version": TAKEOFF_PACK_VERSION,
+        "pack_id": "PB-JOBNO-TAKEOFF",
+        "revision": "1",
+        "job": {
+            "job_no": "PB00000",
+            "job_name": "Example Project",
+            "site_address": "",
+            "builder_client": "",
+        },
+        "estimate": {
+            "estimate_no": "PB00000-TO-01",
+            "estimate_date": str(date.today()),
+            "revision": "1",
+            "status": "Draft",
+            "labour_hours": 0,
+            "labour_rate": 60,
+            "material_allowance": 0,
+            "access_equipment_allowance": 0,
+            "subcontractor_allowance": 0,
+            "sundries_allowance": 0,
+            "target_gp_percent": 35,
+            "contingency_percent": 0,
+            "gst_percent": 10,
+            "pricing_method": "Target Gross Margin",
+            "notes": "Generated from Premier Brushworks take-off pack.",
+        },
+    }
+    lines = pd.DataFrame([{
+        "Section": "Internal",
+        "Item Description": "Walls - plasterboard",
+        "Qty": 100,
+        "Unit": "m2",
+        "Unit Rate": 0,
+        "Line Total": 0,
+        "Estimated Labour Hours": 12,
+        "Material Allowance": 450,
+        "Substrate": "Plasterboard",
+        "Location": "Ground floor",
+        "Coating System": "1 sealer + 2 finish coats",
+        "Colour / Finish": "To colour schedule",
+        "Notes": "Example only - replace before importing.",
+    }])
+    labour = pd.DataFrame([{
+        "Item Description": "Walls - plasterboard",
+        "Estimated Labour Hours": 12,
+        "Labour Rate": 60,
+        "Notes": "Example only",
+    }])
+    materials = pd.DataFrame([{
+        "Product Code / Ref": "CUSTOM",
+        "Product / Material Name": "Interior low sheen",
+        "Supplier": "",
+        "Unit": "15L",
+        "Unit Price Ex GST": 150,
+        "Colour / Finish": "To colour schedule",
+        "Qty Required": 3,
+        "Location": "Ground floor walls",
+        "Substrate": "Plasterboard",
+        "Coating System": "2 finish coats",
+        "Notes": "Preliminary allowance",
+    }])
+    colours = pd.DataFrame([{
+        "Location": "Ground floor walls",
+        "Substrate": "Plasterboard",
+        "Product / Material Name": "Interior low sheen",
+        "Colour / Finish": "To be confirmed",
+        "Coating System": "2 finish coats",
+        "Notes": "Example only",
+    }])
+    readme = """Premier Brushworks Take-off Job Pack Template\n\nRequired/recognised files:\n- job_manifest.json\n- takeoff_lines.csv\n- labour_budget.csv\n- material_allowances.csv\n- colour_schedule.csv\n\nOptional document folders/files:\n- original_plans/\n- specifications/\n- colour_schedules/\n- purchase_orders/\n- internal_job_sheet.pdf\n- takeoff_report.pdf\n- marked_up_plans.pdf\n\nIncrease the revision each time the same take-off is reissued. JobHub blocks duplicate pack ID + revision imports for the same job.\n"""
+    output = BytesIO()
+    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("job_manifest.json", json.dumps(manifest, indent=2))
+        zf.writestr("takeoff_lines.csv", lines.to_csv(index=False))
+        zf.writestr("labour_budget.csv", labour.to_csv(index=False))
+        zf.writestr("material_allowances.csv", materials.to_csv(index=False))
+        zf.writestr("colour_schedule.csv", colours.to_csv(index=False))
+        zf.writestr("README.txt", readme)
+    output.seek(0)
+    return output.getvalue()
+
+
+def _takeoff_safe_extract_target(pack_folder, member_name):
+    member_path = _takeoff_safe_member_path(member_name)
+    safe_parts = [safe_file_name(part) for part in member_path.parts]
+    target = (Path(pack_folder) / Path(*safe_parts)).resolve()
+    root = Path(pack_folder).resolve()
+    if root != target and root not in target.parents:
+        raise ValueError(f"Unsafe extracted path: {member_name}")
+    return target
+
+
+def import_takeoff_job_pack(
+    job_id,
+    parsed,
+    create_estimate=True,
+    update_budget=True,
+    import_materials=True,
+    attach_documents=True,
+    use_imported_line_pricing=False,
+):
+    job_id = int(job_id)
+    summary = parsed["summary"]
+    pack_id = _takeoff_text(summary.get("pack_id"), "takeoff-pack")[:120]
+    revision = _takeoff_text(summary.get("revision"), "1")[:60]
+
+    existing = df_query(
+        "SELECT id, imported_at FROM takeoff_pack_imports WHERE job_id = ? AND pack_id = ? AND revision = ?",
+        (job_id, pack_id, revision),
+    )
+    if not existing.empty:
+        raise ValueError(
+            f"Pack {pack_id}, revision {revision}, has already been imported into this job. "
+            "Increase the revision in job_manifest.json before importing an updated take-off."
+        )
+
+    job_df = df_query("SELECT job_no, job_name FROM jobs WHERE id = ?", (job_id,))
+    if job_df.empty:
+        raise ValueError("Selected job could not be found.")
+    job_no = _takeoff_text(job_df.iloc[0]["job_no"], f"job_{job_id}")
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    imported_by = current_username()
+
+    safe_pack = safe_file_name(pack_id)[:80]
+    safe_revision = safe_file_name(revision)[:40]
+    pack_folder = Path(get_job_folder(job_no)) / "takeoff_packs" / f"{safe_pack}_rev_{safe_revision}"
+    if pack_folder.exists():
+        pack_folder = pack_folder.parent / f"{pack_folder.name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    pack_folder.mkdir(parents=True, exist_ok=False)
+
+    extracted_paths = {}
+    try:
+        source_zip_path = pack_folder / safe_file_name(parsed.get("source_name") or "takeoff_job_pack.zip")
+        source_zip_path.write_bytes(parsed["source_bytes"])
+        with zipfile.ZipFile(BytesIO(parsed["source_bytes"]), "r") as zf:
+            for member in parsed["member_names"]:
+                target = _takeoff_safe_extract_target(pack_folder, member)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(zf.read(member))
+                extracted_paths[member] = target
+    except Exception:
+        shutil.rmtree(pack_folder, ignore_errors=True)
+        raise
+
+    conn = connect()
+    estimate_id = None
+    line_count = 0
+    material_count = 0
+    document_count = 0
+    try:
+        cur = conn.cursor()
+
+        labour_hours = _takeoff_float(summary.get("labour_hours"))
+        labour_rate = _takeoff_float(summary.get("labour_rate"), 60.0)
+        material_allowance = _takeoff_float(summary.get("material_allowance"))
+        access_allowance = _takeoff_float(summary.get("access_equipment_allowance"))
+        subcontractor_allowance = _takeoff_float(summary.get("subcontractor_allowance"))
+        sundries_allowance = _takeoff_float(summary.get("sundries_allowance"))
+        target_gp = _takeoff_float(summary.get("target_gp_percent"), 35.0)
+        contingency = _takeoff_float(summary.get("contingency_percent"))
+        gst_percent = _takeoff_float(summary.get("gst_percent"), 10.0)
+        pricing_method = _takeoff_text(summary.get("pricing_method"), "Target Gross Margin")
+        line_total = _takeoff_float(summary.get("line_pricing_total")) if use_imported_line_pricing else 0.0
+        totals = calculate_estimate_pricing(
+            line_total=line_total,
+            labour_hours=labour_hours,
+            labour_rate=labour_rate,
+            material_allowance=material_allowance,
+            access_equipment_allowance=access_allowance,
+            subcontractor_allowance=subcontractor_allowance,
+            sundries_allowance=sundries_allowance,
+            pricing_percent=target_gp,
+            contingency_percent=contingency,
+            gst_percent=gst_percent,
+            pricing_method=pricing_method,
+        )
+
+        if create_estimate:
+            estimate_no = _takeoff_text(summary.get("estimate_no")) or f"{job_no}-TO-{safe_revision}"
+            estimate_notes = "\n".join(filter(None, [
+                _takeoff_text(summary.get("notes")),
+                f"Imported from Take-off Job Pack {pack_id}, revision {revision}.",
+                f"Source folder: {pack_folder}",
+            ]))
+            insert_estimate_sql = """
+                INSERT INTO estimate_working_sheets
+                (job_id, estimate_no, estimate_date, revision, status, labour_hours, labour_rate,
+                 material_allowance, access_equipment_allowance, subcontractor_allowance, sundries_allowance,
+                 margin_percent, contingency_percent, gst_percent, pricing_method,
+                 total_ex_gst, gst_amount, total_inc_gst, created_at, updated_at, notes)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """
+            if USE_POSTGRES:
+                insert_estimate_sql += " RETURNING id"
+            cur.execute(insert_estimate_sql, (
+                job_id,
+                estimate_no[:120],
+                _takeoff_text(summary.get("estimate_date"), str(date.today()))[:30],
+                revision,
+                _takeoff_text(summary.get("estimate_status"), "Draft")[:30],
+                labour_hours,
+                labour_rate,
+                material_allowance,
+                access_allowance,
+                subcontractor_allowance,
+                sundries_allowance,
+                target_gp,
+                contingency,
+                gst_percent,
+                pricing_method,
+                totals["total_ex_gst"],
+                totals["gst_amount"],
+                totals["total_inc_gst"],
+                now,
+                now,
+                estimate_notes,
+            ))
+            estimate_id = int(cur.fetchone()[0]) if USE_POSTGRES else int(cur.lastrowid)
+
+            insert_line_sql = """
+                INSERT INTO estimate_line_items
+                (estimate_id, section, item_description, qty, unit, unit_rate, line_total, notes,
+                 estimated_labour_hours, material_allowance, substrate, work_location,
+                 coating_system, colour_finish, source_pack)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """
+            for _, row in parsed["lines"].iterrows():
+                imported_rate = _takeoff_float(row.get("Unit Rate"))
+                imported_total = _takeoff_float(row.get("Line Total"))
+                notes = _takeoff_text(row.get("Notes"))
+                if not use_imported_line_pricing and (imported_rate or imported_total):
+                    notes = "\n".join(filter(None, [
+                        notes,
+                        f"Reference imported rate: ${imported_rate:,.2f}; reference line total: ${imported_total:,.2f}.",
+                    ]))
+                cur.execute(insert_line_sql, (
+                    estimate_id,
+                    _takeoff_text(row.get("Section"), "Take-off"),
+                    _takeoff_text(row.get("Item Description")),
+                    _takeoff_float(row.get("Qty")),
+                    _takeoff_text(row.get("Unit"), "item"),
+                    imported_rate if use_imported_line_pricing else 0.0,
+                    imported_total if use_imported_line_pricing else 0.0,
+                    notes,
+                    _takeoff_float(row.get("Estimated Labour Hours")),
+                    _takeoff_float(row.get("Material Allowance")),
+                    _takeoff_text(row.get("Substrate")),
+                    _takeoff_text(row.get("Location")),
+                    _takeoff_text(row.get("Coating System")),
+                    _takeoff_text(row.get("Colour / Finish")),
+                    f"{pack_id} rev {revision}",
+                ))
+                line_count += 1
+
+        if update_budget:
+            cur.execute("SELECT notes FROM job_budgets WHERE job_id = ?", (job_id,))
+            existing_budget = cur.fetchone()
+            existing_notes = _takeoff_text(existing_budget[0]) if existing_budget else ""
+            budget_note = "\n".join(filter(None, [
+                existing_notes,
+                f"Imported from Take-off Job Pack {pack_id}, revision {revision} on {now} by {imported_by}.",
+            ]))
+            cur.execute("""
+                INSERT INTO job_budgets
+                (job_id, quoted_labour_hours, quoted_labour_cost, quoted_materials,
+                 quoted_access_equipment, quoted_subcontractors, quoted_sundries,
+                 target_gp_percent, locked_at, locked_by, notes)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(job_id) DO UPDATE SET
+                    quoted_labour_hours = excluded.quoted_labour_hours,
+                    quoted_labour_cost = excluded.quoted_labour_cost,
+                    quoted_materials = excluded.quoted_materials,
+                    quoted_access_equipment = excluded.quoted_access_equipment,
+                    quoted_subcontractors = excluded.quoted_subcontractors,
+                    quoted_sundries = excluded.quoted_sundries,
+                    target_gp_percent = excluded.target_gp_percent,
+                    locked_at = excluded.locked_at,
+                    locked_by = excluded.locked_by,
+                    notes = excluded.notes
+            """, (
+                job_id,
+                labour_hours,
+                round(labour_hours * labour_rate, 2),
+                material_allowance,
+                access_allowance,
+                subcontractor_allowance,
+                sundries_allowance,
+                target_gp,
+                now,
+                imported_by,
+                budget_note,
+            ))
+
+        if import_materials:
+            material_rows = []
+            for _, row in parsed["materials"].iterrows():
+                material_rows.append({
+                    "code": _takeoff_text(row.get("Product Code / Ref"), "CUSTOM"),
+                    "name": _takeoff_text(row.get("Product / Material Name")),
+                    "supplier": _takeoff_text(row.get("Supplier")),
+                    "unit": _takeoff_text(row.get("Unit"), "each"),
+                    "unit_price": _takeoff_float(row.get("Unit Price Ex GST")),
+                    "colour": _takeoff_text(row.get("Colour / Finish")),
+                    "qty": _takeoff_float(row.get("Qty Required")),
+                    "location": _takeoff_text(row.get("Location")),
+                    "substrate": _takeoff_text(row.get("Substrate")),
+                    "system": _takeoff_text(row.get("Coating System")),
+                    "notes": _takeoff_text(row.get("Notes")),
+                })
+            for _, row in parsed["colours"].iterrows():
+                material_rows.append({
+                    "code": "COLOUR-SCHEDULE",
+                    "name": _takeoff_text(row.get("Product / Material Name"), "Colour schedule"),
+                    "supplier": "",
+                    "unit": "schedule",
+                    "unit_price": 0.0,
+                    "colour": _takeoff_text(row.get("Colour / Finish")),
+                    "qty": 0.0,
+                    "location": _takeoff_text(row.get("Location")),
+                    "substrate": _takeoff_text(row.get("Substrate")),
+                    "system": _takeoff_text(row.get("Coating System")),
+                    "notes": _takeoff_text(row.get("Notes")),
+                })
+
+            seen_materials = set()
+            for row in material_rows:
+                dedupe_key = tuple(str(row.get(key, "")).strip().casefold() for key in ["code", "name", "colour", "location", "substrate", "system"])
+                if dedupe_key in seen_materials:
+                    continue
+                seen_materials.add(dedupe_key)
+                if not row["name"]:
+                    continue
+                cur.execute(
+                    "SELECT id FROM products WHERE LOWER(TRIM(product_code)) = LOWER(TRIM(?)) LIMIT 1",
+                    (row["code"],),
+                )
+                product_match = cur.fetchone()
+                product_id = int(product_match[0]) if product_match else None
+                detail_notes = " | ".join(filter(None, [
+                    row["notes"],
+                    f"Location: {row['location']}" if row["location"] else "",
+                    f"Substrate: {row['substrate']}" if row["substrate"] else "",
+                    f"System: {row['system']}" if row["system"] else "",
+                    f"Take-off pack: {pack_id} rev {revision}",
+                ]))
+                cur.execute("""
+                    INSERT INTO material_entries
+                    (job_id, product_id, qty_required, qty_received, date_ordered, supplier, notes,
+                     custom_product_code, custom_product_name, custom_supplier, custom_unit,
+                     custom_unit_price, custom_colour)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    job_id,
+                    product_id,
+                    row["qty"],
+                    0.0,
+                    "",
+                    row["supplier"],
+                    detail_notes,
+                    "" if product_id else row["code"],
+                    "" if product_id else row["name"],
+                    "" if product_id else row["supplier"],
+                    "" if product_id else row["unit"],
+                    None if product_id else row["unit_price"],
+                    row["colour"],
+                ))
+                material_count += 1
+
+        if attach_documents:
+            for document in parsed["documents"]:
+                file_path = extracted_paths.get(document["member"])
+                if not file_path or not Path(file_path).exists():
+                    continue
+                cur.execute("""
+                    INSERT INTO job_documents
+                    (job_id, document_type, file_name, file_path, created_at, notes, mime_type)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    job_id,
+                    document["document_type"],
+                    document["file_name"],
+                    str(file_path),
+                    now,
+                    f"Imported from Take-off Job Pack {pack_id}, revision {revision}.",
+                    document["mime_type"],
+                ))
+                document_count += 1
+
+        cur.execute("""
+            INSERT INTO takeoff_pack_imports
+            (job_id, pack_id, revision, source_file, imported_at, imported_by,
+             estimate_id, line_count, material_count, document_count, manifest_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            job_id,
+            pack_id,
+            revision,
+            parsed.get("source_name", ""),
+            now,
+            imported_by,
+            estimate_id,
+            line_count,
+            material_count,
+            document_count,
+            json.dumps(parsed.get("manifest") or {}, default=str, sort_keys=True),
+        ))
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        shutil.rmtree(pack_folder, ignore_errors=True)
+        raise
+    finally:
+        conn.close()
+
+    record_audit_event(
+        "takeoff_job_pack_imported",
+        "job",
+        job_id,
+        {
+            "pack_id": pack_id,
+            "revision": revision,
+            "estimate_id": estimate_id,
+            "line_count": line_count,
+            "material_count": material_count,
+            "document_count": document_count,
+        },
+    )
+    return {
+        "estimate_id": estimate_id,
+        "line_count": line_count,
+        "material_count": material_count,
+        "document_count": document_count,
+        "pack_folder": str(pack_folder),
+        "labour_hours": _takeoff_float(summary.get("labour_hours")),
+        "material_allowance": _takeoff_float(summary.get("material_allowance")),
+    }
+
+
+def takeoff_job_pack_import_page():
+    st.header("Import Take-off Job Pack")
+    st.caption(
+        "Import a Premier Brushworks take-off ZIP into the selected job. The importer previews all data, "
+        "creates the draft estimate, stores item labour hours, updates the job budget, imports materials/colours, "
+        "and files the supplied plans, schedules, scope and purchase order."
+    )
+
+    st.download_button(
+        "Download Take-off Job Pack Template",
+        data=build_takeoff_job_pack_template(),
+        file_name="PB_JobHub_Takeoff_Job_Pack_Template.zip",
+        mime="application/zip",
+        key="download_takeoff_job_pack_template",
+    )
+
+    job_options = get_job_options()
+    if not job_options:
+        st.info("Create the job first, then import its Take-off Job Pack.")
+        return
+
+    selected_job = st.selectbox(
+        "Import into Job",
+        list(job_options.keys()),
+        key="takeoff_pack_target_job",
+    )
+    selected_job_id = job_options[selected_job]
+
+    previous = df_query("""
+        SELECT pack_id AS 'Pack ID', revision AS 'Revision', source_file AS 'Source File',
+               imported_at AS 'Imported At', imported_by AS 'Imported By',
+               line_count AS 'Lines', material_count AS 'Materials', document_count AS 'Documents'
+        FROM takeoff_pack_imports
+        WHERE job_id = ?
+        ORDER BY id DESC
+    """, (selected_job_id,))
+    if not previous.empty:
+        with st.expander("Previous Take-off Pack Imports", expanded=False):
+            st.dataframe(previous, width="stretch", hide_index=True)
+
+    uploaded_pack = st.file_uploader(
+        "Choose PB_JobHub_Takeoff_Job_Pack.zip",
+        type=["zip"],
+        key="takeoff_job_pack_upload",
+    )
+    if uploaded_pack is None:
+        st.info("Choose a ZIP to preview it before anything is saved.")
+        return
+
+    try:
+        parsed = parse_takeoff_job_pack(uploaded_pack)
+    except Exception as exc:
+        st.error(f"Could not read this Take-off Job Pack: {exc}")
+        return
+
+    summary = parsed["summary"]
+    st.markdown("### Import Preview")
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Pack ID", summary["pack_id"])
+    m2.metric("Revision", summary["revision"])
+    m3.metric("Take-off Lines", len(parsed["lines"]))
+    m4.metric("Estimated Hours", f"{summary['labour_hours']:,.2f}")
+    m5.metric("Material Allowance", f"${summary['material_allowance']:,.2f}")
+
+    selected_job_no = selected_job.split(" - ", 1)[0].strip()
+    if summary.get("job_no") and summary["job_no"].strip().casefold() != selected_job_no.casefold():
+        st.warning(
+            f"The manifest job number is {summary['job_no']}, but you selected {selected_job_no}. "
+            "Nothing will import until you confirm the selected target job."
+        )
+
+    preview_summary = pd.DataFrame([{
+        "Selected Job": selected_job,
+        "Manifest Job": " - ".join(filter(None, [summary.get("job_no"), summary.get("job_name")])),
+        "Builder / Client": summary.get("builder_client", ""),
+        "Site Address": summary.get("site_address", ""),
+        "Estimate No": summary.get("estimate_no", "") or f"{selected_job_no}-TO-{summary['revision']}",
+        "Estimate Date": summary.get("estimate_date", ""),
+        "Labour Rate": f"${summary['labour_rate']:,.2f}",
+        "Labour Cost Budget": f"${summary['labour_hours'] * summary['labour_rate']:,.2f}",
+        "Access / Equipment": f"${summary['access_equipment_allowance']:,.2f}",
+        "Subcontractors": f"${summary['subcontractor_allowance']:,.2f}",
+        "Sundries": f"${summary['sundries_allowance']:,.2f}",
+    }])
+    st.dataframe(preview_summary, width="stretch", hide_index=True)
+
+    if not parsed["lines"].empty:
+        st.markdown("#### Take-off Lines and Item Labour Hours")
+        st.dataframe(parsed["lines"], width="stretch", hide_index=True)
+    if not parsed["labour"].empty:
+        with st.expander("Labour Budget File", expanded=False):
+            st.dataframe(parsed["labour"], width="stretch", hide_index=True)
+    if not parsed["materials"].empty:
+        st.markdown("#### Material Cost Allowances")
+        st.dataframe(parsed["materials"], width="stretch", hide_index=True)
+    if not parsed["colours"].empty:
+        st.markdown("#### Colour / Finish Schedule")
+        st.dataframe(parsed["colours"], width="stretch", hide_index=True)
+    if parsed["documents"]:
+        documents_preview = pd.DataFrame([{
+            "Document Type": item["document_type"],
+            "File Name": item["file_name"],
+            "Size MB": round(item["size_bytes"] / (1024 * 1024), 2),
+        } for item in parsed["documents"]])
+        st.markdown("#### Documents to File Against the Job")
+        st.dataframe(documents_preview, width="stretch", hide_index=True)
+    else:
+        st.warning("No plans, job sheet, colour schedule, specification or purchase-order documents were found in the ZIP.")
+
+    st.markdown("### Import Options")
+    c1, c2 = st.columns(2)
+    create_estimate = c1.checkbox("Create draft Estimate Working Sheet", value=True, key="takeoff_import_create_estimate")
+    update_budget = c2.checkbox("Update / lock Job Budget from imported allowances", value=True, key="takeoff_import_budget")
+    c3, c4 = st.columns(2)
+    import_materials = c3.checkbox("Import Materials and Colour Schedule", value=True, key="takeoff_import_materials")
+    attach_documents = c4.checkbox("File supplied documents in the Job Folder", value=True, key="takeoff_import_documents")
+    use_line_pricing = st.checkbox(
+        "Use imported line rates and line totals in estimate pricing",
+        value=False,
+        help=(
+            "Leave this off for normal internal take-off packs so labour and material allowances are not counted twice. "
+            "The imported reference rates are retained in line notes."
+        ),
+        key="takeoff_import_line_pricing",
+    )
+
+    confirmation_payload = {
+        "job_id": selected_job_id,
+        "pack_id": summary["pack_id"],
+        "revision": summary["revision"],
+        "create_estimate": create_estimate,
+        "update_budget": update_budget,
+        "import_materials": import_materials,
+        "attach_documents": attach_documents,
+        "use_line_pricing": use_line_pricing,
+    }
+    accepted = review_acceptance_checkbox(
+        "takeoff_job_pack_import",
+        confirmation_payload,
+        "I have reviewed the selected job, pack revision, hours, allowances and documents and approve this import.",
+    )
+
+    if st.button(
+        "Import Take-off Job Pack",
+        type="primary",
+        disabled=not accepted,
+        key="takeoff_job_pack_import_button",
+    ):
+        try:
+            result = import_takeoff_job_pack(
+                selected_job_id,
+                parsed,
+                create_estimate=create_estimate,
+                update_budget=update_budget,
+                import_materials=import_materials,
+                attach_documents=attach_documents,
+                use_imported_line_pricing=use_line_pricing,
+            )
+            st.success(
+                f"Take-off pack imported: {result['line_count']} estimate line(s), "
+                f"{result['material_count']} material/colour row(s), and "
+                f"{result['document_count']} job document(s)."
+            )
+            st.info(
+                f"Budget loaded with {result['labour_hours']:.2f} estimated labour hours and "
+                f"${result['material_allowance']:,.2f} material allowance."
+            )
+            st.caption(f"Saved pack folder: {result['pack_folder']}")
+        except Exception as exc:
+            st.error(f"Take-off Job Pack was not imported: {exc}")
+
+
 def estimate_totals(
     estimate_id,
     labour_hours,
@@ -6253,7 +7446,10 @@ def estimate_working_sheet_page():
 
         lines_df = df_query("""
             SELECT id, section AS 'Section', item_description AS 'Description', qty AS 'Qty', unit AS 'Unit',
-                   unit_rate AS 'Unit Rate', line_total AS 'Line Total', notes AS 'Notes'
+                   estimated_labour_hours AS 'Estimated Labour Hours', material_allowance AS 'Material Allowance',
+                   substrate AS 'Substrate', work_location AS 'Location', coating_system AS 'Coating System',
+                   colour_finish AS 'Colour / Finish', unit_rate AS 'Unit Rate', line_total AS 'Line Total',
+                   source_pack AS 'Source Pack', notes AS 'Notes'
             FROM estimate_line_items
             WHERE estimate_id = ?
             ORDER BY id
@@ -6289,7 +7485,10 @@ def estimate_working_sheet_page():
         """, (selected_estimate_id,))
         lines_export = df_query("""
             SELECT section AS 'Section', item_description AS 'Description', qty AS 'Qty', unit AS 'Unit',
-                   unit_rate AS 'Unit Rate', line_total AS 'Line Total', notes AS 'Notes'
+                   estimated_labour_hours AS 'Estimated Labour Hours', material_allowance AS 'Material Allowance',
+                   substrate AS 'Substrate', work_location AS 'Location', coating_system AS 'Coating System',
+                   colour_finish AS 'Colour / Finish', unit_rate AS 'Unit Rate', line_total AS 'Line Total',
+                   source_pack AS 'Source Pack', notes AS 'Notes'
             FROM estimate_line_items
             WHERE estimate_id = ?
             ORDER BY id
@@ -9672,8 +10871,15 @@ def render_job_linked_info(job_id, expanded=True):
                l.item_description AS "Description",
                l.qty AS "Qty",
                l.unit AS "Unit",
+               COALESCE(l.estimated_labour_hours, 0) AS "Estimated Labour Hours",
+               COALESCE(l.material_allowance, 0) AS "Material Allowance",
+               l.substrate AS "Substrate",
+               l.work_location AS "Location",
+               l.coating_system AS "Coating System",
+               l.colour_finish AS "Colour / Finish",
                l.unit_rate AS "Unit Rate",
                l.line_total AS "Line Total",
+               l.source_pack AS "Source Pack",
                l.notes AS "Notes"
         FROM estimate_line_items l
         JOIN estimate_working_sheets e ON e.id = l.estimate_id
@@ -10022,7 +11228,8 @@ def render_job_linked_info(job_id, expanded=True):
                    file_name AS 'File Name',
                    file_path,
                    created_at AS 'Created At',
-                   notes AS 'Notes'
+                   notes AS 'Notes',
+                   COALESCE(mime_type, 'application/octet-stream') AS 'Mime Type'
             FROM job_documents
             WHERE job_id = ?
             ORDER BY id DESC
@@ -10047,7 +11254,7 @@ def render_job_linked_info(job_id, expanded=True):
                             label=f"Download {doc['File Name']}",
                             data=f,
                             file_name=doc["File Name"],
-                            mime="application/pdf",
+                            mime=str(doc.get("Mime Type") or "application/octet-stream"),
                             key=f"download_job_doc_{doc['id']}",
                         )
                 else:
@@ -10382,6 +11589,7 @@ elif role == "manager":
         "Equipment": "Equipment",
     }
     estimating_menu_map = {
+        "Import Take-off Job Pack": "Import Take-off Job Pack",
         "Estimate Working Sheet": "Estimate Working Sheet",
         "Estimating Rate Library": "Estimating Rate Library",
         "Job Costs / Forecasting": "Job Costs / Forecasting",
@@ -10417,6 +11625,7 @@ else:
         "Equipment": "Equipment",
     }
     estimating_menu_map = {
+        "Import Take-off Job Pack": "Import Take-off Job Pack",
         "Estimate Working Sheet": "Estimate Working Sheet",
         "Estimating Rate Library": "Estimating Rate Library",
         "Job Costs / Forecasting": "Job Costs / Forecasting",
@@ -10997,8 +12206,12 @@ elif menu == "Jobs":
 
 
 # =============================
-# ESTIMATE WORKING SHEET
+# ESTIMATE WORKING SHEET / TAKE-OFF IMPORT
 # =============================
+elif menu == "Import Take-off Job Pack":
+    takeoff_job_pack_import_page()
+
+
 elif menu == "Estimating Rate Library":
     estimating_rate_library_page()
 
@@ -12432,8 +13645,15 @@ elif menu == "Reports / Export":
                        l.item_description AS 'Description',
                        l.qty AS 'Qty',
                        l.unit AS 'Unit',
+                       COALESCE(l.estimated_labour_hours, 0) AS 'Estimated Labour Hours',
+                       COALESCE(l.material_allowance, 0) AS 'Material Allowance',
+                       l.substrate AS 'Substrate',
+                       l.work_location AS 'Location',
+                       l.coating_system AS 'Coating System',
+                       l.colour_finish AS 'Colour / Finish',
                        l.unit_rate AS 'Unit Rate',
                        l.line_total AS 'Line Total',
+                       l.source_pack AS 'Source Pack',
                        l.notes AS 'Notes'
                 FROM estimate_line_items l
                 JOIN estimate_working_sheets e ON e.id = l.estimate_id
@@ -12789,8 +14009,15 @@ elif menu == "Reports / Export":
                        l.item_description AS 'Description',
                        l.qty AS 'Qty',
                        l.unit AS 'Unit',
+                       COALESCE(l.estimated_labour_hours, 0) AS 'Estimated Labour Hours',
+                       COALESCE(l.material_allowance, 0) AS 'Material Allowance',
+                       l.substrate AS 'Substrate',
+                       l.work_location AS 'Location',
+                       l.coating_system AS 'Coating System',
+                       l.colour_finish AS 'Colour / Finish',
                        l.unit_rate AS 'Unit Rate',
                        l.line_total AS 'Line Total',
+                       l.source_pack AS 'Source Pack',
                        l.notes AS 'Notes'
                 FROM estimate_line_items l
                 JOIN estimate_working_sheets e ON e.id = l.estimate_id

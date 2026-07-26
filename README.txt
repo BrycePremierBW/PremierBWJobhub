@@ -1,30 +1,32 @@
-PREMIER BRUSHWORKS JOBHUB - TIDY CLEANUP
-========================================
+Premier Brushworks JobHub - Take-off Job Pack Importer
 
-WHAT IT CHANGES
-- Removes the oversized repeating logo background.
-- Uses a clean commercial card and page style.
-- Groups the sidebar into Home, Jobs, Site & Team, Estimating, Reports and Administration.
-- Reduces the dashboard from 12 cards to four priorities.
-- Adds Open Jobs, Upcoming Work and Attention tabs.
-- Changes the long Control Centre radio list to a compact dropdown.
-- Removes the duplicate JobHub banner displayed above every page.
+INCLUDED CHANGES
+- Adds Estimating > Import Take-off Job Pack.
+- Keeps the earlier left-sidebar menu fix: submenu choices are always visible.
+- Safely previews and imports PB_JobHub_Takeoff_Job_Pack ZIP files.
+- Creates a linked draft Estimate Working Sheet.
+- Stores estimated labour hours and material allowance against each take-off item.
+- Updates the Job Budget with total labour hours/cost, materials, access, subcontractors and sundries.
+- Imports preliminary materials and colour/finish schedule rows.
+- Files plans, marked-up plans, specifications/scope, colour schedules, purchase orders, take-off reports and internal job sheets under the selected Job Folder.
+- Blocks duplicate Pack ID + Revision imports for the same job.
+- Adds correct MIME types for job-document downloads.
+- Includes a downloadable template pack inside JobHub and in this ZIP.
 
-WHAT IT DOES NOT CHANGE
-- Database tables or Supabase data.
-- Existing jobs, builders, clients, employees or products.
-- Wages, timesheets, material costs, equipment, photos or documents.
-- Estimates, claims, variations, passwords or uploaded files.
+INSTALL
+1. In GitHub, open BrycePremierBW/PremierBWJobhub.
+2. Replace the existing root pb_jobhub_app.py with the supplied pb_jobhub_app.py.
+3. Commit directly to main.
+4. Render should redeploy automatically.
+5. Refresh JobHub with Ctrl+F5.
+6. Open Estimating > Import Take-off Job Pack.
 
-HOW TO USE ON WINDOWS
-1. Extract this ZIP.
-2. Copy tidy_jobhub.py and TIDY_JOBHUB.bat into the same folder as pb_jobhub_app.py.
-3. Double-click TIDY_JOBHUB.bat.
-4. Confirm it says the cleaned app passed Python compile checking.
-5. Test locally with:
-      py -m streamlit run pb_jobhub_app.py
-6. Commit/upload the changed pb_jobhub_app.py to the GitHub repository used by Render.
+VALIDATION COMPLETED
+- Python AST parse: passed.
+- Python bytecode compilation: passed.
+- No duplicate top-level function/class definitions: passed.
+- Template ZIP parser smoke test: passed.
+- Full SQLite importer smoke test: passed, including estimate, item hours, job budget, materials/colours, document attachment and import tracking.
 
-SAFETY
-A timestamped .before_tidy.bak backup is created first. If compile checking fails,
-the original app is restored automatically.
+IMPORTANT
+The ChatGPT GitHub connector remains read-only, so this package has not been pushed to GitHub or deployed to Render.
