@@ -1,11 +1,10 @@
 import sqlite3
 import os
 import tempfile
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin
 import shutil
 import base64
 import hashlib
-import hmac
 import html
 import re
 import json
@@ -17,12 +16,12 @@ from datetime import date, datetime, time, timedelta
 from io import BytesIO
 
 import pandas as pd
-from PIL import Image
+from PIL import Image, ImageOps
 import requests
-import psycopg2
 from psycopg2.pool import ThreadedConnectionPool
 from pypdf import PdfReader, PdfWriter
 import streamlit as st
+import streamlit.components.v1 as components
 from pb_jobhub_visual_scheduler import render_jobhub_staff_scheduler
 from jobhub_core import (
     calculate_estimate_pricing,
@@ -47,6 +46,8 @@ MAX_TAKEOFF_PACK_FILES = 300
 MAX_IMAGE_PIXELS = 25_000_000
 Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 
+PB_JOBHUB_BUILD = "2026.07.27-audited-cleanup"
+
 
 # =============================
 # APP PATHS / PERSISTENT STORAGE
@@ -63,30 +64,41 @@ TEMPLATE_DIR = os.path.join(os.path.dirname(__file__), "templates")
 ASSET_DIR = os.path.join(os.path.dirname(__file__), "assets")
 PB_LOGO_BACKGROUND_IMAGE = os.path.join(ASSET_DIR, "PB_Logo_Main_PNG.png")
 
-EQUIPMENT_TEMPLATE_PDF = os.path.join(
+
+def first_existing_app_file(directory, *file_names):
+    """Return the first existing compatible app asset path.
+
+    Older JobHub packages used both spaced and underscored template names.  The
+    compatibility lookup prevents a valid template from appearing missing just
+    because a prior update used the other filename.
+    """
+    for file_name in file_names:
+        candidate = Path(directory) / file_name
+        if candidate.exists():
+            return str(candidate)
+    return str(Path(directory) / file_names[0])
+
+
+EQUIPMENT_TEMPLATE_PDF = first_existing_app_file(
     TEMPLATE_DIR,
-    "PB Master Checklist FILLABLE INITIAL.pdf"
+    "PB Master Checklist FILLABLE INITIAL.pdf",
 )
 
-PAINT_ORDER_TEMPLATE_PDF = os.path.join(
+PAINT_ORDER_TEMPLATE_PDF = first_existing_app_file(
     TEMPLATE_DIR,
-    "PB Paint and Materials Order Form fillable.pdf"
+    "PB Paint and Materials Order Form fillable.pdf",
 )
 
-DAY_LABOUR_TEMPLATE_PDF = os.path.join(
+DAY_LABOUR_TEMPLATE_PDF = first_existing_app_file(
     TEMPLATE_DIR,
-    "Day_Labour_Sheet_FILLABLE.pdf"
+    "Day_Labour_Sheet_FILLABLE.pdf",
+    "Day Labour Sheet FILLABLE.pdf",
 )
 
-VARIATION_TEMPLATE_PDF = os.path.join(
+VARIATION_TEMPLATE_PDF = first_existing_app_file(
     TEMPLATE_DIR,
-    "PB Variation Form fillable.pdf"
+    "PB Variation Form fillable.pdf",
 )
-
-os.makedirs(DATA_DIR, exist_ok=True)
-os.makedirs(JOB_FILES_DIR, exist_ok=True)
-os.makedirs(PHOTOS_DIR, exist_ok=True)
-os.makedirs(EXPORTS_DIR, exist_ok=True)
 
 
 def safe_job_storage_segment(job_number):
@@ -114,6 +126,38 @@ st.set_page_config(
 )
 
 
+@st.cache_resource(show_spinner=False)
+def ensure_runtime_storage():
+    """Create and verify JobHub's persistent storage folders once at startup."""
+    storage_paths = {
+        "Data": DATA_DIR,
+        "Job files": JOB_FILES_DIR,
+        "Photos": PHOTOS_DIR,
+        "Exports": EXPORTS_DIR,
+    }
+    failures = []
+    for label, folder_path in storage_paths.items():
+        try:
+            Path(folder_path).mkdir(parents=True, exist_ok=True)
+            probe = Path(folder_path) / ".pb_jobhub_write_probe"
+            probe.write_text("ok", encoding="utf-8")
+            probe.unlink(missing_ok=True)
+        except OSError as exc:
+            failures.append(f"{label}: {folder_path} — {exc}")
+
+    if failures:
+        st.error("JobHub cannot write to its configured persistent storage.")
+        st.code("\n".join(failures))
+        st.info(
+            "On Render, confirm the persistent disk is mounted at /var/data and "
+            "that DATA_DIR points to the mounted path."
+        )
+        st.stop()
+
+
+ensure_runtime_storage()
+
+
 # =============================
 # PREMIER BRUSHWORKS VISUAL THEME
 # =============================
@@ -134,6 +178,7 @@ PB_MENU_ICONS = {
 }
 
 
+@st.cache_data(show_spinner=False, ttl=3600)
 def pb_logo_data_uri():
     """Return the Premier Brushworks logo as a browser-safe data URI."""
     possible_paths = [
@@ -373,6 +418,82 @@ def apply_pb_branding():
             }
         }
 
+
+        /* PB_JOBHUB_SIDEBAR_SCROLL_GUARD_V2
+           Keep the complete navigation readable and independently scrollable. */
+        section[data-testid="stSidebar"] {
+            height: 100dvh !important;
+            max-height: 100dvh !important;
+            overflow: hidden !important;
+        }
+
+        section[data-testid="stSidebar"] > div,
+        section[data-testid="stSidebar"] [data-testid="stSidebarContent"] {
+            height: 100dvh !important;
+            max-height: 100dvh !important;
+            overflow-y: auto !important;
+            overflow-x: hidden !important;
+            overscroll-behavior-y: contain !important;
+            scrollbar-gutter: stable !important;
+            scroll-behavior: auto !important;
+            padding-bottom: 2rem !important;
+        }
+
+        section[data-testid="stSidebar"] > div::-webkit-scrollbar,
+        section[data-testid="stSidebar"] [data-testid="stSidebarContent"]::-webkit-scrollbar {
+            width: 11px;
+        }
+
+        section[data-testid="stSidebar"] > div::-webkit-scrollbar-thumb,
+        section[data-testid="stSidebar"] [data-testid="stSidebarContent"]::-webkit-scrollbar-thumb {
+            background: rgba(216, 200, 184, 0.58);
+            border: 3px solid transparent;
+            border-radius: 999px;
+            background-clip: padding-box;
+        }
+
+        section[data-testid="stSidebar"] .pb-sidebar-logo {
+            position: sticky;
+            top: 0.35rem;
+            z-index: 100;
+            background: rgba(30, 27, 24, 0.96);
+            backdrop-filter: blur(10px);
+        }
+
+        section[data-testid="stSidebar"] .pb-sidebar-build {
+            color: #bfae9d;
+            font-size: 10px;
+            margin-top: 8px;
+            letter-spacing: 0.04em;
+        }
+
+        section[data-testid="stSidebar"] .st-key-sidebar_reset_navigation {
+            position: sticky;
+            top: 9.8rem;
+            z-index: 99;
+            padding: 0.25rem 0 0.5rem 0;
+            background: linear-gradient(180deg, rgba(31,27,24,0.98), rgba(31,27,24,0.90));
+        }
+
+        section[data-testid="stSidebar"] [role="radiogroup"] label,
+        section[data-testid="stSidebar"] [role="radiogroup"] label > div {
+            max-width: 100% !important;
+            overflow: visible !important;
+        }
+
+        section[data-testid="stSidebar"] [role="radiogroup"] label p {
+            word-break: normal !important;
+            overflow-wrap: anywhere !important;
+        }
+
+        @media (min-width: 769px) {
+            section[data-testid="stSidebar"],
+            section[data-testid="stSidebar"] > div {
+                width: clamp(300px, 23vw, 360px) !important;
+                min-width: clamp(300px, 23vw, 360px) !important;
+            }
+        }
+
         h1, h2, h3, h4 {
             color: var(--pb-charcoal);
             letter-spacing: -0.02em;
@@ -562,9 +683,46 @@ def pb_sidebar_header():
             {logo_html}
             <div class="pb-sidebar-title">Premier Brushworks<br>JobHub</div>
             <div class="pb-sidebar-subtitle">Commercial painting operations</div>
+            <div class="pb-sidebar-build">Build {pb_html(PB_JOBHUB_BUILD)}</div>
         </div>
         """,
         unsafe_allow_html=True,
+    )
+
+
+def pb_scroll_sidebar_to_top():
+    """Best-effort browser scroll reset after a navigation change.
+
+    The CSS scroll guard remains the primary fix.  This helper simply prevents
+    Streamlit from preserving an awkward sidebar scroll offset between pages.
+    """
+    components.html(
+        """
+        <script>
+        (() => {
+          const reset = () => {
+            try {
+              const doc = window.parent.document;
+              const sidebar = doc.querySelector('section[data-testid="stSidebar"]');
+              if (!sidebar) return;
+              const candidates = [sidebar, sidebar.firstElementChild,
+                sidebar.querySelector('[data-testid="stSidebarContent"]')];
+              candidates.filter(Boolean).forEach((node) => {
+                node.scrollTop = 0;
+                if (node.scrollTo) node.scrollTo({top: 0, left: 0, behavior: 'auto'});
+              });
+            } catch (error) {
+              // Browser sandbox restrictions are harmless; CSS still keeps the menu usable.
+            }
+          };
+          reset();
+          setTimeout(reset, 80);
+          setTimeout(reset, 250);
+        })();
+        </script>
+        """,
+        height=0,
+        width=0,
     )
 
 
@@ -4404,8 +4562,13 @@ def save_photo_to_job_folder(job_id, uploaded_file, max_size=(1600, 1600), quali
     uploaded_file.seek(0)
     try:
         with Image.open(uploaded_file) as image_probe:
-            if image_probe.format not in {"JPEG", "PNG", "WEBP"}:
-                raise ValueError("Only genuine JPEG, PNG or WebP images are accepted.")
+            # Some phones store portrait/live-photo JPEGs as an MPO container even
+            # though the filename ends in .jpg or .jpeg.  Pillow can safely read
+            # the first frame, so accept it and normalise it to a standard JPEG.
+            if image_probe.format not in {"JPEG", "MPO", "PNG", "WEBP"}:
+                raise ValueError(
+                    "Only genuine JPEG/JPG (including phone MPO), PNG or WebP images are accepted."
+                )
             if int(image_probe.width) * int(image_probe.height) > MAX_IMAGE_PIXELS:
                 raise ValueError("The image dimensions are too large to process safely.")
             image_probe.verify()
@@ -4424,7 +4587,12 @@ def save_photo_to_job_folder(job_id, uploaded_file, max_size=(1600, 1600), quali
     os.makedirs(photos_folder, exist_ok=True)
 
     image = Image.open(uploaded_file)
+    try:
+        image.seek(0)
+    except (EOFError, AttributeError):
+        pass
     image.load()
+    image = ImageOps.exif_transpose(image)
 
     if image.mode not in ["RGB", "L"]:
         image = image.convert("RGB")
@@ -4559,7 +4727,7 @@ def job_photos_page(employee_restricted=False):
             notes = st.text_area("Notes")
             uploaded_files = st.file_uploader(
                 "Upload photos",
-                type=["jpg", "jpeg", "png", "webp"],
+                type=["jpg", "jpeg", "jfif", "png", "webp"],
                 accept_multiple_files=True,
             )
             submitted = st.form_submit_button("Save Photos to Job")
@@ -11548,10 +11716,32 @@ def job_folders_page():
 # =============================
 # START APP
 # =============================
-init_db()
-apply_schema_migrations()
-seed_data()
-seed_app_users()
+@st.cache_resource(show_spinner=False)
+def initialise_jobhub_runtime(database_url, data_dir):
+    """Run idempotent schema and seed work once per server process.
+
+    Previously this work ran after every button click and page change.  Caching
+    it removes repeated migration/database overhead while still rerunning after
+    each deployment or server restart.
+    """
+    init_db()
+    apply_schema_migrations()
+    seed_data()
+    seed_app_users()
+    return True
+
+
+try:
+    initialise_jobhub_runtime(DATABASE_URL, DATA_DIR)
+except Exception as exc:
+    st.error("JobHub could not complete its database startup checks.")
+    st.code(str(exc))
+    st.info(
+        "Check DATABASE_URL, the Render persistent disk, and the latest deployment logs. "
+        "No data-cleanup action was attempted."
+    )
+    st.stop()
+
 require_login()
 
 pb_sidebar_header()
@@ -11643,6 +11833,26 @@ else:
     }
 
 reports_menu_map = {"Reports / Export": "Reports / Export"}
+
+sidebar_reset_target = "Dashboard" if "Dashboard" in main_menu_options else main_menu_options[0]
+if st.sidebar.button(
+    "↥ Reset menu / return to start",
+    key="sidebar_reset_navigation",
+    width="stretch",
+):
+    for navigation_key in (
+        "main_menu",
+        "management_menu",
+        "estimating_menu",
+        "site_operations_menu",
+        "ai_menu",
+        "control_centre_section",
+        "go_to_menu",
+        "_pb_sidebar_navigation_signature",
+    ):
+        st.session_state.pop(navigation_key, None)
+    st.session_state["go_to_menu"] = sidebar_reset_target
+    st.rerun()
 
 hidden_route_options = (
     list(management_menu_map.values()) +
@@ -11749,6 +11959,11 @@ elif main_menu_choice == "Reports":
     menu = "Reports / Export"
 else:
     menu = main_menu_choice
+
+navigation_signature = f"{main_menu_choice}|{menu}"
+if st.session_state.get("_pb_sidebar_navigation_signature") != navigation_signature:
+    st.session_state["_pb_sidebar_navigation_signature"] = navigation_signature
+    pb_scroll_sidebar_to_top()
 
 
 # =============================
@@ -14164,3 +14379,6 @@ elif menu == "Reports / Export":
             file_name=f"{report_name.replace(' ', '_').lower()}.csv",
             mime="text/csv",
         )
+
+
+# PB_JOBHUB_FULL_AUDIT_CLEANUP_20260727
