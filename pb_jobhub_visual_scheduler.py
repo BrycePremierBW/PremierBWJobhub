@@ -24,7 +24,7 @@ except ImportError:  # pragma: no cover - only used for local SQLite installs
 
 
 APP_NAME = "Premier Brushworks Staff Scheduler"
-APP_VERSION = "2.3-clickable-board"
+APP_VERSION = "2.4-clickable-timeline"
 JOBHUB_URL = os.getenv("JOBHUB_URL", "https://premierbwjobhub.onrender.com/").strip()
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 USE_POSTGRES = bool(DATABASE_URL)
@@ -821,6 +821,7 @@ def timeline_chart(assignments: pd.DataFrame, title: str):
         y="staff",
         color="Job",
         hover_data=["job_no", "job_name", "builder", "address", "Details", "notes"],
+        custom_data=["id"],
         title=title,
     )
     fig.update_yaxes(autorange="reversed", title="Staff")
@@ -831,6 +832,164 @@ def timeline_chart(assignments: pd.DataFrame, title: str):
         margin=dict(l=20, r=20, t=60, b=20),
     )
     return fig
+
+
+def selected_timeline_assignment_id(event) -> int | None:
+    """Extract the JobHub assignment id from a selected Plotly timeline box."""
+    if event is None:
+        return None
+    selection = getattr(event, "selection", None)
+    if selection is None and isinstance(event, dict):
+        selection = event.get("selection")
+    if selection is None:
+        return None
+    points = getattr(selection, "points", None)
+    if points is None and isinstance(selection, dict):
+        points = selection.get("points")
+    if not points:
+        return None
+    point = points[0]
+    custom_data = point.get("customdata") if isinstance(point, dict) else getattr(point, "customdata", None)
+    if not custom_data:
+        return None
+    try:
+        return int(custom_data[0])
+    except (TypeError, ValueError, IndexError):
+        return None
+
+
+def timeline_booking_editor(
+    assignment_id: int,
+    assignments: pd.DataFrame,
+    staff: pd.DataFrame,
+    jobs: pd.DataFrame,
+    role_options: list[str],
+) -> None:
+    """Quick edit/delete panel opened by clicking a timeline booking box."""
+    selected_rows = assignments[assignments["id"].astype(int) == int(assignment_id)]
+    if selected_rows.empty:
+        st.warning("That booking is no longer in the displayed date range.")
+        return
+    row = selected_rows.iloc[0]
+    staff_names = staff["name"].tolist()
+    job_labels = (jobs["job_no"].astype(str) + " · " + jobs["job_name"].astype(str)).tolist()
+    current_job = f"{row['job_no']} · {row['job_name']}"
+
+    st.markdown(
+        f"#### Selected booking · {row['staff']} · "
+        f"{to_date(row['schedule_date']).strftime('%A %d %B')}"
+    )
+    with st.form(f"timeline_edit_{assignment_id}"):
+        e1, e2, e3 = st.columns(3)
+        edit_staff = e1.selectbox(
+            "Employee",
+            staff_names,
+            index=staff_names.index(row["staff"]),
+            key=f"timeline_staff_{assignment_id}",
+        )
+        edit_date = e1.date_input(
+            "Date",
+            value=to_date(row["schedule_date"]),
+            key=f"timeline_date_{assignment_id}",
+        )
+        edit_job = e2.selectbox(
+            "Job",
+            job_labels,
+            index=job_labels.index(current_job) if current_job in job_labels else 0,
+            key=f"timeline_job_{assignment_id}",
+        )
+        edit_role = e2.selectbox(
+            "Role / type",
+            role_options,
+            index=role_options.index(row["site_role"]) if row["site_role"] in role_options else 0,
+            key=f"timeline_role_{assignment_id}",
+        )
+        edit_start = e3.time_input(
+            "Start",
+            value=time_value(row["start_time"]),
+            key=f"timeline_start_{assignment_id}",
+        )
+        edit_finish = e3.time_input(
+            "Finish",
+            value=time_value(row["finish_time"], time(15, 0)),
+            key=f"timeline_finish_{assignment_id}",
+        )
+        edit_hours = e3.number_input(
+            "Hours",
+            min_value=0.25,
+            max_value=24.0,
+            value=float(row["hours"]),
+            step=0.25,
+            key=f"timeline_hours_{assignment_id}",
+        )
+        edit_linked = st.checkbox(
+            "Keep linked to job start date",
+            value=bool(int(row.get("linked_to_job_dates") or 0)),
+            key=f"timeline_linked_{assignment_id}",
+        )
+        edit_notes = st.text_input(
+            "Notes",
+            value=str(row["notes"] or ""),
+            key=f"timeline_notes_{assignment_id}",
+        )
+        save = st.form_submit_button(
+            "Save selected booking",
+            type="primary",
+            use_container_width=True,
+        )
+    if save:
+        employee_id = int(staff.loc[staff["name"] == edit_staff, "id"].iloc[0])
+        job_no = edit_job.split(" · ", 1)[0]
+        job_id = int(jobs.loc[jobs["job_no"].astype(str) == job_no, "id"].iloc[0])
+        if edit_finish <= edit_start:
+            pb_error("Finish time must be after start time.")
+        elif has_approved_leave(employee_id, to_date(edit_date)):
+            pb_error("This staff member is on approved leave.")
+        elif overlapping_assignment(employee_id, to_date(edit_date), edit_start, edit_finish, assignment_id):
+            pb_error("This would overlap another booking.")
+        else:
+            job_start_value = jobs.loc[jobs["id"] == job_id, "start_date"]
+            job_start = (
+                to_date(job_start_value.iloc[0])
+                if edit_linked and not job_start_value.empty and str(job_start_value.iloc[0] or "").strip()
+                else None
+            )
+            execute(
+                """
+                UPDATE staff_schedule
+                SET employee_id=?,job_id=?,schedule_date=?,start_time=?,finish_time=?,planned_hours=?,
+                    site_role=?,notes=?,period_start=?,period_end=?,linked_to_job_dates=?,
+                    job_day_offset=?,last_job_start_date=?
+                WHERE id=?
+                """,
+                (
+                    employee_id,
+                    job_id,
+                    to_date(edit_date).isoformat(),
+                    edit_start.strftime("%H:%M"),
+                    edit_finish.strftime("%H:%M"),
+                    float(edit_hours),
+                    edit_role,
+                    edit_notes.strip(),
+                    to_date(edit_date).isoformat(),
+                    to_date(edit_date).isoformat(),
+                    1 if job_start else 0,
+                    (to_date(edit_date) - job_start).days if job_start else None,
+                    job_start.isoformat() if job_start else None,
+                    int(assignment_id),
+                ),
+            )
+            pb_success("Selected booking updated.")
+            pb_rerun()
+
+    if st.button(
+        "Delete selected booking",
+        key=f"timeline_delete_{assignment_id}",
+        use_container_width=True,
+    ):
+        execute("DELETE FROM staff_schedule WHERE id=?", (int(assignment_id),))
+        pb_success("Selected booking deleted.")
+        pb_rerun()
 
 
 def workload_chart(assignments: pd.DataFrame, staff: pd.DataFrame, start: date, end: date):
@@ -971,7 +1130,23 @@ def page_schedule(user: dict) -> None:
             st.warning("Warnings: " + " | ".join(alerts[:4]) + (" …" if len(alerts) > 4 else ""))
         chart = timeline_chart(assignments, f"JobHub schedule · {start.strftime('%d %b')} to {end.strftime('%d %b %Y')}")
         if chart:
-            st.plotly_chart(chart, use_container_width=True)
+            st.caption("Click any coloured booking box to open and edit or delete it.")
+            timeline_event = st.plotly_chart(
+                chart,
+                use_container_width=True,
+                on_select="rerun",
+                selection_mode="points",
+                key="clickable_schedule_timeline",
+            )
+            selected_assignment_id = selected_timeline_assignment_id(timeline_event)
+            if selected_assignment_id is not None:
+                timeline_booking_editor(
+                    selected_assignment_id,
+                    assignments,
+                    staff,
+                    jobs,
+                    role_options,
+                )
         else:
             st.info("Nothing is scheduled in this date range.")
         clickable_schedule_board(assignments, start, end, staff, jobs, role_options, user)
