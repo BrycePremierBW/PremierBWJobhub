@@ -1,21 +1,19 @@
 # JobHub structure map
 
-| File or folder | Responsibility |
+| File or folder | Current responsibility |
 |---|---|
-| `pb_jobhub_app.py` | Startup, login, navigation and page dispatch only |
-| `jobhub/runtime.py` | Shared imports, paths and storage folders |
-| `jobhub/ui.py` | Premier Brushworks branding and reusable UI helpers |
-| `jobhub/database.py` | Database pool, schema, queries, cached dropdowns and seed data |
-| `jobhub/security.py` | Authentication, users, employee portal and safe deletion |
-| `jobhub/documents.py` | PDF imports, documents and printable forms |
-| `jobhub/operations.py` | Photos and timesheets |
-| `jobhub/estimating.py` | Estimates, product restoration and forecasting |
-| `jobhub/control_centre.py` | Budgets, variations, claims, scheduling and approvals |
-| `jobhub/takeoff.py` | Take-off, paint, labour, audit and progress calculations |
-| `jobhub/mapping.py` | 3D models and drawing progress overlays |
-| `jobhub/takeoff_pages.py` | Take-off and progress user interfaces |
-| `jobhub/job_views.py` | Job lookup, folders and linked job information |
-| `jobhub/ai_tools.py` | JobHub AI and controlled developer tools |
-| `jobhub/navigation.py` | Role-aware sidebar navigation |
-| `jobhub/pages/` | Dashboard, jobs, builders, employees, products, materials, wages, equipment and reports |
-| `tests/smoke_test.py` | Compile, login and 22-route regression test |
+| `pb_jobhub_app.py` | Production Streamlit entry point, database compatibility layer, authentication, navigation and established JobHub pages |
+| `pb_jobhub_visual_scheduler.py` | Linked visual staff scheduler and selectable staff × day board |
+| `jobhub_enterprise.py` | Operations Hub, procurement, forecasting, backups and field workflows |
+| `jobhub_progress_tracker.py` | Linked internal-dwelling and external-substrate progress |
+| `jobhub_v2/` | Offline/idempotency/email-outbox foundations; delivery features disabled by default |
+| `jobhub_v4/` | Painting Intelligence, revisions, evidence and handover packs |
+| `jobhub/` | Staged modular components retained for controlled migration; not the production entry point |
+| `pb_planreader_app.py` | Separate local PlanReader application |
+| `assets/` | Brand assets required by JobHub |
+| `templates/` | Fillable PDF templates required for operational forms |
+| `tests/` | Source, regression, calculation and performance tests |
+
+Render starts only `pb_jobhub_app.py`. Persistent business data belongs under
+`DATA_DIR` or the configured PostgreSQL database and must never be committed to
+the repository.

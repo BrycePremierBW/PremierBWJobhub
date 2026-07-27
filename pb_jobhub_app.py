@@ -61,7 +61,7 @@ MAX_TAKEOFF_PACK_FILES = 300
 MAX_IMAGE_PIXELS = 25_000_000
 Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 
-PB_JOBHUB_BUILD = "2026.07.28-selectable-tables-v1"
+PB_JOBHUB_BUILD = "2026.07.28-performance-cleanup-v1"
 PLANNING_LABOUR_RATE = 60.0
 
 
@@ -1051,6 +1051,7 @@ def connect():
     conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA busy_timeout = 30000")
+    conn.execute("PRAGMA synchronous = NORMAL")
     return conn
 
 
@@ -1058,6 +1059,10 @@ def connect():
 def init_db():
     conn = connect()
     cur = conn.cursor()
+    if not USE_POSTGRES:
+        # WAL lets normal reads continue while another request commits a write.
+        # It is persistent for this database, so this runs only during startup.
+        cur.execute("PRAGMA journal_mode = WAL")
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS builders_clients (
@@ -13002,6 +13007,7 @@ def jobhub_enterprise_context():
         "connect": connect,
         "df_query": df_query,
         "execute": execute,
+        "execute_many": execute_many,
         "record_audit_event": record_audit_event,
         "create_management_notifications": create_management_notifications,
         "get_current_user": get_current_user,

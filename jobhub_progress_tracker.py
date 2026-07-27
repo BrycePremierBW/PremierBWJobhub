@@ -40,7 +40,10 @@ def _weighted_percent(row, stages):
     return round(earned / weight_total * 100.0, 2)
 
 
-def ensure_progress_schema(context):
+@st.cache_resource(show_spinner=False)
+def ensure_progress_schema(_context):
+    """Create progress tables and indexes once per running app process."""
+    context = _context
     execute = context["execute"]
     postgres = bool(context.get("USE_POSTGRES"))
     pk = "SERIAL PRIMARY KEY" if postgres else "INTEGER PRIMARY KEY AUTOINCREMENT"
@@ -109,6 +112,14 @@ def ensure_progress_schema(context):
     )
     execute("CREATE INDEX IF NOT EXISTS idx_dwelling_progress_job ON job_dwelling_progress(job_id)")
     execute("CREATE INDEX IF NOT EXISTS idx_external_progress_job ON job_external_progress(job_id)")
+    execute(
+        "CREATE INDEX IF NOT EXISTS idx_external_progress_job_estimate "
+        "ON job_external_progress(job_id, estimate_line_id)"
+    )
+    execute(
+        "CREATE INDEX IF NOT EXISTS idx_progress_settings_linked_estimate "
+        "ON job_progress_settings(linked_estimate_id)"
+    )
 
 
 def _job_options(context):
@@ -196,48 +207,80 @@ def _sync_external_from_estimate(context, job_id, estimate_id, username):
     if source.empty:
         return 0
     current = context["df_query"](
-        "SELECT estimate_line_id FROM job_external_progress WHERE job_id=? AND estimate_line_id IS NOT NULL",
+        """
+        SELECT estimate_line_id, COALESCE(area_name, '') AS area_name,
+               COALESCE(substrate, '') AS substrate,
+               COALESCE(measured_m2, 0) AS measured_m2
+        FROM job_external_progress
+        WHERE job_id=? AND estimate_line_id IS NOT NULL
+        """,
         (job_id,),
     )
-    existing = set(current["estimate_line_id"].dropna().astype(int).tolist()) if not current.empty else set()
+    existing = {}
+    if not current.empty:
+        existing = {
+            int(row["estimate_line_id"]): {
+                "area_name": str(row["area_name"] or ""),
+                "substrate": str(row["substrate"] or ""),
+                "measured_m2": float(row["measured_m2"] or 0),
+            }
+            for _, row in current.iterrows()
+        }
+    now = _now()
+    updates = []
+    inserts = []
     added = 0
     for _, row in source.iterrows():
         line_id = int(row["id"])
+        area_name = str(row["description"] or "External area")
+        substrate = str(row["substrate"] or "Needs review")
+        measured_m2 = float(row["qty"] or 0)
         if line_id in existing:
-            context["execute"](
-                """
-                UPDATE job_external_progress
-                SET area_name=?, substrate=?, measured_m2=?, updated_at=?, updated_by=?
-                WHERE job_id=? AND estimate_line_id=?
-                """,
-                (
-                    str(row["description"] or "External area"),
-                    str(row["substrate"] or "Needs review"),
-                    float(row["qty"] or 0),
-                    _now(),
-                    username,
-                    job_id,
-                    line_id,
-                ),
-            )
+            saved = existing[line_id]
+            if (
+                saved["area_name"] != area_name
+                or saved["substrate"] != substrate
+                or abs(saved["measured_m2"] - measured_m2) > 0.0001
+            ):
+                updates.append(
+                    (area_name, substrate, measured_m2, now, username, job_id, line_id)
+                )
             continue
-        context["execute"](
-            """
-            INSERT INTO job_external_progress
-            (job_id,estimate_line_id,area_name,substrate,measured_m2,updated_at,updated_by)
-            VALUES (?,?,?,?,?,?,?)
-            """,
+        inserts.append(
             (
                 job_id,
                 line_id,
-                str(row["description"] or "External area"),
-                str(row["substrate"] or "Needs review"),
-                float(row["qty"] or 0),
-                _now(),
+                area_name,
+                substrate,
+                measured_m2,
+                now,
                 username,
-            ),
+            )
         )
         added += 1
+    execute_many = context.get("execute_many")
+    if updates:
+        sql = """
+            UPDATE job_external_progress
+            SET area_name=?, substrate=?, measured_m2=?, updated_at=?, updated_by=?
+            WHERE job_id=? AND estimate_line_id=?
+        """
+        if execute_many:
+            execute_many(sql, updates)
+        else:
+            for params in updates:
+                context["execute"](sql, params)
+    if inserts:
+        sql = """
+            INSERT INTO job_external_progress
+            (job_id,estimate_line_id,area_name,substrate,measured_m2,updated_at,updated_by)
+            VALUES (?,?,?,?,?,?,?)
+        """
+        if execute_many:
+            execute_many(sql, inserts)
+        else:
+            for params in inserts:
+                context["execute"](sql, params)
     return added
 
 
