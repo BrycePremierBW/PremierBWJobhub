@@ -58,6 +58,101 @@ XERO_SCHEMA_STATEMENTS = (
         updated_at TEXT NOT NULL
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS xero_entity_links (
+        id TEXT PRIMARY KEY,
+        tenant_id TEXT NOT NULL,
+        entity_type TEXT NOT NULL,
+        entity_id INTEGER NOT NULL,
+        xero_contact_id TEXT NOT NULL,
+        last_synced_at TEXT,
+        UNIQUE(tenant_id, entity_type, entity_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS xero_invoice_links (
+        id TEXT PRIMARY KEY,
+        tenant_id TEXT NOT NULL,
+        entity_type TEXT NOT NULL,
+        entity_id INTEGER NOT NULL,
+        xero_invoice_id TEXT NOT NULL,
+        xero_status TEXT,
+        amount_due NUMERIC NOT NULL DEFAULT 0,
+        amount_paid NUMERIC NOT NULL DEFAULT 0,
+        last_synced_at TEXT,
+        UNIQUE(tenant_id, entity_type, entity_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS progress_claims (
+        id TEXT PRIMARY KEY,
+        job_id INTEGER NOT NULL,
+        claim_number TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'draft',
+        work_complete_percent NUMERIC NOT NULL DEFAULT 0,
+        gross_claim_ex_gst NUMERIC NOT NULL DEFAULT 0,
+        retention_ex_gst NUMERIC NOT NULL DEFAULT 0,
+        net_claim_ex_gst NUMERIC NOT NULL DEFAULT 0,
+        due_date TEXT,
+        created_by TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(job_id, claim_number)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS supplier_bills (
+        id TEXT PRIMARY KEY,
+        job_id INTEGER NOT NULL,
+        supplier_name TEXT NOT NULL,
+        supplier_invoice_number TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'draft',
+        amount_ex_gst NUMERIC NOT NULL DEFAULT 0,
+        invoice_date TEXT,
+        due_date TEXT,
+        created_by TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(supplier_name, supplier_invoice_number)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS retention_ledger (
+        id TEXT PRIMARY KEY,
+        job_id INTEGER NOT NULL,
+        progress_claim_id TEXT,
+        event_type TEXT NOT NULL,
+        amount_ex_gst NUMERIC NOT NULL,
+        event_date TEXT NOT NULL,
+        notes TEXT,
+        created_by TEXT,
+        created_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS extension_of_time (
+        id TEXT PRIMARY KEY,
+        job_id INTEGER NOT NULL,
+        reference TEXT NOT NULL,
+        cause TEXT NOT NULL,
+        notice_date TEXT,
+        requested_days INTEGER NOT NULL DEFAULT 0,
+        approved_days INTEGER NOT NULL DEFAULT 0,
+        concurrent_delay_days INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'draft',
+        decision_notes TEXT,
+        created_by TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(job_id, reference)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_xero_links_entity ON xero_entity_links(entity_type, entity_id)",
+    "CREATE INDEX IF NOT EXISTS idx_xero_invoice_status ON xero_invoice_links(xero_status, last_synced_at)",
+    "CREATE INDEX IF NOT EXISTS idx_progress_claims_job ON progress_claims(job_id, status)",
+    "CREATE INDEX IF NOT EXISTS idx_supplier_bills_job ON supplier_bills(job_id, status)",
+    "CREATE INDEX IF NOT EXISTS idx_retention_job ON retention_ledger(job_id, event_date)",
+    "CREATE INDEX IF NOT EXISTS idx_eot_job ON extension_of_time(job_id, status)",
 )
 
 
