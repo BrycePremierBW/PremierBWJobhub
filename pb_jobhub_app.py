@@ -11969,6 +11969,172 @@ if st.session_state.get("_pb_sidebar_navigation_signature") != navigation_signat
 # =============================
 # EMPLOYEE PORTAL / USER ACCESS
 # =============================
+
+# PB_JOBHUB_PRODUCT_PRICING_IMPORT_V1
+PRODUCT_PRICING_REQUIRED_COLUMNS = [
+    "Product Code",
+    "Product Name",
+    "Supplier",
+    "Unit",
+    "Price Ex GST",
+]
+
+PRODUCT_PRICING_COLUMN_ALIASES = {
+    "product_code": {"product_code", "product code", "code", "material", "l&s", "l_s"},
+    "product_name": {"product_name", "product name", "description", "material description"},
+    "supplier": {"supplier", "brand", "manufacturer"},
+    "unit": {"unit", "size", "pack size", "pack_size"},
+    "price_ex_gst": {"price_ex_gst", "price ex gst", "price", "amount", "amount ex gst"},
+    "notes": {"notes", "note", "source notes", "source"},
+}
+
+
+def _normalised_product_column_name(value):
+    return re.sub(r"[^a-z0-9&]+", " ", str(value or "").strip().casefold()).strip()
+
+
+def _product_import_float(value):
+    text = str(value or "").replace("$", "").replace(",", "").strip()
+    if not text:
+        return 0.0
+    try:
+        return float(text)
+    except Exception as exc:
+        raise ValueError(f"Invalid price value: {value}") from exc
+
+
+def normalise_product_pricing_dataframe(source_df):
+    if source_df is None or source_df.empty:
+        raise ValueError("The product pricing file is empty.")
+
+    work = source_df.copy()
+    original_columns = list(work.columns)
+    normalised_columns = {_normalised_product_column_name(column): column for column in original_columns}
+
+    resolved = {}
+    for target, aliases in PRODUCT_PRICING_COLUMN_ALIASES.items():
+        for alias in aliases:
+            key = _normalised_product_column_name(alias)
+            if key in normalised_columns:
+                resolved[target] = normalised_columns[key]
+                break
+
+    missing = []
+    for target, display_name in [
+        ("product_code", "Product Code"),
+        ("product_name", "Product Name"),
+        ("supplier", "Supplier"),
+        ("unit", "Unit"),
+        ("price_ex_gst", "Price Ex GST"),
+    ]:
+        if target not in resolved:
+            missing.append(display_name)
+    if missing:
+        raise ValueError("Missing required column(s): " + ", ".join(missing))
+
+    records_by_code = {}
+    for _, source_row in work.iterrows():
+        product_code = str(source_row.get(resolved["product_code"], "") or "").strip()
+        product_name = str(source_row.get(resolved["product_name"], "") or "").strip()
+        supplier = str(source_row.get(resolved["supplier"], "") or "").strip()
+        unit = str(source_row.get(resolved["unit"], "") or "").strip()
+        notes_column = resolved.get("notes")
+        notes = str(source_row.get(notes_column, "") or "").strip() if notes_column else ""
+
+        if not product_code and not product_name:
+            continue
+        if not product_code:
+            raise ValueError("Every product row must have a Product Code.")
+        if not product_name:
+            raise ValueError(f"Product {product_code} is missing Product Name.")
+        if not supplier:
+            raise ValueError(f"Product {product_code} is missing Supplier.")
+        if not unit:
+            raise ValueError(f"Product {product_code} is missing Unit.")
+
+        price = _product_import_float(source_row.get(resolved["price_ex_gst"], ""))
+        records_by_code[product_code] = (
+            product_code,
+            product_name,
+            supplier,
+            unit,
+            price,
+            notes,
+        )
+
+    rows = list(records_by_code.values())
+    if not rows:
+        raise ValueError("No valid product records were found.")
+    if len(rows) > MAX_CSV_IMPORT_ROWS:
+        raise ValueError(f"The product pricing file exceeds the {MAX_CSV_IMPORT_ROWS:,}-row import limit.")
+    return rows
+
+
+def import_product_pricing_dataframe(source_df, source_file_name=""):
+    rows = normalise_product_pricing_dataframe(source_df)
+    conn = connect()
+    inserted = 0
+    updated = 0
+    try:
+        cur = conn.cursor()
+        for product_code, product_name, supplier, unit, price_ex_gst, notes in rows:
+            cur.execute(
+                "SELECT id FROM products WHERE LOWER(TRIM(product_code)) = LOWER(TRIM(?)) LIMIT 1",
+                (product_code,),
+            )
+            existing = cur.fetchone()
+            if existing:
+                cur.execute("""
+                    UPDATE products
+                    SET product_name = ?, supplier = ?, unit = ?, price_ex_gst = ?, notes = ?
+                    WHERE LOWER(TRIM(product_code)) = LOWER(TRIM(?))
+                """, (
+                    product_name,
+                    supplier,
+                    unit,
+                    price_ex_gst,
+                    notes,
+                    product_code,
+                ))
+                updated += 1
+            else:
+                cur.execute("""
+                    INSERT INTO products
+                    (product_code, product_name, supplier, unit, price_ex_gst, notes)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (
+                    product_code,
+                    product_name,
+                    supplier,
+                    unit,
+                    price_ex_gst,
+                    notes,
+                ))
+                inserted += 1
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+
+    record_audit_event(
+        "product_pricing_csv_imported",
+        "products",
+        "",
+        {
+            "file_name": safe_file_name(source_file_name or "product_pricing.csv"),
+            "inserted": inserted,
+            "updated": updated,
+            "total": len(rows),
+        },
+    )
+    return {"inserted": inserted, "updated": updated, "total": len(rows)}
+
+
 if menu == "Employee Portal":
     employee_portal()
 
@@ -12972,8 +13138,93 @@ elif menu == "Employees":
 # =============================
 elif menu == "Products":
     st.header("Products")
+    st.caption("Maintain the master product list used by Material Costs and material ordering.")
 
-    with st.expander("Add / Update Product", expanded=True):
+    product_summary = df_query("""
+        SELECT COUNT(*) AS product_count,
+               COUNT(DISTINCT COALESCE(NULLIF(TRIM(supplier), ''), 'Unspecified')) AS supplier_count
+        FROM products
+    """)
+    if not product_summary.empty:
+        metric_a, metric_b = st.columns(2)
+        metric_a.metric("Saved products", int(product_summary.iloc[0]["product_count"] or 0))
+        metric_b.metric("Suppliers / brands", int(product_summary.iloc[0]["supplier_count"] or 0))
+
+    with st.expander("Import Product Pricing CSV", expanded=True):
+        st.caption(
+            "Upload a CSV containing Product Code, Product Name, Supplier, Unit, Price Ex GST and optional Notes. "
+            "Matching product codes are updated; new product codes are added."
+        )
+        product_pricing_upload = st.file_uploader(
+            "Choose product-pricing CSV",
+            type=["csv"],
+            key="product_pricing_csv_upload",
+        )
+
+        if product_pricing_upload is not None:
+            try:
+                if uploaded_file_size(product_pricing_upload) > MAX_CSV_UPLOAD_BYTES:
+                    raise ValueError("CSV is larger than the 5 MB upload limit.")
+                product_pricing_upload.seek(0)
+                product_preview_df = pd.read_csv(product_pricing_upload).fillna("")
+                if len(product_preview_df) > MAX_CSV_IMPORT_ROWS:
+                    raise ValueError(f"CSV contains more than {MAX_CSV_IMPORT_ROWS:,} rows.")
+
+                normalised_preview = normalise_product_pricing_dataframe(product_preview_df)
+                preview_display = pd.DataFrame(
+                    normalised_preview,
+                    columns=["Product Code", "Product Name", "Supplier", "Unit", "Price Ex GST", "Notes"],
+                )
+                st.dataframe(preview_display.head(30), width="stretch", hide_index=True)
+                st.caption(
+                    f"{len(preview_display):,} unique product(s) detected. "
+                    "Duplicate codes within the CSV use the last matching row."
+                )
+
+                product_import_confirm = st.checkbox(
+                    "I have reviewed the product codes and prices.",
+                    key="product_pricing_import_reviewed",
+                )
+                if st.button(
+                    "Import / Update Product Pricing",
+                    type="primary",
+                    key="product_pricing_import_button",
+                ):
+                    if not product_import_confirm:
+                        st.error("Review the pricing and tick the confirmation box before importing.")
+                    else:
+                        result = import_product_pricing_dataframe(
+                            product_preview_df,
+                            source_file_name=product_pricing_upload.name,
+                        )
+                        st.success(
+                            f"Product pricing imported: {result['inserted']} added, "
+                            f"{result['updated']} updated, {result['total']} processed."
+                        )
+                        refresh()
+            except Exception as exc:
+                st.error(f"Could not read or import this product-pricing CSV: {exc}")
+
+        current_products_export = df_query("""
+            SELECT product_code AS 'Product Code',
+                   product_name AS 'Product Name',
+                   supplier AS 'Supplier',
+                   unit AS 'Unit',
+                   price_ex_gst AS 'Price Ex GST',
+                   notes AS 'Notes'
+            FROM products
+            ORDER BY supplier, product_code
+        """)
+        if not current_products_export.empty:
+            st.download_button(
+                "Export Current Product List",
+                data=current_products_export.to_csv(index=False).encode("utf-8-sig"),
+                file_name=f"PB_JobHub_Product_List_{date.today().isoformat()}.csv",
+                mime="text/csv",
+                key="products_export_current_csv",
+            )
+
+    with st.expander("Add / Update One Product", expanded=False):
         with st.form("product_form"):
             col1, col2 = st.columns(2)
             code = col1.text_input("Product Code")
@@ -13001,6 +13252,12 @@ elif menu == "Products":
                 st.success(f"Saved product {code}")
                 refresh()
 
+    product_search = st.text_input(
+        "Search products",
+        placeholder="Product code, description or supplier",
+        key="products_search_text",
+    ).strip().lower()
+
     df = df_query("""
         SELECT product_code AS 'Product Code',
                product_name AS 'Product Name',
@@ -13009,8 +13266,18 @@ elif menu == "Products":
                price_ex_gst AS 'Price Ex GST',
                notes AS 'Notes'
         FROM products
-        ORDER BY product_code
+        ORDER BY supplier, product_code
     """)
+
+    if product_search and not df.empty:
+        haystack = (
+            df["Product Code"].fillna("").astype(str) + " " +
+            df["Product Name"].fillna("").astype(str) + " " +
+            df["Supplier"].fillna("").astype(str)
+        ).str.lower()
+        df = df[haystack.str.contains(product_search, na=False, regex=False)]
+
+    st.caption(f"Showing {len(df):,} product(s).")
     st.dataframe(df, width="stretch", hide_index=True)
 
 
