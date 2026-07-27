@@ -6581,8 +6581,9 @@ def render_estimate_line_item_csv_importer(selected_estimate_id):
 # =============================
 # TAKE-OFF JOB PACK IMPORTER
 # PB_JOBHUB_TAKEOFF_JOB_PACK_V1
+# PB_JOBHUB_JOB_PACK_CREATE_UPDATE_V2
 # =============================
-TAKEOFF_PACK_VERSION = "1.0"
+TAKEOFF_PACK_VERSION = "2.0"
 TAKEOFF_PACK_DATA_FILES = {
     "job_manifest.json",
     "takeoff_lines.csv",
@@ -6930,11 +6931,255 @@ def _takeoff_read_csv_from_zip(zf, member_names, expected_name):
     return pd.read_csv(BytesIO(raw))
 
 
+def _takeoff_bool(value, default=False):
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text_value = str(value).strip().casefold()
+    if text_value in {"1", "true", "yes", "y", "on", "enabled", "restrict", "restricted"}:
+        return True
+    if text_value in {"0", "false", "no", "n", "off", "disabled", "unrestricted"}:
+        return False
+    return bool(default)
+
+
+def _takeoff_list(value):
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        raw_values = list(value)
+    elif isinstance(value, str):
+        value = value.strip()
+        if not value:
+            return []
+        raw_values = re.split(r"[|;,\n]+", value)
+    else:
+        raw_values = [value]
+
+    result = []
+    seen = set()
+    for item in raw_values:
+        clean = _takeoff_text(item)
+        key = clean.casefold()
+        if clean and key not in seen:
+            result.append(clean)
+            seen.add(key)
+    return result
+
+
+def _takeoff_manifest_section(manifest, job_manifest, *keys):
+    for key in keys:
+        candidate = manifest.get(key) if isinstance(manifest, dict) else None
+        if isinstance(candidate, dict):
+            return candidate
+        candidate = job_manifest.get(key) if isinstance(job_manifest, dict) else None
+        if isinstance(candidate, dict):
+            return candidate
+    return {}
+
+
+def _takeoff_insert_id(cur, sql, params):
+    if USE_POSTGRES:
+        cur.execute(sql.rstrip().rstrip(";") + " RETURNING id", params)
+        return int(cur.fetchone()[0])
+    cur.execute(sql, params)
+    return int(cur.lastrowid)
+
+
+def _takeoff_resolve_builder_client(
+    cur,
+    job_details,
+    create_missing=True,
+    fill_blank_existing=True,
+):
+    builder_name = _takeoff_text(job_details.get("builder_client"))
+    if not builder_name:
+        return None, "none"
+
+    fields = [
+        "type", "name", "contact_name", "phone", "email",
+        "address", "qbcc", "abn", "terms", "notes",
+    ]
+    cur.execute(
+        """
+        SELECT id, type, name, contact_name, phone, email, address, qbcc, abn, terms, notes
+        FROM builders_clients
+        WHERE LOWER(TRIM(name)) = LOWER(TRIM(?))
+        LIMIT 1
+        """,
+        (builder_name,),
+    )
+    row = cur.fetchone()
+    incoming = {
+        "type": _takeoff_text(job_details.get("builder_client_type"), "Builder / Client"),
+        "name": builder_name,
+        "contact_name": _takeoff_text(job_details.get("builder_contact_name")),
+        "phone": _takeoff_text(job_details.get("builder_phone")),
+        "email": _takeoff_text(job_details.get("builder_email")),
+        "address": _takeoff_text(job_details.get("builder_address")),
+        "qbcc": _takeoff_text(job_details.get("builder_qbcc")),
+        "abn": _takeoff_text(job_details.get("builder_abn")),
+        "terms": _takeoff_text(job_details.get("builder_terms")),
+        "notes": _takeoff_text(job_details.get("builder_notes")),
+    }
+
+    if row:
+        builder_id = int(row[0])
+        if fill_blank_existing:
+            existing = dict(zip(["id"] + fields, row))
+            updates = []
+            params = []
+            for column in ["type", "contact_name", "phone", "email", "address", "qbcc", "abn", "terms", "notes"]:
+                if incoming[column] and not _takeoff_text(existing.get(column)):
+                    updates.append(f"{column} = ?")
+                    params.append(incoming[column])
+            if updates:
+                params.append(builder_id)
+                cur.execute(
+                    f"UPDATE builders_clients SET {', '.join(updates)} WHERE id = ?",
+                    tuple(params),
+                )
+                return builder_id, "linked_and_completed_blanks"
+        return builder_id, "linked_existing"
+
+    if not create_missing:
+        return None, "missing_not_created"
+
+    builder_id = _takeoff_insert_id(
+        cur,
+        """
+        INSERT INTO builders_clients
+        (type, name, contact_name, phone, email, address, qbcc, abn, terms, notes)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        tuple(incoming[column] for column in fields),
+    )
+    return builder_id, "created"
+
+
+def _takeoff_prepare_target_job(
+    cur,
+    job_mode,
+    target_job_id,
+    job_details,
+    update_job_record=True,
+    create_missing_builder=True,
+    fill_blank_builder_details=True,
+):
+    mode = _takeoff_text(job_mode, "update").strip().casefold()
+    details = dict(job_details or {})
+
+    if mode == "create":
+        job_no = _takeoff_text(details.get("job_no"))
+        job_name = _takeoff_text(details.get("job_name"))
+        if not job_no:
+            raise ValueError("A job number is required to create a new job from the pack.")
+        if not job_name:
+            raise ValueError("A job name is required to create a new job from the pack.")
+
+        cur.execute(
+            "SELECT id FROM jobs WHERE LOWER(TRIM(job_no)) = LOWER(TRIM(?)) LIMIT 1",
+            (job_no,),
+        )
+        if cur.fetchone():
+            raise ValueError(
+                f"Job number {job_no} already exists. Choose Update an existing job instead."
+            )
+
+        builder_id, builder_action = _takeoff_resolve_builder_client(
+            cur,
+            details,
+            create_missing=create_missing_builder,
+            fill_blank_existing=fill_blank_builder_details,
+        )
+        job_id = _takeoff_insert_id(
+            cur,
+            """
+            INSERT INTO jobs
+            (job_no, job_name, builder_client_id, site_address, status, leading_hand,
+             start_date, end_date, contract_value, notes,
+             restrict_material_products, allowed_material_suppliers)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                job_no,
+                job_name,
+                builder_id,
+                _takeoff_text(details.get("site_address")),
+                _takeoff_text(details.get("status"), "Not Started"),
+                _takeoff_text(details.get("leading_hand")),
+                _takeoff_text(details.get("start_date")),
+                _takeoff_text(details.get("end_date")),
+                _takeoff_float(details.get("contract_value_ex_gst")),
+                _takeoff_text(details.get("job_notes")),
+                1 if _takeoff_bool(details.get("restrict_material_products")) else 0,
+                serialise_material_supplier_list(_takeoff_list(details.get("allowed_material_suppliers"))),
+            ),
+        )
+        return job_id, job_no, "created", builder_action
+
+    if not target_job_id:
+        raise ValueError("Choose the existing job that this pack should update.")
+    job_id = int(target_job_id)
+    cur.execute(
+        """
+        SELECT id, job_no, job_name, builder_client_id, site_address, status, leading_hand,
+               start_date, end_date, contract_value, notes,
+               restrict_material_products, allowed_material_suppliers
+        FROM jobs
+        WHERE id = ?
+        """,
+        (job_id,),
+    )
+    existing = cur.fetchone()
+    if not existing:
+        raise ValueError("The selected existing job could not be found.")
+
+    existing_job_no = _takeoff_text(existing[1], f"job_{job_id}")
+    if not update_job_record:
+        return job_id, existing_job_no, "linked_without_job_changes", "unchanged"
+
+    builder_id, builder_action = _takeoff_resolve_builder_client(
+        cur,
+        details,
+        create_missing=create_missing_builder,
+        fill_blank_existing=fill_blank_builder_details,
+    )
+    cur.execute(
+        """
+        UPDATE jobs
+        SET job_no = ?, job_name = ?, builder_client_id = ?, site_address = ?, status = ?,
+            leading_hand = ?, start_date = ?, end_date = ?, contract_value = ?, notes = ?,
+            restrict_material_products = ?, allowed_material_suppliers = ?,
+            row_version = COALESCE(row_version, 1) + 1
+        WHERE id = ?
+        """,
+        (
+            _takeoff_text(details.get("job_no"), existing_job_no),
+            _takeoff_text(details.get("job_name"), _takeoff_text(existing[2])),
+            builder_id if _takeoff_text(details.get("builder_client")) else existing[3],
+            _takeoff_text(details.get("site_address")),
+            _takeoff_text(details.get("status"), "Not Started"),
+            _takeoff_text(details.get("leading_hand")),
+            _takeoff_text(details.get("start_date")),
+            _takeoff_text(details.get("end_date")),
+            _takeoff_float(details.get("contract_value_ex_gst")),
+            _takeoff_text(details.get("job_notes")),
+            1 if _takeoff_bool(details.get("restrict_material_products")) else 0,
+            serialise_material_supplier_list(_takeoff_list(details.get("allowed_material_suppliers"))),
+            job_id,
+        ),
+    )
+    return job_id, _takeoff_text(details.get("job_no"), existing_job_no), "updated", builder_action
+
 def parse_takeoff_job_pack(uploaded_file):
     if uploaded_file is None:
-        raise ValueError("Choose a Take-off Job Pack ZIP first.")
+        raise ValueError("Choose a Job Pack ZIP first.")
     if uploaded_file_size(uploaded_file) > MAX_TAKEOFF_PACK_BYTES:
-        raise ValueError("Take-off Job Pack is larger than the 150 MB upload limit.")
+        raise ValueError("Job Pack is larger than the 150 MB upload limit.")
     uploaded_file.seek(0)
     source_bytes = uploaded_file.read()
     uploaded_file.seek(0)
@@ -6959,10 +7204,10 @@ def parse_takeoff_job_pack(uploaded_file):
                 raise ValueError(f"Encrypted ZIP member is not supported: {info.filename}")
             file_type = (info.external_attr >> 16) & 0o170000
             if file_type == 0o120000:
-                raise ValueError(f"Symbolic links are not allowed in Take-off Job Packs: {info.filename}")
+                raise ValueError(f"Symbolic links are not allowed in Job Packs: {info.filename}")
             total_uncompressed += int(info.file_size or 0)
             if total_uncompressed > MAX_TAKEOFF_PACK_EXTRACTED_BYTES:
-                raise ValueError("The uncompressed Take-off Job Pack is larger than 350 MB.")
+                raise ValueError("The uncompressed Job Pack is larger than 350 MB.")
             member_names.append(info.filename)
 
         manifest = {}
@@ -6991,8 +7236,6 @@ def parse_takeoff_job_pack(uploaded_file):
             _takeoff_read_csv_from_zip(zf, member_names, "colour_schedule.csv")
         )
 
-        # Where labour_budget.csv carries item-level hours, fill blank/zero hours
-        # against matching take-off descriptions without double-counting existing hours.
         if not lines_df.empty and not labour_df.empty:
             labour_by_item = {}
             for _, labour_row in labour_df.iterrows():
@@ -7008,17 +7251,11 @@ def parse_takeoff_job_pack(uploaded_file):
                 if matched_hours > 0:
                     lines_df.at[line_index, "Estimated Labour Hours"] = matched_hours
 
-        if lines_df.empty and labour_df.empty and materials_df.empty and colours_df.empty:
-            raise ValueError(
-                "The ZIP has no usable takeoff_lines.csv, labour_budget.csv, "
-                "material_allowances.csv or colour_schedule.csv data."
-            )
-
         ignored_names = TAKEOFF_PACK_DATA_FILES | {"readme.txt", "readme.md"}
         documents = []
         for member in member_names:
             path = PurePosixPath(member)
-            if path.name.lower() in ignored_names:
+            if path.name.lower() in ignored_names or path.name.upper().startswith("PLACE_"):
                 continue
             if path.suffix.lower() not in TAKEOFF_PACK_DOCUMENT_EXTENSIONS:
                 continue
@@ -7033,10 +7270,31 @@ def parse_takeoff_job_pack(uploaded_file):
     job_manifest = manifest.get("job") if isinstance(manifest.get("job"), dict) else {}
     estimate_manifest = manifest.get("estimate") if isinstance(manifest.get("estimate"), dict) else {}
     budget_manifest = manifest.get("budget") if isinstance(manifest.get("budget"), dict) else {}
+    builder_manifest = _takeoff_manifest_section(
+        manifest,
+        job_manifest,
+        "builder_client",
+        "builder",
+        "client",
+    )
 
-    source_stem = Path(str(getattr(uploaded_file, "name", "takeoff_job_pack.zip"))).stem
+    scalar_builder_name = ""
+    for candidate in [
+        job_manifest.get("builder_client"),
+        job_manifest.get("builder"),
+        job_manifest.get("client"),
+        manifest.get("builder_client"),
+        manifest.get("builder"),
+        manifest.get("client"),
+    ]:
+        if candidate and not isinstance(candidate, dict):
+            scalar_builder_name = _takeoff_text(candidate)
+            if scalar_builder_name:
+                break
+
+    source_stem = Path(str(getattr(uploaded_file, "name", "job_pack.zip"))).stem
     pack_id = _takeoff_text(
-        _takeoff_value(manifest, "pack_id", "takeoff_id", default=source_stem),
+        _takeoff_value(manifest, "pack_id", "takeoff_id", "job_pack_id", default=source_stem),
         source_stem,
     )
     revision = _takeoff_text(
@@ -7064,14 +7322,61 @@ def parse_takeoff_job_pack(uploaded_file):
     )
     material_allowance = manifest_materials or material_file_total or line_material_total
 
+    raw_restrict = _takeoff_value(
+        job_manifest,
+        "restrict_material_products",
+        "restrict_products",
+        "restrict_to_approved_suppliers",
+        default=None,
+    )
+    allowed_suppliers = _takeoff_list(
+        _takeoff_value(
+            job_manifest,
+            "allowed_material_suppliers",
+            "approved_suppliers",
+            "approved_brands",
+            "material_suppliers",
+            default=[],
+        )
+    )
+    restrict_supplied = raw_restrict is not None or bool(allowed_suppliers)
+    restrict_products = _takeoff_bool(raw_restrict, bool(allowed_suppliers))
+
     summary = {
         "pack_id": pack_id,
         "revision": revision,
         "pack_version": _takeoff_text(_takeoff_value(manifest, "pack_version", default=TAKEOFF_PACK_VERSION), TAKEOFF_PACK_VERSION),
         "job_no": _takeoff_text(_takeoff_value(job_manifest, "job_no", "job_number")),
-        "job_name": _takeoff_text(_takeoff_value(job_manifest, "job_name", "name")),
-        "site_address": _takeoff_text(_takeoff_value(job_manifest, "site_address", "address")),
-        "builder_client": _takeoff_text(_takeoff_value(job_manifest, "builder_client", "builder", "client")),
+        "job_name": _takeoff_text(_takeoff_value(job_manifest, "job_name", "name", "project_name")),
+        "site_address": _takeoff_text(_takeoff_value(job_manifest, "site_address", "address", "project_address")),
+        "builder_client": _takeoff_text(_takeoff_value(builder_manifest, "name", "builder_client", "builder", "client")) or scalar_builder_name,
+        "builder_client_type": _takeoff_text(_takeoff_value(builder_manifest, "type", "contact_type"), "Builder / Client"),
+        "builder_contact_name": _takeoff_text(_takeoff_value(builder_manifest, "contact_name", "contact", "primary_contact")),
+        "builder_phone": _takeoff_text(_takeoff_value(builder_manifest, "phone", "telephone", "mobile")),
+        "builder_email": _takeoff_text(_takeoff_value(builder_manifest, "email")),
+        "builder_address": _takeoff_text(_takeoff_value(builder_manifest, "address")),
+        "builder_qbcc": _takeoff_text(_takeoff_value(builder_manifest, "qbcc", "qbcc_licence", "qbcc_license")),
+        "builder_abn": _takeoff_text(_takeoff_value(builder_manifest, "abn")),
+        "builder_terms": _takeoff_text(_takeoff_value(builder_manifest, "terms", "payment_terms")),
+        "builder_notes": _takeoff_text(_takeoff_value(builder_manifest, "notes")),
+        "status": _takeoff_text(_takeoff_value(job_manifest, "status", "job_status")),
+        "leading_hand": _takeoff_text(_takeoff_value(job_manifest, "leading_hand", "supervisor", "site_supervisor")),
+        "start_date": _takeoff_text(_takeoff_value(job_manifest, "start_date", "commencement_date")),
+        "end_date": _takeoff_text(_takeoff_value(job_manifest, "end_date", "completion_date")),
+        "contract_value_ex_gst": _takeoff_float(_takeoff_value(
+            job_manifest,
+            "contract_value_ex_gst",
+            "contract_value",
+            "price_ex_gst",
+            "quoted_price_ex_gst",
+            "tender_price_ex_gst",
+            "accepted_price_ex_gst",
+            default=_takeoff_value(estimate_manifest, "total_ex_gst", "tender_price_ex_gst", "quoted_price_ex_gst", default=0),
+        )),
+        "job_notes": _takeoff_text(_takeoff_value(job_manifest, "notes", "scope_summary", "job_notes")),
+        "restrict_material_products": restrict_products,
+        "restrict_material_products_supplied": restrict_supplied,
+        "allowed_material_suppliers": allowed_suppliers,
         "estimate_no": _takeoff_text(_takeoff_value(estimate_manifest, "estimate_no", "estimate_number")),
         "estimate_date": _takeoff_text(_takeoff_value(estimate_manifest, "estimate_date", "date"), str(date.today())),
         "estimate_status": _takeoff_text(_takeoff_value(estimate_manifest, "status"), "Draft"),
@@ -7091,9 +7396,18 @@ def parse_takeoff_job_pack(uploaded_file):
     if summary["pricing_method"] not in {"Target Gross Margin", "Markup"}:
         summary["pricing_method"] = "Target Gross Margin"
 
+    has_job_details = any(
+        _takeoff_text(summary.get(key))
+        for key in ["job_no", "job_name", "site_address", "builder_client", "job_notes"]
+    ) or summary["contract_value_ex_gst"] > 0
+    if lines_df.empty and labour_df.empty and materials_df.empty and colours_df.empty and not documents and not has_job_details:
+        raise ValueError(
+            "The ZIP has no usable job details, take-off data, colours, materials or supported documents."
+        )
+
     return {
         "source_bytes": source_bytes,
-        "source_name": safe_file_name(str(getattr(uploaded_file, "name", "takeoff_job_pack.zip"))),
+        "source_name": safe_file_name(str(getattr(uploaded_file, "name", "job_pack.zip"))),
         "member_names": member_names,
         "manifest": manifest,
         "summary": summary,
@@ -7105,16 +7419,36 @@ def parse_takeoff_job_pack(uploaded_file):
     }
 
 
+
 def build_takeoff_job_pack_template():
     manifest = {
         "pack_version": TAKEOFF_PACK_VERSION,
-        "pack_id": "PB-JOBNO-TAKEOFF",
+        "pack_id": "PB-JOBNO-JOB-PACK",
         "revision": "1",
         "job": {
             "job_no": "PB00000",
             "job_name": "Example Project",
             "site_address": "",
-            "builder_client": "",
+            "status": "Quoted",
+            "leading_hand": "",
+            "start_date": "",
+            "end_date": "",
+            "contract_value_ex_gst": 0,
+            "notes": "Scope summary and important job notes.",
+            "restrict_material_products": True,
+            "allowed_material_suppliers": ["Haymes"],
+        },
+        "builder_client": {
+            "type": "Builder",
+            "name": "Example Builder Pty Ltd",
+            "contact_name": "",
+            "phone": "",
+            "email": "",
+            "address": "",
+            "qbcc": "",
+            "abn": "",
+            "terms": "",
+            "notes": "",
         },
         "estimate": {
             "estimate_no": "PB00000-TO-01",
@@ -7131,7 +7465,7 @@ def build_takeoff_job_pack_template():
             "contingency_percent": 0,
             "gst_percent": 10,
             "pricing_method": "Target Gross Margin",
-            "notes": "Generated from Premier Brushworks take-off pack.",
+            "notes": "Generated from Premier Brushworks Job Pack.",
         },
     }
     lines = pd.DataFrame([{
@@ -7158,7 +7492,7 @@ def build_takeoff_job_pack_template():
     materials = pd.DataFrame([{
         "Product Code / Ref": "CUSTOM",
         "Product / Material Name": "Interior low sheen",
-        "Supplier": "",
+        "Supplier": "Haymes",
         "Unit": "15L",
         "Unit Price Ex GST": 150,
         "Colour / Finish": "To colour schedule",
@@ -7176,7 +7510,32 @@ def build_takeoff_job_pack_template():
         "Coating System": "2 finish coats",
         "Notes": "Example only",
     }])
-    readme = """Premier Brushworks Take-off Job Pack Template\n\nRequired/recognised files:\n- job_manifest.json\n- takeoff_lines.csv\n- labour_budget.csv\n- material_allowances.csv\n- colour_schedule.csv\n\nOptional document folders/files:\n- original_plans/\n- specifications/\n- colour_schedules/\n- purchase_orders/\n- internal_job_sheet.pdf\n- takeoff_report.pdf\n- marked_up_plans.pdf\n\nIncrease the revision each time the same take-off is reissued. JobHub blocks duplicate pack ID + revision imports for the same job.\n"""
+    readme = """Premier Brushworks Job Pack Template
+
+This ZIP can CREATE A NEW JOB or UPDATE AN EXISTING JOB.
+
+Core file:
+- job_manifest.json: job number/name, builder/client, contract price, address, status, dates, notes and approved paint suppliers.
+
+Optional estimating files:
+- takeoff_lines.csv
+- labour_budget.csv
+- material_allowances.csv
+- colour_schedule.csv
+
+Optional document folders/files:
+- original_plans/
+- specifications/
+- colour_schedules/
+- purchase_orders/
+- correspondence/
+- internal_job_sheet.pdf
+- takeoff_report.pdf
+- marked_up_plans.pdf
+
+A job-details-and-documents-only pack is valid; take-off CSV files are optional.
+Increase the revision each time the same pack is reissued to the same job.
+"""
     output = BytesIO()
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("job_manifest.json", json.dumps(manifest, indent=2))
@@ -7184,9 +7543,14 @@ def build_takeoff_job_pack_template():
         zf.writestr("labour_budget.csv", labour.to_csv(index=False))
         zf.writestr("material_allowances.csv", materials.to_csv(index=False))
         zf.writestr("colour_schedule.csv", colours.to_csv(index=False))
+        zf.writestr("original_plans/PLACE_PLANS_HERE.txt", "Place architectural plans and drawings in this folder.")
+        zf.writestr("specifications/PLACE_SPECIFICATIONS_HERE.txt", "Place specifications and scopes in this folder.")
+        zf.writestr("colour_schedules/PLACE_COLOUR_SCHEDULES_HERE.txt", "Place colour schedules in this folder.")
+        zf.writestr("purchase_orders/PLACE_PURCHASE_ORDERS_HERE.txt", "Place purchase orders or subcontracts in this folder.")
         zf.writestr("README.txt", readme)
     output.seek(0)
     return output.getvalue()
+
 
 
 def _takeoff_safe_extract_target(pack_folder, member_name):
@@ -7207,39 +7571,58 @@ def import_takeoff_job_pack(
     import_materials=True,
     attach_documents=True,
     use_imported_line_pricing=False,
+    job_mode="update",
+    job_details=None,
+    update_job_record=True,
+    create_missing_builder=True,
+    fill_blank_builder_details=True,
 ):
-    job_id = int(job_id)
     summary = parsed["summary"]
-    pack_id = _takeoff_text(summary.get("pack_id"), "takeoff-pack")[:120]
+    pack_id = _takeoff_text(summary.get("pack_id"), "job-pack")[:120]
     revision = _takeoff_text(summary.get("revision"), "1")[:60]
-
-    existing = df_query(
-        "SELECT id, imported_at FROM takeoff_pack_imports WHERE job_id = ? AND pack_id = ? AND revision = ?",
-        (job_id, pack_id, revision),
-    )
-    if not existing.empty:
-        raise ValueError(
-            f"Pack {pack_id}, revision {revision}, has already been imported into this job. "
-            "Increase the revision in job_manifest.json before importing an updated take-off."
-        )
-
-    job_df = df_query("SELECT job_no, job_name FROM jobs WHERE id = ?", (job_id,))
-    if job_df.empty:
-        raise ValueError("Selected job could not be found.")
-    job_no = _takeoff_text(job_df.iloc[0]["job_no"], f"job_{job_id}")
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     imported_by = current_username()
-
-    safe_pack = safe_file_name(pack_id)[:80]
-    safe_revision = safe_file_name(revision)[:40]
-    pack_folder = Path(get_job_folder(job_no)) / "takeoff_packs" / f"{safe_pack}_rev_{safe_revision}"
-    if pack_folder.exists():
-        pack_folder = pack_folder.parent / f"{pack_folder.name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    pack_folder.mkdir(parents=True, exist_ok=False)
-
+    pack_folder = None
     extracted_paths = {}
+    estimate_id = None
+    line_count = 0
+    material_count = 0
+    document_count = 0
+    job_action = "linked"
+    builder_action = "unchanged"
+
+    conn = connect()
     try:
-        source_zip_path = pack_folder / safe_file_name(parsed.get("source_name") or "takeoff_job_pack.zip")
+        cur = conn.cursor()
+        job_id, job_no, job_action, builder_action = _takeoff_prepare_target_job(
+            cur,
+            job_mode,
+            job_id,
+            job_details or summary,
+            update_job_record=update_job_record,
+            create_missing_builder=create_missing_builder,
+            fill_blank_builder_details=fill_blank_builder_details,
+        )
+        job_id = int(job_id)
+
+        cur.execute(
+            "SELECT id, imported_at FROM takeoff_pack_imports WHERE job_id = ? AND pack_id = ? AND revision = ?",
+            (job_id, pack_id, revision),
+        )
+        if cur.fetchone():
+            raise ValueError(
+                f"Pack {pack_id}, revision {revision}, has already been imported into this job. "
+                "Increase the revision in job_manifest.json before importing an updated pack."
+            )
+
+        safe_pack = safe_file_name(pack_id)[:80]
+        safe_revision = safe_file_name(revision)[:40]
+        pack_folder = Path(get_job_folder(job_no)) / "job_packs" / f"{safe_pack}_rev_{safe_revision}"
+        if pack_folder.exists():
+            pack_folder = pack_folder.parent / f"{pack_folder.name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        pack_folder.mkdir(parents=True, exist_ok=False)
+
+        source_zip_path = pack_folder / safe_file_name(parsed.get("source_name") or "job_pack.zip")
         source_zip_path.write_bytes(parsed["source_bytes"])
         with zipfile.ZipFile(BytesIO(parsed["source_bytes"]), "r") as zf:
             for member in parsed["member_names"]:
@@ -7247,17 +7630,6 @@ def import_takeoff_job_pack(
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(zf.read(member))
                 extracted_paths[member] = target
-    except Exception:
-        shutil.rmtree(pack_folder, ignore_errors=True)
-        raise
-
-    conn = connect()
-    estimate_id = None
-    line_count = 0
-    material_count = 0
-    document_count = 0
-    try:
-        cur = conn.cursor()
 
         labour_hours = _takeoff_float(summary.get("labour_hours"))
         labour_rate = _takeoff_float(summary.get("labour_rate"), 60.0)
@@ -7288,43 +7660,43 @@ def import_takeoff_job_pack(
             estimate_no = _takeoff_text(summary.get("estimate_no")) or f"{job_no}-TO-{safe_revision}"
             estimate_notes = "\n".join(filter(None, [
                 _takeoff_text(summary.get("notes")),
-                f"Imported from Take-off Job Pack {pack_id}, revision {revision}.",
+                f"Imported from Job Pack {pack_id}, revision {revision}.",
                 f"Source folder: {pack_folder}",
             ]))
-            insert_estimate_sql = """
+            estimate_id = _takeoff_insert_id(
+                cur,
+                """
                 INSERT INTO estimate_working_sheets
                 (job_id, estimate_no, estimate_date, revision, status, labour_hours, labour_rate,
                  material_allowance, access_equipment_allowance, subcontractor_allowance, sundries_allowance,
                  margin_percent, contingency_percent, gst_percent, pricing_method,
                  total_ex_gst, gst_amount, total_inc_gst, created_at, updated_at, notes)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """
-            if USE_POSTGRES:
-                insert_estimate_sql += " RETURNING id"
-            cur.execute(insert_estimate_sql, (
-                job_id,
-                estimate_no[:120],
-                _takeoff_text(summary.get("estimate_date"), str(date.today()))[:30],
-                revision,
-                _takeoff_text(summary.get("estimate_status"), "Draft")[:30],
-                labour_hours,
-                labour_rate,
-                material_allowance,
-                access_allowance,
-                subcontractor_allowance,
-                sundries_allowance,
-                target_gp,
-                contingency,
-                gst_percent,
-                pricing_method,
-                totals["total_ex_gst"],
-                totals["gst_amount"],
-                totals["total_inc_gst"],
-                now,
-                now,
-                estimate_notes,
-            ))
-            estimate_id = int(cur.fetchone()[0]) if USE_POSTGRES else int(cur.lastrowid)
+                """,
+                (
+                    job_id,
+                    estimate_no[:120],
+                    _takeoff_text(summary.get("estimate_date"), str(date.today()))[:30],
+                    revision,
+                    _takeoff_text(summary.get("estimate_status"), "Draft")[:30],
+                    labour_hours,
+                    labour_rate,
+                    material_allowance,
+                    access_allowance,
+                    subcontractor_allowance,
+                    sundries_allowance,
+                    target_gp,
+                    contingency,
+                    gst_percent,
+                    pricing_method,
+                    totals["total_ex_gst"],
+                    totals["gst_amount"],
+                    totals["total_inc_gst"],
+                    now,
+                    now,
+                    estimate_notes,
+                ),
+            )
 
             insert_line_sql = """
                 INSERT INTO estimate_line_items
@@ -7367,7 +7739,7 @@ def import_takeoff_job_pack(
             existing_notes = _takeoff_text(existing_budget[0]) if existing_budget else ""
             budget_note = "\n".join(filter(None, [
                 existing_notes,
-                f"Imported from Take-off Job Pack {pack_id}, revision {revision} on {now} by {imported_by}.",
+                f"Imported from Job Pack {pack_id}, revision {revision} on {now} by {imported_by}.",
             ]))
             cur.execute("""
                 INSERT INTO job_budgets
@@ -7450,7 +7822,7 @@ def import_takeoff_job_pack(
                     f"Location: {row['location']}" if row["location"] else "",
                     f"Substrate: {row['substrate']}" if row["substrate"] else "",
                     f"System: {row['system']}" if row["system"] else "",
-                    f"Take-off pack: {pack_id} rev {revision}",
+                    f"Job Pack: {pack_id} rev {revision}",
                 ]))
                 cur.execute("""
                     INSERT INTO material_entries
@@ -7490,7 +7862,7 @@ def import_takeoff_job_pack(
                     document["file_name"],
                     str(file_path),
                     now,
-                    f"Imported from Take-off Job Pack {pack_id}, revision {revision}.",
+                    f"Imported from Job Pack {pack_id}, revision {revision}.",
                     document["mime_type"],
                 ))
                 document_count += 1
@@ -7519,18 +7891,21 @@ def import_takeoff_job_pack(
             conn.rollback()
         except Exception:
             pass
-        shutil.rmtree(pack_folder, ignore_errors=True)
+        if pack_folder is not None:
+            shutil.rmtree(pack_folder, ignore_errors=True)
         raise
     finally:
         conn.close()
 
     record_audit_event(
-        "takeoff_job_pack_imported",
+        "job_pack_imported",
         "job",
         job_id,
         {
             "pack_id": pack_id,
             "revision": revision,
+            "job_action": job_action,
+            "builder_action": builder_action,
             "estimate_id": estimate_id,
             "line_count": line_count,
             "material_count": material_count,
@@ -7538,6 +7913,10 @@ def import_takeoff_job_pack(
         },
     )
     return {
+        "job_id": job_id,
+        "job_no": job_no,
+        "job_action": job_action,
+        "builder_action": builder_action,
         "estimate_id": estimate_id,
         "line_count": line_count,
         "material_count": material_count,
@@ -7548,89 +7927,378 @@ def import_takeoff_job_pack(
     }
 
 
+
 def takeoff_job_pack_import_page():
-    st.header("Import Take-off Job Pack")
+    st.header("Import / Create Job Pack")
     st.caption(
-        "Import a Premier Brushworks take-off ZIP into the selected job. The importer previews all data, "
-        "creates the draft estimate, stores item labour hours, updates the job budget, imports materials/colours, "
-        "and files the supplied plans, schedules, scope and purchase order."
+        "Upload one Premier Brushworks Job Pack ZIP. JobHub can create a complete new job or update an existing job, "
+        "then import the builder/client, contract price, colours, take-off, budgets, plans, scope, specifications, "
+        "purchase orders and supporting documents. Nothing is saved until the final review is confirmed."
     )
 
     st.download_button(
-        "Download Take-off Job Pack Template",
+        "Download Job Pack Template",
         data=build_takeoff_job_pack_template(),
-        file_name="PB_JobHub_Takeoff_Job_Pack_Template.zip",
+        file_name="PB_JobHub_Job_Pack_Template.zip",
         mime="application/zip",
         key="download_takeoff_job_pack_template",
     )
 
-    job_options = get_job_options()
-    if not job_options:
-        st.info("Create the job first, then import its Take-off Job Pack.")
-        return
-
-    selected_job = st.selectbox(
-        "Import into Job",
-        list(job_options.keys()),
-        key="takeoff_pack_target_job",
-    )
-    selected_job_id = job_options[selected_job]
-
-    previous = df_query("""
-        SELECT pack_id AS 'Pack ID', revision AS 'Revision', source_file AS 'Source File',
-               imported_at AS 'Imported At', imported_by AS 'Imported By',
-               line_count AS 'Lines', material_count AS 'Materials', document_count AS 'Documents'
-        FROM takeoff_pack_imports
-        WHERE job_id = ?
-        ORDER BY id DESC
-    """, (selected_job_id,))
-    if not previous.empty:
-        with st.expander("Previous Take-off Pack Imports", expanded=False):
-            st.dataframe(previous, width="stretch", hide_index=True)
-
     uploaded_pack = st.file_uploader(
-        "Choose PB_JobHub_Takeoff_Job_Pack.zip",
+        "Choose a Premier Brushworks Job Pack ZIP",
         type=["zip"],
         key="takeoff_job_pack_upload",
     )
     if uploaded_pack is None:
-        st.info("Choose a ZIP to preview it before anything is saved.")
+        st.info("Choose a ZIP to preview the job details and documents before anything is saved.")
         return
 
     try:
         parsed = parse_takeoff_job_pack(uploaded_pack)
     except Exception as exc:
-        pb_error(f"Could not read this Take-off Job Pack: {exc}")
+        pb_error(f"Could not read this Job Pack: {exc}")
         return
 
     summary = parsed["summary"]
-    st.markdown("### Import Preview")
+    st.markdown("### Pack Preview")
     m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("Pack ID", summary["pack_id"])
     m2.metric("Revision", summary["revision"])
     m3.metric("Take-off Lines", len(parsed["lines"]))
-    m4.metric("Estimated Hours", f"{summary['labour_hours']:,.2f}")
-    m5.metric("Material Allowance", f"${summary['material_allowance']:,.2f}")
+    m4.metric("Colours / Materials", len(parsed["colours"]) + len(parsed["materials"]))
+    m5.metric("Documents", len(parsed["documents"]))
 
-    selected_job_no = selected_job.split(" - ", 1)[0].strip()
-    if summary.get("job_no") and summary["job_no"].strip().casefold() != selected_job_no.casefold():
-        st.warning(
-            f"The manifest job number is {summary['job_no']}, but you selected {selected_job_no}. "
-            "Nothing will import until you confirm the selected target job."
+    job_options = get_job_options()
+    action_options = ["Create a new job from this pack"]
+    if job_options:
+        action_options.append("Update an existing job")
+    default_action = 0
+    manifest_job_no = _takeoff_text(summary.get("job_no"))
+    manifest_match_label = None
+    if manifest_job_no and job_options:
+        for label in job_options:
+            if label.split(" - ", 1)[0].strip().casefold() == manifest_job_no.casefold():
+                manifest_match_label = label
+                default_action = 1
+                break
+
+    job_action_label = st.radio(
+        "What should JobHub do?",
+        action_options,
+        index=default_action if default_action < len(action_options) else 0,
+        horizontal=True,
+        key="job_pack_job_action",
+    )
+    create_new_job = job_action_label.startswith("Create")
+    job_mode = "create" if create_new_job else "update"
+    selected_job_id = None
+    selected_job_label = "New job"
+    current = None
+
+    if not create_new_job:
+        labels = list(job_options.keys())
+        default_index = labels.index(manifest_match_label) if manifest_match_label in labels else 0
+        selected_job_label = st.selectbox(
+            "Existing job to update",
+            labels,
+            index=default_index,
+            key="takeoff_pack_target_job",
+        )
+        selected_job_id = job_options[selected_job_label]
+        current_df = df_query("""
+            SELECT j.*, COALESCE(bc.type, '') AS builder_client_type,
+                   COALESCE(bc.name, '') AS builder_name,
+                   COALESCE(bc.contact_name, '') AS builder_contact_name,
+                   COALESCE(bc.phone, '') AS builder_phone,
+                   COALESCE(bc.email, '') AS builder_email,
+                   COALESCE(bc.address, '') AS builder_address,
+                   COALESCE(bc.qbcc, '') AS builder_qbcc,
+                   COALESCE(bc.abn, '') AS builder_abn,
+                   COALESCE(bc.terms, '') AS builder_terms,
+                   COALESCE(bc.notes, '') AS builder_notes
+            FROM jobs j
+            LEFT JOIN builders_clients bc ON bc.id = j.builder_client_id
+            WHERE j.id = ?
+        """, (selected_job_id,))
+        if current_df.empty:
+            pb_error("The selected job could not be loaded.")
+            return
+        current = current_df.iloc[0]
+
+        previous = df_query("""
+            SELECT pack_id AS 'Pack ID', revision AS 'Revision', source_file AS 'Source File',
+                   imported_at AS 'Imported At', imported_by AS 'Imported By',
+                   line_count AS 'Lines', material_count AS 'Materials', document_count AS 'Documents'
+            FROM takeoff_pack_imports
+            WHERE job_id = ?
+            ORDER BY id DESC
+        """, (selected_job_id,))
+        if not previous.empty:
+            with st.expander("Previous Job Pack Imports", expanded=False):
+                st.dataframe(previous, width="stretch", hide_index=True)
+
+    update_job_record = True
+    if not create_new_job:
+        update_job_record = st.checkbox(
+            "Update the existing job details from this pack",
+            value=True,
+            key="job_pack_update_existing_record",
+            help="Untick this to attach the pack data and documents without changing the job number, builder, price, address or other job details.",
         )
 
+    def pack_or_existing(pack_key, existing_key=None, default=""):
+        pack_value = summary.get(pack_key)
+        if isinstance(pack_value, (int, float)):
+            if float(pack_value or 0) != 0:
+                return pack_value
+        elif _takeoff_text(pack_value):
+            return pack_value
+        if current is not None and existing_key:
+            return current.get(existing_key, default)
+        return default
+
+    proposed_job_no = (
+        _takeoff_text(summary.get("job_no")) or next_job_no()
+        if create_new_job
+        else _takeoff_text(current.get("job_no"))
+    )
+    if (
+        not create_new_job
+        and manifest_job_no
+        and manifest_job_no.casefold() != proposed_job_no.casefold()
+    ):
+        st.warning(
+            f"The pack job number is {manifest_job_no}, but you selected {proposed_job_no}. "
+            "The existing job number will be preserved unless you manually change it below."
+        )
+    proposed_job_name = _takeoff_text(pack_or_existing("job_name", "job_name"))
+    proposed_address = _takeoff_text(pack_or_existing("site_address", "site_address"))
+    proposed_builder = _takeoff_text(pack_or_existing("builder_client", "builder_name"))
+    proposed_contract = _takeoff_float(pack_or_existing("contract_value_ex_gst", "contract_value", 0))
+    proposed_status = _takeoff_text(pack_or_existing("status", "status", "Quoted" if create_new_job else "Not Started"))
+    proposed_leading_hand = _takeoff_text(pack_or_existing("leading_hand", "leading_hand"))
+    proposed_start = _takeoff_text(pack_or_existing("start_date", "start_date"))
+    proposed_end = _takeoff_text(pack_or_existing("end_date", "end_date"))
+    existing_notes = _takeoff_text(current.get("notes")) if current is not None else ""
+    pack_notes = _takeoff_text(summary.get("job_notes"))
+    proposed_notes = "\n".join(dict.fromkeys(filter(None, [existing_notes, pack_notes])))
+
+    st.markdown("### Job Details to Create / Update")
+    disabled_job_fields = (not create_new_job and not update_job_record)
+    c1, c2 = st.columns(2)
+    final_job_no = c1.text_input(
+        "Job Number",
+        value=proposed_job_no,
+        disabled=disabled_job_fields,
+        key="job_pack_final_job_no",
+    )
+    final_job_name = c2.text_input(
+        "Job Name",
+        value=proposed_job_name,
+        disabled=disabled_job_fields,
+        key="job_pack_final_job_name",
+    )
+    final_site_address = st.text_input(
+        "Site Address",
+        value=proposed_address,
+        disabled=disabled_job_fields,
+        key="job_pack_final_site_address",
+    )
+
+    c3, c4, c5 = st.columns(3)
+    status_options = ["Not Started", "Quoted", "Booked", "Active", "On Hold", "Completed", "Invoiced", "Paid", "Archived"]
+    if proposed_status and proposed_status not in status_options:
+        status_options.append(proposed_status)
+    final_status = c3.selectbox(
+        "Job Status",
+        status_options,
+        index=status_options.index(proposed_status) if proposed_status in status_options else 0,
+        disabled=disabled_job_fields,
+        key="job_pack_final_status",
+    )
+    employee_names = list(get_employee_options(active_only=False).keys())
+    leading_options = [""] + employee_names
+    if proposed_leading_hand and proposed_leading_hand not in leading_options:
+        leading_options.append(proposed_leading_hand)
+    final_leading_hand = c4.selectbox(
+        "Leading Hand",
+        leading_options,
+        index=leading_options.index(proposed_leading_hand) if proposed_leading_hand in leading_options else 0,
+        disabled=disabled_job_fields,
+        key="job_pack_final_leading_hand",
+    )
+    final_contract_value = c5.number_input(
+        "Contract Price Ex GST",
+        min_value=0.0,
+        step=100.0,
+        value=float(proposed_contract),
+        disabled=disabled_job_fields,
+        key="job_pack_final_contract_value",
+    )
+
+    c6, c7 = st.columns(2)
+    final_start_date = c6.text_input(
+        "Start Date (YYYY-MM-DD)",
+        value=proposed_start,
+        disabled=disabled_job_fields,
+        key="job_pack_final_start_date",
+    )
+    final_end_date = c7.text_input(
+        "End Date (YYYY-MM-DD)",
+        value=proposed_end,
+        disabled=disabled_job_fields,
+        key="job_pack_final_end_date",
+    )
+    final_job_notes = st.text_area(
+        "Job Notes / Scope Summary",
+        value=proposed_notes,
+        disabled=disabled_job_fields,
+        key="job_pack_final_job_notes",
+    )
+
+    st.markdown("#### Builder / Client")
+    final_builder_name = st.text_input(
+        "Builder / Client Name",
+        value=proposed_builder,
+        disabled=disabled_job_fields,
+        key="job_pack_final_builder_name",
+    )
+    with st.expander("Builder / client contact details", expanded=bool(summary.get("builder_email") or summary.get("builder_phone"))):
+        bc1, bc2 = st.columns(2)
+        final_builder_type = bc1.text_input(
+            "Type",
+            value=_takeoff_text(pack_or_existing("builder_client_type", "builder_client_type", "Builder / Client")),
+            disabled=disabled_job_fields,
+            key="job_pack_builder_type",
+        )
+        final_builder_contact = bc2.text_input(
+            "Contact Name",
+            value=_takeoff_text(pack_or_existing("builder_contact_name", "builder_contact_name")),
+            disabled=disabled_job_fields,
+            key="job_pack_builder_contact",
+        )
+        bc3, bc4 = st.columns(2)
+        final_builder_phone = bc3.text_input(
+            "Phone",
+            value=_takeoff_text(pack_or_existing("builder_phone", "builder_phone")),
+            disabled=disabled_job_fields,
+            key="job_pack_builder_phone",
+        )
+        final_builder_email = bc4.text_input(
+            "Email",
+            value=_takeoff_text(pack_or_existing("builder_email", "builder_email")),
+            disabled=disabled_job_fields,
+            key="job_pack_builder_email",
+        )
+        final_builder_address = st.text_input(
+            "Builder / Client Address",
+            value=_takeoff_text(pack_or_existing("builder_address", "builder_address")),
+            disabled=disabled_job_fields,
+            key="job_pack_builder_address",
+        )
+        bc5, bc6, bc7 = st.columns(3)
+        final_builder_qbcc = bc5.text_input(
+            "QBCC",
+            value=_takeoff_text(pack_or_existing("builder_qbcc", "builder_qbcc")),
+            disabled=disabled_job_fields,
+            key="job_pack_builder_qbcc",
+        )
+        final_builder_abn = bc6.text_input(
+            "ABN",
+            value=_takeoff_text(pack_or_existing("builder_abn", "builder_abn")),
+            disabled=disabled_job_fields,
+            key="job_pack_builder_abn",
+        )
+        final_builder_terms = bc7.text_input(
+            "Payment Terms",
+            value=_takeoff_text(pack_or_existing("builder_terms", "builder_terms")),
+            disabled=disabled_job_fields,
+            key="job_pack_builder_terms",
+        )
+        final_builder_notes = st.text_area(
+            "Builder / Client Notes",
+            value=_takeoff_text(pack_or_existing("builder_notes", "builder_notes")),
+            disabled=disabled_job_fields,
+            key="job_pack_builder_notes",
+        )
+
+    create_missing_builder = st.checkbox(
+        "Create this builder/client if it is not already in JobHub",
+        value=True,
+        disabled=disabled_job_fields,
+        key="job_pack_create_missing_builder",
+    )
+    fill_blank_builder_details = st.checkbox(
+        "Fill blank fields on an existing builder/client record from this pack",
+        value=True,
+        disabled=disabled_job_fields,
+        key="job_pack_fill_builder_blanks",
+        help="Existing non-blank contact details are not overwritten.",
+    )
+
+    st.markdown("#### Approved Paint Supplier / Brand")
+    supplier_options = get_product_supplier_options()
+    current_suppliers = parse_material_supplier_list(current.get("allowed_material_suppliers", "")) if current is not None else []
+    pack_suppliers = _takeoff_list(summary.get("allowed_material_suppliers"))
+    default_suppliers = pack_suppliers or current_suppliers
+    for supplier in default_suppliers:
+        if supplier not in supplier_options:
+            supplier_options.append(supplier)
+    if summary.get("restrict_material_products_supplied"):
+        default_restrict = bool(summary.get("restrict_material_products"))
+    elif current is not None:
+        default_restrict = bool(int(current.get("restrict_material_products", 0) or 0))
+    else:
+        default_restrict = bool(default_suppliers)
+    final_restrict_products = st.checkbox(
+        "Only show approved suppliers/brands for this job",
+        value=default_restrict,
+        disabled=disabled_job_fields,
+        key="job_pack_restrict_products",
+    )
+    final_allowed_suppliers = st.multiselect(
+        "Approved suppliers / brands",
+        supplier_options,
+        default=default_suppliers,
+        disabled=disabled_job_fields,
+        key="job_pack_allowed_suppliers",
+    )
+
+    job_details = {
+        "job_no": final_job_no,
+        "job_name": final_job_name,
+        "site_address": final_site_address,
+        "status": final_status,
+        "leading_hand": final_leading_hand,
+        "start_date": final_start_date,
+        "end_date": final_end_date,
+        "contract_value_ex_gst": final_contract_value,
+        "job_notes": final_job_notes,
+        "builder_client": final_builder_name,
+        "builder_client_type": final_builder_type,
+        "builder_contact_name": final_builder_contact,
+        "builder_phone": final_builder_phone,
+        "builder_email": final_builder_email,
+        "builder_address": final_builder_address,
+        "builder_qbcc": final_builder_qbcc,
+        "builder_abn": final_builder_abn,
+        "builder_terms": final_builder_terms,
+        "builder_notes": final_builder_notes,
+        "restrict_material_products": final_restrict_products,
+        "allowed_material_suppliers": final_allowed_suppliers,
+    }
+
     preview_summary = pd.DataFrame([{
-        "Selected Job": selected_job,
-        "Manifest Job": " - ".join(filter(None, [summary.get("job_no"), summary.get("job_name")])),
-        "Builder / Client": summary.get("builder_client", ""),
-        "Site Address": summary.get("site_address", ""),
-        "Estimate No": summary.get("estimate_no", "") or f"{selected_job_no}-TO-{summary['revision']}",
-        "Estimate Date": summary.get("estimate_date", ""),
-        "Labour Rate": f"${summary['labour_rate']:,.2f}",
-        "Labour Cost Budget": f"${summary['labour_hours'] * summary['labour_rate']:,.2f}",
-        "Access / Equipment": f"${summary['access_equipment_allowance']:,.2f}",
-        "Subcontractors": f"${summary['subcontractor_allowance']:,.2f}",
-        "Sundries": f"${summary['sundries_allowance']:,.2f}",
+        "Action": "Create New Job" if create_new_job else f"Update {selected_job_label}",
+        "Job Number": final_job_no,
+        "Job Name": final_job_name,
+        "Builder / Client": final_builder_name,
+        "Site Address": final_site_address,
+        "Contract Price Ex GST": f"${final_contract_value:,.2f}",
+        "Status": final_status,
+        "Leading Hand": final_leading_hand,
+        "Approved Brands": ", ".join(final_allowed_suppliers),
+        "Restrict Products": "Yes" if final_restrict_products else "No",
     }])
     st.dataframe(preview_summary, width="stretch", hide_index=True)
 
@@ -7652,32 +8320,70 @@ def takeoff_job_pack_import_page():
             "File Name": item["file_name"],
             "Size MB": round(item["size_bytes"] / (1024 * 1024), 2),
         } for item in parsed["documents"]])
-        st.markdown("#### Documents to File Against the Job")
+        st.markdown("#### Plans and Documents to Attach")
         st.dataframe(documents_preview, width="stretch", hide_index=True)
     else:
-        st.warning("No plans, job sheet, colour schedule, specification or purchase-order documents were found in the ZIP.")
+        st.warning("No plans, specifications, colour schedule, purchase order or supporting documents were found in the ZIP.")
 
     st.markdown("### Import Options")
-    c1, c2 = st.columns(2)
-    create_estimate = c1.checkbox("Create draft Estimate Working Sheet", value=True, key="takeoff_import_create_estimate")
-    update_budget = c2.checkbox("Update / lock Job Budget from imported allowances", value=True, key="takeoff_import_budget")
-    c3, c4 = st.columns(2)
-    import_materials = c3.checkbox("Import Materials and Colour Schedule", value=True, key="takeoff_import_materials")
-    attach_documents = c4.checkbox("File supplied documents in the Job Folder", value=True, key="takeoff_import_documents")
+    has_estimate_data = (
+        not parsed["lines"].empty
+        or summary["labour_hours"] > 0
+        or summary["material_allowance"] > 0
+        or summary["access_equipment_allowance"] > 0
+        or summary["subcontractor_allowance"] > 0
+        or summary["sundries_allowance"] > 0
+    )
+    c8, c9 = st.columns(2)
+    create_estimate = c8.checkbox(
+        "Create draft Estimate Working Sheet",
+        value=has_estimate_data,
+        key="takeoff_import_create_estimate",
+    )
+    update_budget = c9.checkbox(
+        "Update / lock Job Budget from imported allowances",
+        value=has_estimate_data,
+        key="takeoff_import_budget",
+    )
+    c10, c11 = st.columns(2)
+    import_materials = c10.checkbox(
+        "Import Materials and Colour Schedule",
+        value=not parsed["materials"].empty or not parsed["colours"].empty,
+        key="takeoff_import_materials",
+    )
+    attach_documents = c11.checkbox(
+        "Attach supplied plans and documents to the Job Folder",
+        value=bool(parsed["documents"]),
+        key="takeoff_import_documents",
+    )
     use_line_pricing = st.checkbox(
         "Use imported line rates and line totals in estimate pricing",
         value=False,
         help=(
-            "Leave this off for normal internal take-off packs so labour and material allowances are not counted twice. "
+            "Leave this off for normal internal Job Packs so labour and material allowances are not counted twice. "
             "The imported reference rates are retained in line notes."
         ),
         key="takeoff_import_line_pricing",
     )
 
+    validation_messages = []
+    if create_new_job and not _takeoff_text(final_job_no):
+        validation_messages.append("Enter a job number.")
+    if create_new_job and not _takeoff_text(final_job_name):
+        validation_messages.append("Enter a job name.")
+    if final_restrict_products and not final_allowed_suppliers:
+        validation_messages.append("Select at least one approved supplier/brand or turn off the product restriction.")
+    if validation_messages:
+        for message in validation_messages:
+            pb_error(message)
+
     confirmation_payload = {
+        "job_mode": job_mode,
         "job_id": selected_job_id,
+        "job_details": job_details,
         "pack_id": summary["pack_id"],
         "revision": summary["revision"],
+        "update_job_record": update_job_record,
         "create_estimate": create_estimate,
         "update_budget": update_budget,
         "import_materials": import_materials,
@@ -7685,15 +8391,15 @@ def takeoff_job_pack_import_page():
         "use_line_pricing": use_line_pricing,
     }
     accepted = review_acceptance_checkbox(
-        "takeoff_job_pack_import",
+        "job_pack_import_create_update",
         confirmation_payload,
-        "I have reviewed the selected job, pack revision, hours, allowances and documents and approve this import.",
+        "I have reviewed the job, builder/client, price, colours, plans, pack revision and import options and approve this action.",
     )
 
     if st.button(
-        "Import Take-off Job Pack",
+        "Create / Update Job from Pack",
         type="primary",
-        disabled=not accepted,
+        disabled=not accepted or bool(validation_messages),
         key="takeoff_job_pack_import_button",
     ):
         try:
@@ -7705,19 +8411,31 @@ def takeoff_job_pack_import_page():
                 import_materials=import_materials,
                 attach_documents=attach_documents,
                 use_imported_line_pricing=use_line_pricing,
+                job_mode=job_mode,
+                job_details=job_details,
+                update_job_record=update_job_record,
+                create_missing_builder=create_missing_builder,
+                fill_blank_builder_details=fill_blank_builder_details,
             )
+            action_text = {
+                "created": "created",
+                "updated": "updated",
+                "linked_without_job_changes": "linked without changing its job details",
+            }.get(result["job_action"], "updated")
             pb_success(
-                f"Take-off pack imported: {result['line_count']} estimate line(s), "
+                f"Job {result['job_no']} was successfully {action_text}. "
+                f"Added {result['line_count']} take-off line(s), "
                 f"{result['material_count']} material/colour row(s), and "
-                f"{result['document_count']} job document(s)."
+                f"{result['document_count']} plan/document(s)."
             )
             st.info(
-                f"Budget loaded with {result['labour_hours']:.2f} estimated labour hours and "
+                f"Budget: {result['labour_hours']:.2f} estimated labour hours and "
                 f"${result['material_allowance']:,.2f} material allowance."
             )
-            st.caption(f"Saved pack folder: {result['pack_folder']}")
+            st.caption(f"Saved Job Pack folder: {result['pack_folder']}")
         except Exception as exc:
-            pb_error(f"Take-off Job Pack was not imported: {exc}")
+            pb_error(f"The Job Pack was not imported: {exc}")
+
 
 
 def estimate_totals(
@@ -12257,7 +12975,7 @@ elif role == "manager":
         "Equipment": "Equipment",
     }
     estimating_menu_map = {
-        "Import Take-off Job Pack": "Import Take-off Job Pack",
+        "Import / Create Job Pack": "Import Take-off Job Pack",
         "Estimate Working Sheet": "Estimate Working Sheet",
         "Estimating Rate Library": "Estimating Rate Library",
         "Job Costs / Forecasting": "Job Costs / Forecasting",
@@ -12293,7 +13011,7 @@ else:
         "Equipment": "Equipment",
     }
     estimating_menu_map = {
-        "Import Take-off Job Pack": "Import Take-off Job Pack",
+        "Import / Create Job Pack": "Import Take-off Job Pack",
         "Estimate Working Sheet": "Estimate Working Sheet",
         "Estimating Rate Library": "Estimating Rate Library",
         "Job Costs / Forecasting": "Job Costs / Forecasting",
