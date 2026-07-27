@@ -5,8 +5,11 @@ Branch: `operations-v3` (stacked on `operations-v2`)
 ## Milestone 1 — Xero-safe accounting foundation
 
 - Standard Xero OAuth 2.0 authorisation-code client.
-- Required offline access, contacts and transactions scopes.
+- Required offline access plus Xero's post-March-2026 granular connection,
+  contacts, invoices and payments scopes.
 - Refresh-token rotation returned to the caller for immediate secure storage.
+- Signed, expiring OAuth state protection.
+- Encrypted access and refresh-token persistence.
 - Xero tenant selection support.
 - Draft sales-invoice and purchase-bill mappings.
 - Restart-safe connection, sync-event and commercial-event tables.
