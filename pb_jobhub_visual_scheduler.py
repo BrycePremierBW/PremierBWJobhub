@@ -24,7 +24,7 @@ except ImportError:  # pragma: no cover - only used for local SQLite installs
 
 
 APP_NAME = "Premier Brushworks Staff Scheduler"
-APP_VERSION = "2.2-linked-pooled-feedback"
+APP_VERSION = "2.3-clickable-board"
 JOBHUB_URL = os.getenv("JOBHUB_URL", "https://premierbwjobhub.onrender.com/").strip()
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 USE_POSTGRES = bool(DATABASE_URL)
@@ -666,6 +666,146 @@ def schedule_grid(assignments: pd.DataFrame, start: date, end: date, staff: pd.D
     return grid
 
 
+def selected_board_cell(event, board: pd.DataFrame) -> tuple[str, str] | None:
+    """Return the selected employee and date-column from a Streamlit dataframe event."""
+    if event is None:
+        return None
+    selection = getattr(event, "selection", None)
+    if selection is None and isinstance(event, dict):
+        selection = event.get("selection")
+    if selection is None:
+        return None
+    cells = getattr(selection, "cells", None)
+    if cells is None and isinstance(selection, dict):
+        cells = selection.get("cells")
+    if not cells:
+        return None
+    cell = cells[0]
+    if isinstance(cell, dict):
+        row_index = cell.get("row")
+        column_name = cell.get("column")
+    else:
+        try:
+            row_index, column_name = cell
+        except (TypeError, ValueError):
+            return None
+    if not isinstance(row_index, int) or row_index < 0 or row_index >= len(board):
+        return None
+    if not column_name or str(column_name) == "Employee":
+        return None
+    return str(board.iloc[row_index]["Employee"]), str(column_name)
+
+
+def clickable_schedule_board(
+    assignments: pd.DataFrame,
+    start: date,
+    end: date,
+    staff: pd.DataFrame,
+    jobs: pd.DataFrame,
+    role_options: list[str],
+    user: dict,
+) -> None:
+    """Render a cell-selectable board with quick add and delete controls."""
+    days = list(daterange(start, end))
+    day_lookup = {day.strftime("%a %d %b"): day for day in days}
+    grid = schedule_grid(assignments, start, end, staff)
+    grid.columns = [to_date(day).strftime("%a %d %b") for day in days]
+    board = grid.reset_index().rename(columns={"index": "Employee"})
+
+    st.caption("Click a day beside an employee to add or remove their booking.")
+    event = st.dataframe(
+        board,
+        use_container_width=True,
+        hide_index=True,
+        height=max(300, 80 + len(staff) * 38),
+        on_select="rerun",
+        selection_mode="single-cell",
+        key="clickable_schedule_board",
+    )
+    selected = selected_board_cell(event, board)
+    if not selected:
+        st.info("Select a board cell to schedule that employee for that day.")
+        return
+
+    staff_name, column_name = selected
+    work_day = day_lookup.get(column_name)
+    if work_day is None:
+        return
+    employee_id = int(staff.loc[staff["name"] == staff_name, "id"].iloc[0])
+    st.markdown(f"#### {staff_name} · {work_day.strftime('%A %d %B')}")
+
+    existing = assignments[
+        (assignments["employee_id"].astype(int) == employee_id)
+        & (assignments["schedule_date"].astype(str) == work_day.isoformat())
+    ]
+    if not existing.empty:
+        st.caption("Bookings already on this day")
+        for _, booking in existing.iterrows():
+            details, remove = st.columns([5, 1])
+            details.write(
+                f"**{booking['job_no']} · {booking['job_name']}** — "
+                f"{booking['start_time']}–{booking['finish_time']} · {float(booking['hours']):.1f}h"
+            )
+            if remove.button(
+                "Delete",
+                key=f"board_delete_{int(booking['id'])}",
+                type="secondary",
+                use_container_width=True,
+            ):
+                execute("DELETE FROM staff_schedule WHERE id=?", (int(booking["id"]),))
+                pb_success(f"Deleted {staff_name}'s booking for {work_day.strftime('%d %b')}.")
+                pb_rerun()
+
+    job_labels = (jobs["job_no"].astype(str) + " · " + jobs["job_name"].astype(str)).tolist()
+    with st.form(f"board_quick_add_{employee_id}_{work_day.isoformat()}"):
+        q1, q2, q3 = st.columns([2.2, 1.2, 1.2])
+        job_label = q1.selectbox("Job", job_labels, key=f"board_job_{employee_id}_{work_day}")
+        site_role = q1.selectbox("Role / type", role_options, key=f"board_role_{employee_id}_{work_day}")
+        start_time = q2.time_input("Start", value=time(7, 0), key=f"board_start_{employee_id}_{work_day}")
+        finish_time = q2.time_input("Finish", value=time(15, 0), key=f"board_finish_{employee_id}_{work_day}")
+        hours = q3.number_input(
+            "Hours",
+            min_value=0.25,
+            max_value=24.0,
+            value=7.6,
+            step=0.25,
+            key=f"board_hours_{employee_id}_{work_day}",
+        )
+        linked_dates = q3.checkbox(
+            "Link to job dates",
+            value=True,
+            key=f"board_linked_{employee_id}_{work_day}",
+            help="If the job start date changes, this booking moves with it.",
+        )
+        notes = st.text_input(
+            "Notes (optional)",
+            key=f"board_notes_{employee_id}_{work_day}",
+        )
+        save = st.form_submit_button(
+            f"Add {staff_name} to this job",
+            type="primary",
+            use_container_width=True,
+        )
+    if save:
+        job_no = job_label.split(" · ", 1)[0]
+        job_id = int(jobs.loc[jobs["job_no"].astype(str) == job_no, "id"].iloc[0])
+        ok, message = add_assignment(
+            employee_id,
+            job_id,
+            work_day,
+            start_time,
+            finish_time,
+            hours,
+            site_role,
+            notes,
+            str(user.get("username", "")),
+            linked_dates,
+        )
+        (pb_success if ok else pb_error)(message)
+        if ok:
+            pb_rerun()
+
+
 def timeline_chart(assignments: pd.DataFrame, title: str):
     if assignments.empty:
         return None
@@ -818,7 +958,10 @@ def page_schedule(user: dict) -> None:
     display_days = c2.selectbox("Board range", [7, 14, 21, 28], index=1, format_func=lambda x: f"{x} days")
     start = week_start(to_date(selected))
     end = start + timedelta(days=display_days - 1)
-    tabs = st.tabs(["Visual board", "Add assignment", "Allocate crew", "Edit / delete"])
+    tabs = st.tabs(["Clickable board", "Add assignment", "Allocate crew", "Edit / delete"])
+    staff_names = staff["name"].tolist()
+    job_labels = (jobs["job_no"].astype(str) + " · " + jobs["job_name"].astype(str)).tolist()
+    role_options = ["Site Work", "Leading Hand", "Supervision", "Quote / Measure", "Office / Planning", "Training", "Touch-ups", "Other"]
 
     with tabs[0]:
         assignments = assignment_rows(start, end)
@@ -831,7 +974,7 @@ def page_schedule(user: dict) -> None:
             st.plotly_chart(chart, use_container_width=True)
         else:
             st.info("Nothing is scheduled in this date range.")
-        st.dataframe(schedule_grid(assignments, start, end, staff), use_container_width=True, height=max(300, 80 + len(staff) * 38))
+        clickable_schedule_board(assignments, start, end, staff, jobs, role_options, user)
         b1, b2 = st.columns(2)
         with b1:
             if st.button("Copy first week to next week", use_container_width=True):
@@ -862,10 +1005,6 @@ def page_schedule(user: dict) -> None:
                 "text/csv",
                 use_container_width=True,
             )
-
-    staff_names = staff["name"].tolist()
-    job_labels = (jobs["job_no"].astype(str) + " · " + jobs["job_name"].astype(str)).tolist()
-    role_options = ["Site Work", "Leading Hand", "Supervision", "Quote / Measure", "Office / Planning", "Training", "Touch-ups", "Other"]
 
     with tabs[1]:
         with st.form("add_linked_assignment"):
