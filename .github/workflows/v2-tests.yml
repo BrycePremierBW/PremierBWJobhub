@@ -16,7 +16,7 @@ jobs:
           python-version: "3.12"
           cache: pip
       - name: Install test dependencies
-        run: pip install -r requirements-dev.txt
+        run: pip install -r requirements.txt -r requirements-dev.txt
       - name: Compile application modules
         run: python -m compileall -q pb_jobhub_app.py jobhub_enterprise.py pb_jobhub_visual_scheduler.py jobhub_feedback.py jobhub_v2 jobhub_v3 jobhub_v4
       - name: Run JobHub tests
