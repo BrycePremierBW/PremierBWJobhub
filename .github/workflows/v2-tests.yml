@@ -1,0 +1,23 @@
+name: JobHub V2 tests
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [operations-v2]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install test dependencies
+        run: pip install -r requirements-dev.txt
+      - name: Compile application modules
+        run: python -m py_compile pb_jobhub_app.py jobhub_enterprise.py pb_jobhub_visual_scheduler.py jobhub_feedback.py jobhub_v2/*.py
+      - name: Run V2 tests
+        run: python -m unittest discover -s tests -p "test_*.py" -v
