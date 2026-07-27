@@ -1,0 +1,10 @@
+{
+  "name": "Premier Brushworks JobHub Field Mode",
+  "short_name": "JobHub Field",
+  "description": "Offline-capable field capture for timesheets, photos and site forms.",
+  "start_url": "/?field_mode=1",
+  "display": "standalone",
+  "background_color": "#0b1220",
+  "theme_color": "#f5a623",
+  "icons": []
+}
