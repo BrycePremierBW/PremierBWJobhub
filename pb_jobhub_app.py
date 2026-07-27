@@ -35,6 +35,9 @@ from jobhub_enterprise import (
     render_field_mode,
     render_operations_hub,
 )
+from jobhub_v2.schema import ensure_v2_schema
+from jobhub_v4.schema import ensure_v4_schema
+from jobhub_v4.streamlit_painting import render_painting_intelligence
 from jobhub_core import (
     calculate_estimate_pricing,
     calculate_shift_hours,
@@ -13026,6 +13029,8 @@ def initialise_jobhub_runtime(database_url, data_dir):
     init_db()
     apply_schema_migrations()
     ensure_enterprise_schema(connect)
+    ensure_v2_schema(connect)
+    ensure_v4_schema(connect)
     init_linked_schema()
     seed_data()
     seed_app_users()
@@ -13113,6 +13118,7 @@ elif role == "manager":
     }
     site_operations_menu_map = {
         "Staff Scheduler": "Staff Scheduler",
+        "Painting Intelligence": "Painting Intelligence",
         "Material Costs": "Material Costs",
         "Wages": "Wages",
         "Timesheets": "Timesheets",
@@ -13151,6 +13157,7 @@ else:
     }
     site_operations_menu_map = {
         "Staff Scheduler": "Staff Scheduler",
+        "Painting Intelligence": "Painting Intelligence",
         "Material Costs": "Material Costs",
         "Wages": "Wages",
         "Timesheets": "Timesheets",
@@ -13486,6 +13493,9 @@ elif menu == "Employee Portal":
 
 elif menu == "Operations Hub":
     render_operations_hub(jobhub_enterprise_context())
+
+elif menu == "Painting Intelligence":
+    render_painting_intelligence(jobhub_enterprise_context())
 
 elif menu == "App Builder AI":
     app_builder_ai_page()
