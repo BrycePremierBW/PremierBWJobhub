@@ -30,6 +30,7 @@ from jobhub_enterprise import (
     render_field_mode,
     render_operations_hub,
 )
+from jobhub_v2.schema import ensure_v2_schema
 from jobhub_v3.schema import ensure_xero_schema
 from jobhub_v3.streamlit_xero import render_xero_settings
 from jobhub_v4.schema import ensure_v4_schema
@@ -12957,6 +12958,7 @@ def initialise_jobhub_runtime(database_url, data_dir):
     init_db()
     apply_schema_migrations()
     ensure_enterprise_schema(connect)
+    ensure_v2_schema(connect)
     ensure_xero_schema(connect)
     ensure_v4_schema(connect)
     seed_data()
