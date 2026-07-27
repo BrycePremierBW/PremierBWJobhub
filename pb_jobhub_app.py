@@ -32,6 +32,8 @@ from jobhub_enterprise import (
 )
 from jobhub_v3.schema import ensure_xero_schema
 from jobhub_v3.streamlit_xero import render_xero_settings
+from jobhub_v4.schema import ensure_v4_schema
+from jobhub_v4.streamlit_painting import render_painting_intelligence
 from jobhub_core import (
     calculate_estimate_pricing,
     calculate_shift_hours,
@@ -12956,6 +12958,7 @@ def initialise_jobhub_runtime(database_url, data_dir):
     apply_schema_migrations()
     ensure_enterprise_schema(connect)
     ensure_xero_schema(connect)
+    ensure_v4_schema(connect)
     seed_data()
     seed_app_users()
     return True
@@ -13028,6 +13031,7 @@ elif role == "manager":
     }
     site_operations_menu_map = {
         "Staff Scheduler": "Staff Scheduler",
+        "Painting Intelligence": "Painting Intelligence",
         "Material Costs": "Material Costs",
         "Wages": "Wages",
         "Timesheets": "Timesheets",
@@ -13066,6 +13070,7 @@ else:
     }
     site_operations_menu_map = {
         "Staff Scheduler": "Staff Scheduler",
+        "Painting Intelligence": "Painting Intelligence",
         "Material Costs": "Material Costs",
         "Wages": "Wages",
         "Timesheets": "Timesheets",
@@ -13404,6 +13409,9 @@ elif menu == "Operations Hub":
 
 elif menu == "Xero Integration":
     render_xero_settings(jobhub_enterprise_context())
+
+elif menu == "Painting Intelligence":
+    render_painting_intelligence(jobhub_enterprise_context())
 
 elif menu == "App Builder AI":
     app_builder_ai_page()
