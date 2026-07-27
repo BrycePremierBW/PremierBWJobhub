@@ -7,7 +7,7 @@ from jobhub_v3.mappings import (
     build_purchase_bill_payload,
     build_sales_invoice_payload,
 )
-from jobhub_v3.oauth_state import OAuthStateSigner
+from jobhub_v3.oauth_state import OAuthNonceStore, OAuthStateSigner
 from jobhub_v3.token_store import XeroTokenStore
 from jobhub_v3.xero_client import XeroClient, XeroOAuthConfig, XeroToken
 
@@ -107,6 +107,57 @@ class OAuthStateTests(unittest.TestCase):
         state = signer.issue("admin-1", "nonce-1", now=1000)
         with self.assertRaisesRegex(ValueError, "expired"):
             signer.verify(state, now=1061)
+
+    def test_nonce_can_be_consumed_only_once(self):
+        import sqlite3
+
+        connection = sqlite3.connect(":memory:")
+        connection.execute(
+            """
+            CREATE TABLE xero_oauth_nonces (
+                nonce_hash TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                consumed_at TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+
+        class SharedConnection:
+            def cursor(self):
+                return connection.cursor()
+
+            def commit(self):
+                return connection.commit()
+
+            def rollback(self):
+                return connection.rollback()
+
+            def close(self):
+                pass
+
+        store = OAuthNonceStore(lambda: SharedConnection())
+        store.register(
+            "admin-1",
+            "nonce-1",
+            created_at="2026-07-27T10:00:00+00:00",
+            expires_at="2026-07-27T10:10:00+00:00",
+        )
+        self.assertTrue(
+            store.consume(
+                "admin-1",
+                "nonce-1",
+                consumed_at="2026-07-27T10:05:00+00:00",
+            )
+        )
+        self.assertFalse(
+            store.consume(
+                "admin-1",
+                "nonce-1",
+                consumed_at="2026-07-27T10:06:00+00:00",
+            )
+        )
 
 
 class PrefixCipher:
