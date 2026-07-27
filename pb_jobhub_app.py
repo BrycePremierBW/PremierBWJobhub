@@ -61,7 +61,7 @@ MAX_TAKEOFF_PACK_FILES = 300
 MAX_IMAGE_PIXELS = 25_000_000
 Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 
-PB_JOBHUB_BUILD = "2026.07.28-edit-timesheets-v1"
+PB_JOBHUB_BUILD = "2026.07.28-dataframe-id-fix-v1"
 PLANNING_LABOUR_RATE = 60.0
 
 
@@ -143,19 +143,24 @@ st.set_page_config(
 
 
 # Make row selection consistent across every JobHub dataframe, including
-# supporting modules that share Streamlit's module object. Specialised tables
-# (such as the staff/day cell board) can still supply their own selection mode.
-_pb_original_dataframe = st.dataframe
+# supporting modules that share Streamlit's module object. Streamlit keeps the
+# patched module function between reruns, so install this wrapper only once.
+_pb_existing_dataframe = st.dataframe
+if not getattr(_pb_existing_dataframe, "_pb_selectable_wrapper", False):
+    _pb_original_dataframe = _pb_existing_dataframe
 
+    def pb_selectable_dataframe(*args, **kwargs):
+        if "on_select" not in kwargs:
+            kwargs["on_select"] = "rerun"
+            kwargs["selection_mode"] = "single-row"
+        return _pb_original_dataframe(*args, **kwargs)
 
-def pb_selectable_dataframe(*args, **kwargs):
-    if "on_select" not in kwargs:
-        kwargs["on_select"] = "rerun"
-        kwargs["selection_mode"] = "single-row"
-    return _pb_original_dataframe(*args, **kwargs)
-
-
-st.dataframe = pb_selectable_dataframe
+    pb_selectable_dataframe._pb_selectable_wrapper = True
+    pb_selectable_dataframe._pb_original_dataframe = _pb_original_dataframe
+    st.dataframe = pb_selectable_dataframe
+else:
+    pb_selectable_dataframe = _pb_existing_dataframe
+    _pb_original_dataframe = _pb_existing_dataframe._pb_original_dataframe
 
 
 pb_replay_pending()
@@ -13077,7 +13082,12 @@ def render_job_linked_info(job_id, expanded=True):
         if timesheet_details.empty:
             st.info("No timesheets saved for this job.")
         else:
-            st.dataframe(timesheet_details, width="stretch", hide_index=True)
+            st.dataframe(
+                timesheet_details,
+                width="stretch",
+                hide_index=True,
+                key="job_dashboard_timesheet_details",
+            )
 
     with tab_equipment:
         st.markdown("### Equipment Master Entries")
@@ -16594,8 +16604,16 @@ elif menu == "Reports / Export":
             if timesheet_details.empty:
                 st.info("No timesheets saved for this job.")
             else:
-                st.metric("Total Timesheet Hours", f"{float(timesheet_details['Hours'].fillna(0).sum()):.2f}")
-                st.dataframe(timesheet_details, width="stretch", hide_index=True)
+                st.metric(
+                    "Total Timesheet Hours",
+                    f"{float(timesheet_details['Hours'].fillna(0).sum()):.2f}",
+                )
+                st.dataframe(
+                    timesheet_details,
+                    width="stretch",
+                    hide_index=True,
+                    key="all_data_timesheet_details",
+                )
 
             st.markdown("### Material Costs for this Job")
             if material_details.empty:
@@ -16614,13 +16632,6 @@ elif menu == "Reports / Export":
                 st.info("No wage entries saved for this job.")
             else:
                 st.dataframe(wage_details, width="stretch", hide_index=True)
-
-            st.markdown("### Timesheets for this Job")
-            if timesheet_details.empty:
-                st.info("No timesheets saved for this job.")
-            else:
-                st.metric("Total Timesheet Hours", f"{float(timesheet_details['Hours'].fillna(0).sum()):.2f}")
-                st.dataframe(timesheet_details, width="stretch", hide_index=True)
 
             st.markdown("### Equipment Master List for this Job")
             if equipment_master.empty:
