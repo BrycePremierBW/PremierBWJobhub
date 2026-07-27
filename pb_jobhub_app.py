@@ -61,7 +61,7 @@ MAX_TAKEOFF_PACK_FILES = 300
 MAX_IMAGE_PIXELS = 25_000_000
 Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 
-PB_JOBHUB_BUILD = "2026.07.28-performance-cleanup-v1"
+PB_JOBHUB_BUILD = "2026.07.28-selectable-tables-popup-v1"
 PLANNING_LABOUR_RATE = 60.0
 
 
@@ -140,6 +140,22 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+
+# Make row selection consistent across every JobHub dataframe, including
+# supporting modules that share Streamlit's module object. Specialised tables
+# (such as the staff/day cell board) can still supply their own selection mode.
+_pb_original_dataframe = st.dataframe
+
+
+def pb_selectable_dataframe(*args, **kwargs):
+    if "on_select" not in kwargs:
+        kwargs["on_select"] = "rerun"
+        kwargs["selection_mode"] = "single-row"
+    return _pb_original_dataframe(*args, **kwargs)
+
+
+st.dataframe = pb_selectable_dataframe
 
 
 pb_replay_pending()
@@ -9986,7 +10002,7 @@ def job_costs_forecasting_page():
 
     elif section == "Scheduling Forecast":
         st.subheader("Scheduling / Labour Forecast")
-        hours_day = st.number_input("Default Hours / Person / Day", min_value=1.0, value=7.5, step=0.5)
+        hours_day = st.number_input("Default Hours / Person / Day", min_value=1.0, value=8.0, step=0.5)
         sched = df.copy()
         sched["Budget Labour Hours"] = sched["Estimated Labour Hours"]
         sched["Budget Labour Hours"] = sched.apply(
