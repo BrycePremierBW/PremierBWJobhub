@@ -277,6 +277,9 @@ def init_linked_schema() -> None:
         ("period_end", "TEXT"),
         ("planned_hours", "REAL"),
         ("created_by", "TEXT"),
+        ("linked_to_job_dates", "INTEGER DEFAULT 1"),
+        ("job_day_offset", "INTEGER"),
+        ("last_job_start_date", "TEXT"),
     ]:
         ensure_column("staff_schedule", column, definition)
 
@@ -429,7 +432,9 @@ def assignment_rows(start: date, end: date, employee_id: int | None = None) -> p
                COALESCE(s.finish_time,'15:00') AS finish_time,
                COALESCE(s.planned_hours,0) AS planned_hours,
                COALESCE(s.site_role,'Site Work') AS site_role,
-               COALESCE(s.notes,'') AS notes, COALESCE(s.created_by,'') AS created_by
+               COALESCE(s.notes,'') AS notes, COALESCE(s.created_by,'') AS created_by,
+               COALESCE(s.linked_to_job_dates,0) AS linked_to_job_dates,
+               s.job_day_offset, s.last_job_start_date
         FROM staff_schedule s
         JOIN employees e ON e.id=s.employee_id
         JOIN jobs j ON j.id=s.job_id
@@ -519,6 +524,7 @@ def add_assignment(
     site_role: str,
     notes: str,
     created_by: str,
+    linked_to_job_dates: bool = True,
 ) -> tuple[bool, str]:
     if finish_value <= start_value:
         return False, "Finish time must be after start time."
@@ -526,12 +532,23 @@ def add_assignment(
         return False, "Staff member is on approved leave."
     if overlapping_assignment(employee_id, work_date, start_value, finish_value):
         return False, "Staff member already has an overlapping assignment."
+    job_row = query_df("SELECT start_date FROM jobs WHERE id=?", (job_id,))
+    job_start = None
+    day_offset = None
+    if not job_row.empty and str(job_row.iloc[0].get("start_date") or "").strip():
+        try:
+            job_start = to_date(job_row.iloc[0]["start_date"])
+            day_offset = (work_date - job_start).days
+        except Exception:
+            job_start = None
+            day_offset = None
     execute(
         """
         INSERT INTO staff_schedule
         (job_id,employee_id,schedule_date,start_time,finish_time,site_role,notes,created_at,
-         period_type,period_start,period_end,planned_hours,created_by)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+         period_type,period_start,period_end,planned_hours,created_by,
+         linked_to_job_dates,job_day_offset,last_job_start_date)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         (
             job_id,
@@ -547,9 +564,51 @@ def add_assignment(
             work_date.isoformat(),
             float(planned_hours),
             created_by,
+            1 if linked_to_job_dates and job_start is not None else 0,
+            day_offset,
+            job_start.isoformat() if job_start else None,
         ),
     )
     return True, "Assignment added to JobHub."
+
+
+def sync_linked_job_dates() -> int:
+    """Move linked assignments when their master job start date changes."""
+    linked = query_df(
+        """
+        SELECT s.id,s.job_day_offset,s.schedule_date,s.last_job_start_date,
+               j.start_date AS current_job_start
+        FROM staff_schedule s
+        JOIN jobs j ON j.id=s.job_id
+        WHERE COALESCE(s.linked_to_job_dates,0)=1
+          AND s.job_day_offset IS NOT NULL
+          AND COALESCE(j.start_date,'')<>''
+        """
+    )
+    moved = 0
+    for _, row in linked.iterrows():
+        try:
+            current_start = to_date(row["current_job_start"])
+            new_date = current_start + timedelta(days=int(row["job_day_offset"]))
+        except Exception:
+            continue
+        if new_date.isoformat() == str(row["schedule_date"] or "") and str(
+            row["last_job_start_date"] or ""
+        ) == current_start.isoformat():
+            continue
+        execute(
+            """
+            UPDATE staff_schedule
+            SET schedule_date=?,period_start=?,period_end=?,last_job_start_date=?
+            WHERE id=?
+            """,
+            (
+                new_date.isoformat(), new_date.isoformat(), new_date.isoformat(),
+                current_start.isoformat(), int(row["id"]),
+            ),
+        )
+        moved += 1
+    return moved
 
 
 def conflict_report(assignments: pd.DataFrame, leaves: pd.DataFrame) -> list[str]:
@@ -818,6 +877,11 @@ def page_schedule(user: dict) -> None:
             start_time = a3.time_input("Start", value=time(7, 0))
             finish_time = a3.time_input("Finish", value=time(15, 0))
             hours = a3.number_input("Allocated hours", min_value=0.25, max_value=24.0, value=7.6, step=0.25)
+            linked_dates = st.checkbox(
+                "Keep this assignment linked to the job start date",
+                value=True,
+                help="If the job start date changes, this assignment moves by the same number of days.",
+            )
             notes = st.text_area("Notes", placeholder="Access, supervisor, equipment or special instructions")
             save = st.form_submit_button("Add to JobHub schedule", type="primary", use_container_width=True)
         if save:
@@ -834,6 +898,7 @@ def page_schedule(user: dict) -> None:
                 site_role,
                 notes,
                 str(user.get("username", "")),
+                linked_dates,
             )
             (pb_success if ok else pb_error)(message)
             if ok:
@@ -855,6 +920,11 @@ def page_schedule(user: dict) -> None:
             start_time = c3.time_input("Start", value=time(7, 0), key="bulk_start_time")
             finish_time = c3.time_input("Finish", value=time(15, 0), key="bulk_finish_time")
             hours = c3.number_input("Hours per person / day", min_value=0.25, max_value=24.0, value=7.6, step=0.25)
+            linked_dates = st.checkbox(
+                "Keep crew dates linked to the job start date",
+                value=True,
+                key="bulk_linked_dates",
+            )
             notes = st.text_area("Crew notes")
             save_bulk = st.form_submit_button("Allocate crew", type="primary", use_container_width=True)
         if save_bulk:
@@ -884,6 +954,7 @@ def page_schedule(user: dict) -> None:
                             site_role,
                             notes,
                             str(user.get("username", "")),
+                            linked_dates,
                         )
                         if ok:
                             added += 1
@@ -917,6 +988,11 @@ def page_schedule(user: dict) -> None:
                 edit_start = e3.time_input("Start", value=time_value(row["start_time"]))
                 edit_finish = e3.time_input("Finish", value=time_value(row["finish_time"], time(15, 0)))
                 edit_hours = e3.number_input("Hours", min_value=0.25, max_value=24.0, value=float(row["hours"]), step=0.25)
+                edit_linked = st.checkbox(
+                    "Keep linked to job start date",
+                    value=bool(int(row.get("linked_to_job_dates") or 0)),
+                    key=f"edit_linked_{assignment_id}",
+                )
                 edit_notes = st.text_area("Notes", value=str(row["notes"] or ""))
                 update = st.form_submit_button("Save changes", type="primary", use_container_width=True)
             if update:
@@ -934,7 +1010,8 @@ def page_schedule(user: dict) -> None:
                         """
                         UPDATE staff_schedule
                         SET employee_id=?,job_id=?,schedule_date=?,start_time=?,finish_time=?,planned_hours=?,
-                            site_role=?,notes=?,period_start=?,period_end=?
+                            site_role=?,notes=?,period_start=?,period_end=?,linked_to_job_dates=?,
+                            job_day_offset=?,last_job_start_date=?
                         WHERE id=?
                         """,
                         (
@@ -948,6 +1025,20 @@ def page_schedule(user: dict) -> None:
                             edit_notes.strip(),
                             to_date(edit_date).isoformat(),
                             to_date(edit_date).isoformat(),
+                            1 if edit_linked else 0,
+                            (
+                                to_date(edit_date) - to_date(
+                                    jobs.loc[jobs["id"] == job_id, "start_date"].iloc[0]
+                                )
+                            ).days
+                            if edit_linked
+                            and not jobs.loc[jobs["id"] == job_id, "start_date"].empty
+                            and str(jobs.loc[jobs["id"] == job_id, "start_date"].iloc[0] or "").strip()
+                            else None,
+                            str(jobs.loc[jobs["id"] == job_id, "start_date"].iloc[0] or "")
+                            if edit_linked
+                            and not jobs.loc[jobs["id"] == job_id, "start_date"].empty
+                            else None,
                             assignment_id,
                         ),
                     )
@@ -1043,6 +1134,186 @@ def page_leave(user: dict) -> None:
         )
         st.dataframe(records, use_container_width=True, hide_index=True)
 
+
+def page_crew_suggestions(user: dict) -> None:
+    st.title("Crew Suggestions")
+    st.caption(
+        "JobHub compares job dates, estimator labour hours, existing allocations, leave, "
+        "staff roles and current progress. Suggestions never alter the schedule until approved."
+    )
+    start = to_date(st.date_input("Suggestion period starts", value=date.today()))
+    days = st.selectbox("Planning range", [7, 14, 21, 28], index=1, format_func=lambda x: f"{x} days")
+    end = start + timedelta(days=int(days) - 1)
+    staff = active_staff()
+    jobs = schedulable_jobs()
+    assignments = assignment_rows(start, end)
+    leaves = leave_rows(start, end)
+    if staff.empty or jobs.empty:
+        st.info("Active staff and open jobs are required before suggestions can be calculated.")
+        return
+
+    estimate_hours = query_df(
+        """
+        SELECT e.job_id, MAX(COALESCE(e.labour_hours,0)) AS estimated_hours
+        FROM estimate_working_sheets e
+        WHERE COALESCE(e.archived,0)=0
+        GROUP BY e.job_id
+        """
+    )
+    estimated_map = {
+        int(row["job_id"]): float(row["estimated_hours"] or 0)
+        for _, row in estimate_hours.iterrows()
+    } if not estimate_hours.empty else {}
+    allocated_map = (
+        assignments.groupby("job_id")["hours"].sum().to_dict()
+        if not assignments.empty else {}
+    )
+    progress_map = {}
+    if table_exists("job_progress_settings") and table_exists("job_dwelling_progress"):
+        progress = query_df(
+            """
+            SELECT d.job_id,
+                   AVG(
+                       (
+                         CASE d.sealer WHEN 'Complete' THEN 1 WHEN 'In progress' THEN .5 ELSE 0 END * 15 +
+                         CASE d.spray_walls WHEN 'Complete' THEN 1 WHEN 'In progress' THEN .5 ELSE 0 END * 25 +
+                         CASE d.spray_ceilings WHEN 'Complete' THEN 1 WHEN 'In progress' THEN .5 ELSE 0 END * 20 +
+                         CASE d.spray_gloss WHEN 'Complete' THEN 1 WHEN 'In progress' THEN .5 ELSE 0 END * 15 +
+                         CASE d.pc WHEN 'Complete' THEN 1 WHEN 'In progress' THEN .5 ELSE 0 END * 15 +
+                         CASE d.touchups WHEN 'Complete' THEN 1 WHEN 'In progress' THEN .5 ELSE 0 END * 10
+                       )
+                   ) AS progress_percent
+            FROM job_dwelling_progress d
+            GROUP BY d.job_id
+            """
+        )
+        if not progress.empty:
+            progress_map = {
+                int(row["job_id"]): float(row["progress_percent"] or 0)
+                for _, row in progress.iterrows()
+            }
+
+    workdays = max(1, sum(1 for day in daterange(start, end) if day.weekday() < 5))
+    capacity = staff[["id", "name", "position", "target_daily_hours"]].copy()
+    capacity["target_hours"] = capacity["target_daily_hours"].astype(float) * workdays
+    employee_allocated = (
+        assignments.groupby("employee_id")["hours"].sum().to_dict()
+        if not assignments.empty else {}
+    )
+    capacity["allocated_hours"] = capacity["id"].map(employee_allocated).fillna(0.0)
+    capacity["available_hours"] = (
+        capacity["target_hours"] - capacity["allocated_hours"]
+    ).clip(lower=0)
+    approved_leave = leaves[
+        leaves["status"].astype(str).str.lower() == "approved"
+    ] if not leaves.empty else pd.DataFrame()
+    on_leave_ids = set(approved_leave["employee_id"].astype(int).tolist()) if not approved_leave.empty else set()
+    capacity.loc[capacity["id"].isin(on_leave_ids), "available_hours"] *= 0.5
+
+    suggestions = []
+    for _, job in jobs.iterrows():
+        job_id = int(job["id"])
+        estimated = float(estimated_map.get(job_id, 0))
+        allocated = float(allocated_map.get(job_id, 0))
+        progress = float(progress_map.get(job_id, 0))
+        remaining_by_estimate = max(0.0, estimated * (1 - progress / 100) - allocated)
+        try:
+            job_start = to_date(job.get("start_date"), start)
+            job_end = to_date(job.get("end_date"), end)
+        except Exception:
+            job_start, job_end = start, end
+        overlaps = job_start <= end and job_end >= start
+        urgency = "Now" if overlaps else ("Upcoming" if job_start <= end + timedelta(days=14) else "Later")
+        if not overlaps and urgency == "Later" and remaining_by_estimate <= 0:
+            continue
+        required_hours = remaining_by_estimate if estimated > 0 else max(7.6, allocated)
+        candidates = capacity[capacity["available_hours"] > 0.1].copy()
+        if candidates.empty:
+            crew_text = "No capacity"
+        else:
+            candidates["continuity"] = candidates["name"].astype(str).str.lower().eq(
+                str(job.get("leading_hand") or "").lower()
+            ).astype(int)
+            candidates["trade_score"] = candidates["position"].astype(str).str.lower().map(
+                lambda value: 2 if "painter" in value or "trades" in value else
+                (1 if "apprentice" in value or "brush" in value else 0)
+            )
+            candidates = candidates.sort_values(
+                ["continuity", "trade_score", "available_hours"],
+                ascending=[False, False, False],
+            )
+            recommended = candidates.head(3)
+            crew_text = ", ".join(
+                f"{row['name']} ({row['available_hours']:.1f}h available)"
+                for _, row in recommended.iterrows()
+            )
+        suggestions.append(
+            {
+                "job_id": job_id,
+                "Job": f"{job['job_no']} · {job['job_name']}",
+                "Urgency": urgency,
+                "Estimator hours": round(estimated, 1),
+                "Already scheduled": round(allocated, 1),
+                "Progress %": round(progress, 1),
+                "Suggested remaining hours": round(required_hours, 1),
+                "Suggested crew": crew_text,
+                "Reason": (
+                    "Matches job dates; prioritises continuity, painting role, availability "
+                    "and avoids approved leave."
+                ),
+            }
+        )
+    suggestion_df = pd.DataFrame(suggestions)
+    if suggestion_df.empty:
+        pb_success("No additional crew allocation is currently suggested.")
+        return
+    st.dataframe(
+        suggestion_df.drop(columns=["job_id"]),
+        width="stretch",
+        hide_index=True,
+    )
+    st.subheader("Approve a suggestion")
+    job_labels = suggestion_df["Job"].tolist()
+    with st.form("approve_crew_suggestion"):
+        selected_job = st.selectbox("Job", job_labels)
+        selected_row = suggestion_df[suggestion_df["Job"] == selected_job].iloc[0]
+        job_id = int(selected_row["job_id"])
+        recommended_names = [
+            part.split(" (", 1)[0]
+            for part in str(selected_row["Suggested crew"]).split(", ")
+            if part and part != "No capacity"
+        ]
+        crew = st.multiselect(
+            "Crew to schedule",
+            staff["name"].tolist(),
+            default=[name for name in recommended_names if name in staff["name"].tolist()],
+        )
+        c1, c2, c3 = st.columns(3)
+        job_row = jobs[jobs["id"] == job_id].iloc[0]
+        default_start = max(start, to_date(job_row.get("start_date"), start))
+        schedule_start = c1.date_input("Start date", value=default_start)
+        schedule_end = c2.date_input("End date", value=min(end, default_start + timedelta(days=4)))
+        hours = c3.number_input("Hours per person/day", min_value=0.25, value=7.6, step=0.25)
+        approve = st.form_submit_button("Approve and add suggested crew", type="primary")
+    if approve:
+        if not crew:
+            pb_error("Select at least one crew member.")
+            return
+        added = skipped = 0
+        for work_day in daterange(to_date(schedule_start), to_date(schedule_end)):
+            if work_day.weekday() >= 5:
+                continue
+            for name in crew:
+                employee_id = int(staff.loc[staff["name"] == name, "id"].iloc[0])
+                ok, _ = add_assignment(
+                    employee_id, job_id, work_day, time(7, 0), time(15, 0),
+                    float(hours), "Site Work", "JobHub approved crew suggestion",
+                    str(user.get("username", "")), True,
+                )
+                added += int(ok)
+                skipped += int(not ok)
+        pb_success(f"Suggestion approved: {added} schedule entries added; {skipped} conflicts skipped.")
+        pb_rerun()
 
 def page_sync() -> None:
     st.title("Staff & Job Sync")
@@ -1435,10 +1706,18 @@ def render_jobhub_staff_scheduler(user: dict | None = None) -> None:
         st.exception(exc)
         return
 
+    moved_assignments = sync_linked_job_dates()
+    if moved_assignments:
+        pb_success(
+            f"{moved_assignments} linked schedule assignment(s) moved automatically "
+            "to match updated job dates."
+        )
+
     if role in {"admin", "manager"}:
         pages = [
             "Dashboard",
             "Schedule Board",
+            "Crew Suggestions",
             "Jobs → Crew",
             "Staff → Jobs",
             "Leave",
@@ -1456,6 +1735,8 @@ def render_jobhub_staff_scheduler(user: dict | None = None) -> None:
             page_dashboard()
         elif selected_page == "Schedule Board":
             page_schedule(user)
+        elif selected_page == "Crew Suggestions":
+            page_crew_suggestions(user)
         elif selected_page == "Jobs → Crew":
             page_jobs_to_crew()
         elif selected_page == "Staff → Jobs":
