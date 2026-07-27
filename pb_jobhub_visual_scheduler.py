@@ -112,6 +112,16 @@ def execute(sql: str, params: Iterable | None = None) -> int:
         return int(row_id or 0)
 
 
+def execute_many(sql: str, rows: Iterable[Iterable]) -> None:
+    """Execute a batch in one transaction and one pooled connection."""
+    prepared = [tuple(row) for row in rows]
+    if not prepared:
+        return
+    with db_conn() as conn:
+        cur = conn.cursor()
+        cur.executemany(sql_text(sql), prepared)
+
+
 def query_df(sql: str, params: Iterable | None = None) -> pd.DataFrame:
     with db_conn() as conn:
         cur = conn.cursor()
@@ -165,6 +175,7 @@ def validate_jobhub_schema() -> tuple[bool, list[str]]:
     return not missing, missing
 
 
+@st.cache_resource(show_spinner=False)
 def init_linked_schema() -> None:
     if USE_POSTGRES:
         execute(
@@ -285,6 +296,10 @@ def init_linked_schema() -> None:
 
     execute("CREATE INDEX IF NOT EXISTS idx_staff_schedule_date ON staff_schedule(schedule_date)")
     execute("CREATE INDEX IF NOT EXISTS idx_staff_schedule_employee_date ON staff_schedule(employee_id, schedule_date)")
+    execute(
+        "CREATE INDEX IF NOT EXISTS idx_staff_schedule_linked_job "
+        "ON staff_schedule(linked_to_job_dates, job_id)"
+    )
     execute("CREATE INDEX IF NOT EXISTS idx_staff_leave_dates ON staff_leave_requests(start_date, end_date)")
 
 
@@ -585,7 +600,7 @@ def sync_linked_job_dates() -> int:
           AND COALESCE(j.start_date,'')<>''
         """
     )
-    moved = 0
+    updates = []
     for _, row in linked.iterrows():
         try:
             current_start = to_date(row["current_job_start"])
@@ -596,19 +611,21 @@ def sync_linked_job_dates() -> int:
             row["last_job_start_date"] or ""
         ) == current_start.isoformat():
             continue
-        execute(
-            """
-            UPDATE staff_schedule
-            SET schedule_date=?,period_start=?,period_end=?,last_job_start_date=?
-            WHERE id=?
-            """,
+        updates.append(
             (
                 new_date.isoformat(), new_date.isoformat(), new_date.isoformat(),
                 current_start.isoformat(), int(row["id"]),
-            ),
+            )
         )
-        moved += 1
-    return moved
+    execute_many(
+        """
+        UPDATE staff_schedule
+        SET schedule_date=?,period_start=?,period_end=?,last_job_start_date=?
+        WHERE id=?
+        """,
+        updates,
+    )
+    return len(updates)
 
 
 def conflict_report(assignments: pd.DataFrame, leaves: pd.DataFrame) -> list[str]:
