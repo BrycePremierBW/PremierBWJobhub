@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 170534)
-Total output lines: 16281
-
 import sqlite3
 import os
 import tempfile
@@ -5421,7 +5418,6466 @@ def set_timesheet_status(timesheet_id, status):
                 "Approved Timesheet",
             ))
         else:
-            cur.execute("DELETE FROM wage_entries WHERE timesheet_id = ?", (int(timesheet_…70534 tokens truncated…")
+            cur.execute("DELETE FROM wage_entries WHERE timesheet_id = ?", (int(timesheet_id),))
+
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+
+    record_audit_event(
+        f"timesheet_{status.casefold()}",
+        "timesheet",
+        timesheet_id,
+        {"hours": total_hours, "hourly_rate_snapshot": hourly_rate},
+    )
+
+
+def delete_timesheet_entry(timesheet_id):
+    conn = connect()
+    try:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM wage_entries WHERE timesheet_id = ?", (int(timesheet_id),))
+        cur.execute("DELETE FROM timesheet_entries WHERE id = ?", (int(timesheet_id),))
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+    record_audit_event("timesheet_deleted", "timesheet", timesheet_id)
+
+
+
+
+# PB_JOBHUB_BULK_TIMESHEET_STATUS_FILTERS_V1
+TIMESHEET_STATUS_OPTIONS = ["All", "Submitted", "Approved", "Rejected", "Paid"]
+
+
+def normalise_timesheet_statuses(timesheet_df):
+    """Return a copy with blank/null timesheet statuses treated as Submitted."""
+    work = timesheet_df.copy()
+    if "Status" in work.columns:
+        work["Status"] = (
+            work["Status"]
+            .fillna("Submitted")
+            .astype(str)
+            .str.strip()
+            .replace("", "Submitted")
+            .str.title()
+        )
+    return work
+
+
+def filter_timesheets_by_status(timesheet_df, selected_status):
+    work = normalise_timesheet_statuses(timesheet_df)
+    if selected_status != "All" and "Status" in work.columns:
+        work = work[work["Status"].astype(str) == selected_status]
+    return work.reset_index(drop=True)
+
+
+def timesheet_status_filter(label, key, default="All"):
+    default_index = (
+        TIMESHEET_STATUS_OPTIONS.index(default)
+        if default in TIMESHEET_STATUS_OPTIONS
+        else 0
+    )
+    return st.selectbox(
+        label,
+        TIMESHEET_STATUS_OPTIONS,
+        index=default_index,
+        key=key,
+    )
+
+
+def render_timesheet_bulk_actions(timesheet_df, key_prefix, empty_message="No timesheets match this selection."):
+    """Render a checkbox column and safe bulk status/delete actions."""
+    if timesheet_df.empty:
+        st.info(empty_message)
+        return []
+
+    work = normalise_timesheet_statuses(timesheet_df)
+    if "id" not in work.columns:
+        pb_error("Timesheet IDs are unavailable, so bulk actions cannot be performed.")
+        return []
+
+    table_fingerprint = hashlib.sha256(
+        json.dumps(
+            work[["id", "Status"]].to_dict(orient="records"),
+            default=str,
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()[:12]
+
+    selector_df = work.copy()
+    selector_df.insert(0, "Select", False)
+    ordered_columns = ["Select"] + [column for column in selector_df.columns if column != "Select"]
+
+    edited_df = st.data_editor(
+        selector_df[ordered_columns],
+        width="stretch",
+        hide_index=True,
+        disabled=[column for column in ordered_columns if column != "Select"],
+        column_config={
+            "Select": st.column_config.CheckboxColumn(
+                "Select",
+                help="Tick each timesheet to include in the bulk action.",
+                default=False,
+            ),
+            "id": None,
+        },
+        key=f"{key_prefix}_checkbox_table_{table_fingerprint}",
+    )
+
+    selected_ids = (
+        edited_df.loc[edited_df["Select"].fillna(False), "id"]
+        .astype(int)
+        .tolist()
+    )
+
+    if not selected_ids:
+        st.info("Tick one or more timesheets in the Select column.")
+        return []
+
+    selected_review = work[work["id"].astype(int).isin(selected_ids)].copy()
+    visible_review = selected_review.drop(columns=["id"], errors="ignore")
+    selected_hours = float(visible_review["Hours"].fillna(0).sum()) if "Hours" in visible_review.columns else 0.0
+
+    st.markdown("### Selected Timesheets Review")
+    st.dataframe(visible_review, width="stretch", hide_index=True)
+    st.caption(
+        f"{len(selected_ids)} timesheet(s) selected, "
+        f"{selected_hours:.2f} total calculated hours."
+    )
+
+    accepted_action = review_acceptance_checkbox(
+        f"{key_prefix}_bulk_action",
+        selected_review.to_dict(orient="records"),
+        (
+            "I have reviewed every selected timesheet and accept that the chosen "
+            "bulk action will update statuses and labour-cost postings."
+        ),
+    )
+
+    selected_fingerprint = hashlib.sha256(
+        json.dumps(sorted(selected_ids)).encode("utf-8")
+    ).hexdigest()
+    delete_fingerprint_key = f"{key_prefix}_delete_selection_fingerprint"
+    delete_confirm_key = f"{key_prefix}_delete_confirmed"
+    if st.session_state.get(delete_fingerprint_key) != selected_fingerprint:
+        st.session_state[delete_fingerprint_key] = selected_fingerprint
+        st.session_state[delete_confirm_key] = False
+
+    delete_confirmed = st.checkbox(
+        "I understand deleting selected timesheets also removes their linked wage postings.",
+        key=delete_confirm_key,
+    )
+
+    approve_col, paid_col, reject_col, delete_col = st.columns(4)
+
+    if approve_col.button(
+        "Approve Selected",
+        key=f"{key_prefix}_approve",
+        type="primary",
+        disabled=not accepted_action,
+    ):
+        for timesheet_id in selected_ids:
+            set_timesheet_status(timesheet_id, "Approved")
+        pb_success(f"Approved {len(selected_ids)} selected timesheet(s).")
+        refresh()
+
+    if paid_col.button(
+        "Mark Selected Paid",
+        key=f"{key_prefix}_paid",
+        disabled=not accepted_action,
+    ):
+        for timesheet_id in selected_ids:
+            set_timesheet_status(timesheet_id, "Paid")
+        pb_success(f"Marked {len(selected_ids)} selected timesheet(s) as paid.")
+        refresh()
+
+    if reject_col.button(
+        "Reject Selected",
+        key=f"{key_prefix}_reject",
+        disabled=not accepted_action,
+    ):
+        for timesheet_id in selected_ids:
+            set_timesheet_status(timesheet_id, "Rejected")
+        st.warning(f"Rejected {len(selected_ids)} selected timesheet(s).")
+        refresh()
+
+    if delete_col.button(
+        "Delete Selected",
+        key=f"{key_prefix}_delete",
+        disabled=not accepted_action or not delete_confirmed,
+    ):
+        for timesheet_id in selected_ids:
+            delete_timesheet_entry(timesheet_id)
+        pb_success(f"Deleted {len(selected_ids)} selected timesheet(s).")
+        refresh()
+
+    return selected_ids
+
+def timesheet_entry_form(employee_id=None, employee_restricted=False, key_prefix="timesheet"):
+    job_options = (
+        get_employee_job_options(employee_id)
+        if employee_restricted and employee_id is not None
+        else get_job_options()
+    )
+    if not job_options:
+        st.info(
+            "No assigned jobs are available for timesheet submission."
+            if employee_restricted
+            else "Create a job first, then timesheets can be submitted."
+        )
+        return
+
+    if employee_id is None:
+        employee_options = get_employee_options(active_only=True)
+        if not employee_options:
+            st.info("Create employees first.")
+            return
+    else:
+        employee_options = None
+
+    selected_job = st.selectbox(
+        "Job",
+        list(job_options.keys()),
+        key=f"{key_prefix}_job",
+    )
+
+    if employee_restricted and employee_id is not None:
+        employee_df = df_query("SELECT name FROM employees WHERE id = ?", (employee_id,))
+        employee_name = (
+            str(employee_df.iloc[0]["name"])
+            if not employee_df.empty
+            else "Current Employee"
+        )
+        st.text_input(
+            "Employee",
+            value=employee_name,
+            disabled=True,
+            key=f"{key_prefix}_employee_name",
+        )
+        selected_employee_ids = [int(employee_id)]
+        selected_employee_labels = [employee_name]
+    else:
+        selected_employee_labels = st.multiselect(
+            "Employees",
+            list(employee_options.keys()),
+            key=f"{key_prefix}_employee",
+            help="Select one employee or a whole crew. The same job, date and hours will be applied to each person.",
+        )
+        selected_employee_ids = [
+            int(employee_options[label])
+            for label in selected_employee_labels
+        ]
+
+    col1, col2, col3, col4 = st.columns(4)
+    work_date_value = col1.date_input(
+        "Date",
+        value=date.today(),
+        key=f"{key_prefix}_date",
+    )
+    start_time_value = col2.time_input(
+        "Start Time",
+        value=time(7, 0),
+        step=timedelta(minutes=15),
+        key=f"{key_prefix}_start",
+    )
+    finish_time_value = col3.time_input(
+        "Finish Time",
+        value=time(15, 0),
+        step=timedelta(minutes=15),
+        key=f"{key_prefix}_finish",
+    )
+    break_minutes = int(col4.number_input(
+        "Break Minutes",
+        min_value=0,
+        max_value=300,
+        step=15,
+        value=0,
+        key=f"{key_prefix}_break",
+    ))
+
+    start_text = start_time_value.strftime("%H:%M")
+    finish_text = finish_time_value.strftime("%H:%M")
+    calculation_error = ""
+    try:
+        total_hours = calculate_shift_hours(
+            start_time_value,
+            finish_time_value,
+            break_minutes,
+        )
+    except ValueError as exc:
+        total_hours = 0.0
+        calculation_error = str(exc)
+
+    overnight = finish_time_value < start_time_value
+    metric_col1, metric_col2 = st.columns(2)
+    metric_col1.metric("Calculated Total Hours", f"{total_hours:.2f}")
+    metric_col2.metric("Shift Type", "Overnight" if overnight else "Same day")
+    st.caption(
+        f"Automatic calculation: {start_text} to {finish_text}, less "
+        f"{break_minutes} break minutes. Total hours cannot be manually overwritten."
+    )
+    if calculation_error:
+        pb_error(calculation_error)
+
+    work_type = st.selectbox(
+        "Work Type",
+        ["Painting", "Prep", "Spraying", "Touch-ups", "Travel", "Site Setup", "Other"],
+        key=f"{key_prefix}_work_type",
+    )
+    notes = st.text_area("Notes", key=f"{key_prefix}_notes")
+
+    review_payload = {
+        "job_id": job_options[selected_job],
+        "job": selected_job,
+        "employee_ids": selected_employee_ids,
+        "employees": selected_employee_labels,
+        "date": work_date_value.isoformat(),
+        "start": start_text,
+        "finish": finish_text,
+        "break_minutes": break_minutes,
+        "calculated_hours": total_hours,
+        "work_type": work_type,
+        "notes": notes,
+    }
+
+    st.markdown("### Review Timesheet")
+    with st.container(border=True):
+        review_rows = [
+            {
+                "Job": selected_job,
+                "Employee": employee_label,
+                "Date": work_date_value.isoformat(),
+                "Start": start_text,
+                "Finish": finish_text,
+                "Break": f"{break_minutes} min",
+                "Calculated Hours": f"{total_hours:.2f}",
+                "Work Type": work_type,
+                "Notes": notes,
+            }
+            for employee_label in selected_employee_labels
+        ]
+        st.dataframe(
+            pd.DataFrame(review_rows),
+            width="stretch",
+            hide_index=True,
+        )
+        accepted = review_acceptance_checkbox(
+            key_prefix,
+            review_payload,
+            "I have reviewed these selections and accept that they are correct.",
+        )
+
+    submitted = st.button(
+        "Submit Timesheet" if len(selected_employee_ids) == 1 else f"Submit {len(selected_employee_ids)} Timesheets",
+        key=f"{key_prefix}_submit",
+        type="primary",
+        disabled=(
+            not selected_employee_ids
+            or not accepted
+            or total_hours <= 0
+            or bool(calculation_error)
+        ),
+    )
+    if submitted:
+        created_ids = []
+        skipped = []
+        for employee_label, selected_employee_id in zip(
+            selected_employee_labels,
+            selected_employee_ids,
+        ):
+            duplicate = df_query("""
+                SELECT id
+                FROM timesheet_entries
+                WHERE job_id = ?
+                  AND employee_id = ?
+                  AND work_date = ?
+                  AND start_time = ?
+                  AND finish_time = ?
+                  AND COALESCE(status, 'Submitted') <> 'Rejected'
+                LIMIT 1
+            """, (
+                job_options[selected_job],
+                selected_employee_id,
+                work_date_value.isoformat(),
+                start_text,
+                finish_text,
+            ))
+            if not duplicate.empty:
+                skipped.append(f"{employee_label}: matching timesheet already exists")
+                continue
+            try:
+                created_ids.append(save_timesheet_entry(
+                    job_options[selected_job],
+                    selected_employee_id,
+                    work_date_value.isoformat(),
+                    start_text,
+                    finish_text,
+                    break_minutes,
+                    total_hours,
+                    work_type,
+                    notes,
+                ))
+            except Exception as exc:
+                skipped.append(f"{employee_label}: {exc}")
+        st.session_state[f"{key_prefix}_review_fingerprint"] = ""
+        if created_ids:
+            pb_success(
+                f"Created {len(created_ids)} timesheet{'s' if len(created_ids) != 1 else ''} "
+                f"and linked {'them' if len(created_ids) != 1 else 'it'} to {selected_job}."
+            )
+        if skipped:
+            st.warning("Skipped:\n\n" + "\n\n".join(f"• {item}" for item in skipped))
+        if created_ids:
+            refresh()
+
+
+
+def timesheets_page(employee_restricted=False):
+    st.header("Timesheets")
+    st.caption("Employee hours linked directly to specific jobs.")
+    user = get_current_user() or {}
+    current_employee_id = user.get("employee_id")
+
+    if employee_restricted:
+        if not current_employee_id:
+            st.warning("Your login is not linked to an employee record. Ask admin to link your user to your employee profile.")
+            return
+        tab_submit, tab_my = st.tabs(["Submit Timesheet", "My Timesheets"])
+        with tab_submit:
+            timesheet_entry_form(employee_id=current_employee_id, employee_restricted=True, key_prefix="employee_timesheet")
+        with tab_my:
+            my_df = df_query("""
+                SELECT t.id, t.work_date AS 'Date', j.job_no AS 'Job No', j.job_name AS 'Job Name',
+                       t.start_time AS 'Start', t.finish_time AS 'Finish', t.break_minutes AS 'Break Minutes',
+                       t.total_hours AS 'Hours', t.work_type AS 'Work Type',
+                       COALESCE(t.status, 'Submitted') AS 'Status', t.notes AS 'Notes'
+                FROM timesheet_entries t
+                JOIN jobs j ON j.id = t.job_id
+                WHERE t.employee_id = ?
+                ORDER BY t.work_date DESC, t.id DESC
+                LIMIT 100
+            """, (current_employee_id,))
+            selected_status = timesheet_status_filter(
+                "Show My Timesheets",
+                "employee_timesheet_status_filter",
+                default="All",
+            )
+            my_filtered = filter_timesheets_by_status(my_df, selected_status)
+            st.caption(f"{len(my_filtered)} timesheet(s) shown.")
+            st.dataframe(
+                my_filtered.drop(columns=["id"], errors="ignore"),
+                width="stretch",
+                hide_index=True,
+            )
+        return
+
+    tab_submit, tab_review, tab_by_job = st.tabs(["Add Timesheet", "Review Timesheets", "Timesheets by Job"])
+
+    with tab_submit:
+        timesheet_entry_form(key_prefix="admin_timesheet")
+
+    with tab_review:
+        df = df_query("""
+            SELECT t.id, t.work_date AS 'Date', j.job_no AS 'Job No', j.job_name AS 'Job Name', e.name AS 'Employee',
+                   t.start_time AS 'Start', t.finish_time AS 'Finish', t.break_minutes AS 'Break Minutes',
+                   t.total_hours AS 'Hours', t.work_type AS 'Work Type',
+                   COALESCE(t.status, 'Submitted') AS 'Status',
+                   t.submitted_by AS 'Submitted By', t.submitted_at AS 'Submitted At', t.notes AS 'Notes'
+            FROM timesheet_entries t
+            JOIN jobs j ON j.id = t.job_id
+            JOIN employees e ON e.id = t.employee_id
+            ORDER BY t.work_date DESC, t.id DESC
+            LIMIT 500
+        """)
+
+        if df.empty:
+            st.info("No timesheets submitted yet.")
+        else:
+            selected_status = timesheet_status_filter(
+                "Show Timesheets With Status",
+                "admin_timesheet_status_filter",
+                default="Submitted",
+            )
+            filtered_df = filter_timesheets_by_status(df, selected_status)
+            st.caption(
+                f"Showing {len(filtered_df)} of {len(df)} timesheet(s): {selected_status}."
+            )
+            render_timesheet_bulk_actions(
+                filtered_df,
+                key_prefix=f"admin_timesheet_review_{selected_status.lower().replace(' ', '_')}",
+                empty_message=f"No {selected_status.lower()} timesheets found.",
+            )
+
+    with tab_by_job:
+        job_options = get_job_options()
+        if not job_options:
+            st.info("No jobs found.")
+        else:
+            selected_job = st.selectbox(
+                "Select Job",
+                list(job_options.keys()),
+                key="timesheet_by_job_select",
+            )
+            selected_job_id = job_options[selected_job]
+            selected_status = timesheet_status_filter(
+                "Show Timesheets With Status",
+                "timesheet_by_job_status_filter",
+                default="All",
+            )
+            by_job = df_query("""
+                SELECT t.id, t.work_date AS 'Date', e.name AS 'Employee',
+                       t.start_time AS 'Start', t.finish_time AS 'Finish',
+                       t.break_minutes AS 'Break Minutes', t.total_hours AS 'Hours',
+                       t.work_type AS 'Work Type',
+                       COALESCE(t.status, 'Submitted') AS 'Status',
+                       t.notes AS 'Notes'
+                FROM timesheet_entries t
+                JOIN employees e ON e.id = t.employee_id
+                WHERE t.job_id = ?
+                ORDER BY t.work_date DESC, t.id DESC
+            """, (selected_job_id,))
+            filtered_by_job = filter_timesheets_by_status(by_job, selected_status)
+
+            if filtered_by_job.empty:
+                st.info(
+                    f"No {selected_status.lower()} timesheets are saved for this job."
+                    if selected_status != "All"
+                    else "No timesheets are saved for this job."
+                )
+            else:
+                total_job_hours = float(filtered_by_job["Hours"].fillna(0).sum())
+                st.markdown("### Selection Review")
+                st.dataframe(
+                    pd.DataFrame([{
+                        "Selected Job": selected_job,
+                        "Status Filter": selected_status,
+                        "Timesheet Count": len(filtered_by_job),
+                        "Total Hours": f"{total_job_hours:.2f}",
+                    }]),
+                    width="stretch",
+                    hide_index=True,
+                )
+                accepted_job_review = review_acceptance_checkbox(
+                    "timesheet_by_job_review",
+                    {
+                        "job_id": selected_job_id,
+                        "status_filter": selected_status,
+                        "timesheet_ids": filtered_by_job["id"].astype(int).tolist(),
+                        "timesheet_count": len(filtered_by_job),
+                        "total_hours": total_job_hours,
+                    },
+                    "I have reviewed and accept this job and status selection.",
+                )
+
+                if accepted_job_review:
+                    st.metric("Total Hours for Job", f"{total_job_hours:.2f}")
+                    render_timesheet_bulk_actions(
+                        filtered_by_job,
+                        key_prefix=(
+                            f"timesheet_by_job_{selected_job_id}_"
+                            f"{selected_status.lower().replace(' ', '_')}"
+                        ),
+                    )
+                else:
+                    st.info("Accept the selected job review to display and select its timesheets.")
+
+# =============================
+# ESTIMATE WORKING SHEET
+# =============================
+
+
+# =============================
+# ESTIMATING RATE LIBRARY
+# PB_JOBHUB_ESTIMATING_RATE_LIBRARY_V1
+# =============================
+ESTIMATING_RATE_LIBRARY_FILENAME = "PB_JobHub_Estimating_Rate_Library_Import.csv"
+ESTIMATING_RATE_LIBRARY_PATH = os.path.join(os.path.dirname(__file__), ESTIMATING_RATE_LIBRARY_FILENAME)
+
+ESTIMATING_RATE_COLUMNS = {
+    "Rate Code": "rate_code",
+    "Category": "category",
+    "Item Description": "item_description",
+    "Project Type": "project_type",
+    "Work Type": "work_type",
+    "Unit": "unit",
+    "Rate Min Ex GST": "rate_min_ex_gst",
+    "Recommended Rate Ex GST": "recommended_rate_ex_gst",
+    "Rate Max Ex GST": "rate_max_ex_gst",
+    "Adjustment Type": "adjustment_type",
+    "Rate Basis": "rate_basis",
+    "Included Scope / Notes": "notes",
+    "Effective Date": "effective_date",
+    "Active": "active",
+}
+
+
+def _rate_library_clean_text(value):
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    return str(value).strip()
+
+
+def _rate_library_float(value):
+    text = _rate_library_clean_text(value).replace("$", "").replace(",", "")
+    if not text:
+        return 0.0
+    try:
+        return float(text)
+    except Exception:
+        return 0.0
+
+
+def _rate_library_active(value):
+    text = _rate_library_clean_text(value).lower()
+    return 0 if text in {"0", "no", "n", "false", "inactive", "disabled"} else 1
+
+
+def normalise_estimating_rate_dataframe(source_df):
+    if source_df is None or source_df.empty:
+        raise ValueError("The rate library file is empty.")
+
+    work = source_df.copy()
+    work.columns = [str(c).strip() for c in work.columns]
+    missing = [name for name in ESTIMATING_RATE_COLUMNS if name not in work.columns]
+    if missing:
+        raise ValueError("Missing required column(s): " + ", ".join(missing))
+
+    work = work[list(ESTIMATING_RATE_COLUMNS.keys())].rename(columns=ESTIMATING_RATE_COLUMNS)
+    output_rows = []
+    seen_codes = set()
+
+    for _, row in work.iterrows():
+        rate_code = _rate_library_clean_text(row.get("rate_code"))
+        item_description = _rate_library_clean_text(row.get("item_description"))
+        if not rate_code or not item_description:
+            continue
+        if rate_code in seen_codes:
+            # The last row for a duplicate code wins, matching a normal update import.
+            output_rows = [r for r in output_rows if r[0] != rate_code]
+        seen_codes.add(rate_code)
+        output_rows.append((
+            rate_code,
+            _rate_library_clean_text(row.get("category")),
+            item_description,
+            _rate_library_clean_text(row.get("project_type")),
+            _rate_library_clean_text(row.get("work_type")),
+            _rate_library_clean_text(row.get("unit")) or "item",
+            _rate_library_float(row.get("rate_min_ex_gst")),
+            _rate_library_float(row.get("recommended_rate_ex_gst")),
+            _rate_library_float(row.get("rate_max_ex_gst")),
+            _rate_library_clean_text(row.get("adjustment_type")) or "Fixed",
+            _rate_library_clean_text(row.get("rate_basis")),
+            _rate_library_clean_text(row.get("notes")),
+            _rate_library_clean_text(row.get("effective_date")),
+            _rate_library_active(row.get("active")),
+        ))
+
+    if not output_rows:
+        raise ValueError("No valid rate records were found. Rate Code and Item Description are required.")
+    return output_rows
+
+
+def import_estimating_rate_dataframe(source_df, replace_all=False):
+    rows = normalise_estimating_rate_dataframe(source_df)
+    conn = connect()
+    inserted = 0
+    updated = 0
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        cur = conn.cursor()
+        if replace_all:
+            cur.execute("DELETE FROM estimating_rates")
+
+        for row in rows:
+            rate_code = row[0]
+            cur.execute("SELECT id FROM estimating_rates WHERE rate_code = ?", (rate_code,))
+            existing = cur.fetchone()
+            if existing:
+                cur.execute("""
+                    UPDATE estimating_rates
+                    SET category = ?, item_description = ?, project_type = ?, work_type = ?, unit = ?,
+                        rate_min_ex_gst = ?, recommended_rate_ex_gst = ?, rate_max_ex_gst = ?,
+                        adjustment_type = ?, rate_basis = ?, notes = ?, effective_date = ?, active = ?, updated_at = ?
+                    WHERE rate_code = ?
+                """, (
+                    row[1], row[2], row[3], row[4], row[5], row[6], row[7], row[8],
+                    row[9], row[10], row[11], row[12], row[13], now, rate_code,
+                ))
+                updated += 1
+            else:
+                cur.execute("""
+                    INSERT INTO estimating_rates
+                    (rate_code, category, item_description, project_type, work_type, unit,
+                     rate_min_ex_gst, recommended_rate_ex_gst, rate_max_ex_gst,
+                     adjustment_type, rate_basis, notes, effective_date, active, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (*row, now, now))
+                inserted += 1
+        conn.commit()
+        return {"inserted": inserted, "updated": updated, "total": len(rows)}
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+
+
+def seed_packaged_estimating_rates_if_empty():
+    try:
+        count_df = df_query("SELECT COUNT(*) AS c FROM estimating_rates")
+        existing_count = int(count_df.iloc[0]["c"] or 0) if not count_df.empty else 0
+        if existing_count > 0 or not os.path.exists(ESTIMATING_RATE_LIBRARY_PATH):
+            return None
+        packaged_df = pd.read_csv(ESTIMATING_RATE_LIBRARY_PATH)
+        return import_estimating_rate_dataframe(packaged_df, replace_all=False)
+    except Exception:
+        # Do not prevent JobHub loading if a packaged CSV was removed or malformed.
+        return None
+
+
+def estimating_rates_dataframe(active_only=False):
+    where_clause = "WHERE active = 1" if active_only else ""
+    return df_query(f"""
+        SELECT id,
+               rate_code AS 'Rate Code',
+               category AS 'Category',
+               item_description AS 'Item Description',
+               project_type AS 'Project Type',
+               work_type AS 'Work Type',
+               unit AS 'Unit',
+               rate_min_ex_gst AS 'Rate Min Ex GST',
+               recommended_rate_ex_gst AS 'Recommended Rate Ex GST',
+               rate_max_ex_gst AS 'Rate Max Ex GST',
+               adjustment_type AS 'Adjustment Type',
+               rate_basis AS 'Rate Basis',
+               notes AS 'Included Scope / Notes',
+               effective_date AS 'Effective Date',
+               active AS 'Active'
+        FROM estimating_rates
+        {where_clause}
+        ORDER BY project_type, work_type, category, item_description, rate_code
+    """)
+
+
+def _filter_estimating_rates(rate_df, key_prefix):
+    if rate_df.empty:
+        return rate_df
+
+    c1, c2, c3 = st.columns(3)
+    project_values = ["All"] + sorted([v for v in rate_df["Project Type"].dropna().astype(str).unique() if v])
+    selected_project = c1.selectbox("Project Type", project_values, key=f"{key_prefix}_project")
+
+    project_df = rate_df if selected_project == "All" else rate_df[rate_df["Project Type"].astype(str) == selected_project]
+    work_values = ["All"] + sorted([v for v in project_df["Work Type"].dropna().astype(str).unique() if v])
+    selected_work = c2.selectbox("Work Type", work_values, key=f"{key_prefix}_work")
+
+    work_df = project_df if selected_work == "All" else project_df[project_df["Work Type"].astype(str) == selected_work]
+    category_values = ["All"] + sorted([v for v in work_df["Category"].dropna().astype(str).unique() if v])
+    selected_category = c3.selectbox("Category", category_values, key=f"{key_prefix}_category")
+
+    filtered = work_df if selected_category == "All" else work_df[work_df["Category"].astype(str) == selected_category]
+    search_text = st.text_input(
+        "Search rate code, substrate or description",
+        key=f"{key_prefix}_search",
+        placeholder="e.g. blockwork, epoxy, plasterboard, downpipe",
+    ).strip().lower()
+    if search_text:
+        haystack = (
+            filtered["Rate Code"].fillna("").astype(str) + " " +
+            filtered["Category"].fillna("").astype(str) + " " +
+            filtered["Item Description"].fillna("").astype(str) + " " +
+            filtered["Project Type"].fillna("").astype(str) + " " +
+            filtered["Work Type"].fillna("").astype(str) + " " +
+            filtered["Included Scope / Notes"].fillna("").astype(str)
+        ).str.lower()
+        filtered = filtered[haystack.str.contains(search_text, na=False, regex=False)]
+    return filtered
+
+
+def estimating_rate_library_page():
+    st.header("Estimating Rate Library")
+    st.caption("Import, search and maintain the reusable Premier Brushworks estimating rates used by Estimate Working Sheets.")
+
+    seeded = seed_packaged_estimating_rates_if_empty()
+    if seeded:
+        pb_success(f"Loaded {seeded['total']} packaged Premier Brushworks estimating rates.")
+
+    full_df = estimating_rates_dataframe(active_only=False)
+    active_count = int((full_df["Active"].fillna(0).astype(float) == 1).sum()) if not full_df.empty else 0
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Total rates", len(full_df))
+    c2.metric("Active rates", active_count)
+    c3.metric("Inactive rates", max(len(full_df) - active_count, 0))
+
+    tab_import, tab_browse, tab_manage = st.tabs(["Import / Export", "Browse Rates", "Manage Rates"])
+
+    with tab_import:
+        st.subheader("Import Rate Library CSV")
+        st.caption(f"Expected file: {ESTIMATING_RATE_LIBRARY_FILENAME}. Merge/update matches records by Rate Code.")
+        uploaded = st.file_uploader("Choose rate-library CSV", type=["csv"], key="estimating_rate_library_upload")
+        import_mode = st.radio(
+            "Import mode",
+            ["Merge / update existing rates", "Replace the complete rate library"],
+            horizontal=True,
+            key="estimating_rate_library_mode",
+        )
+        if uploaded is not None:
+            try:
+                if uploaded_file_size(uploaded) > MAX_CSV_UPLOAD_BYTES:
+                    raise ValueError("CSV is larger than the 5 MB upload limit.")
+                uploaded.seek(0)
+                preview_df = pd.read_csv(uploaded)
+                if len(preview_df) > MAX_CSV_IMPORT_ROWS:
+                    raise ValueError("CSV contains more than 10,000 rows.")
+                st.dataframe(preview_df.head(25), width="stretch", hide_index=True)
+                st.caption(f"{len(preview_df):,} row(s) detected.")
+                if st.button("Import Rate Library", type="primary", key="estimating_rate_library_import_button"):
+                    result = import_estimating_rate_dataframe(
+                        preview_df,
+                        replace_all=import_mode.startswith("Replace"),
+                    )
+                    pb_success(
+                        f"Rate library imported: {result['inserted']} inserted, "
+                        f"{result['updated']} updated, {result['total']} processed."
+                    )
+                    pb_rerun()
+            except Exception as exc:
+                pb_error(f"Could not read or import this CSV: {exc}")
+
+        if os.path.exists(ESTIMATING_RATE_LIBRARY_PATH):
+            with open(ESTIMATING_RATE_LIBRARY_PATH, "rb") as rate_file:
+                st.download_button(
+                    "Download Packaged Premier Brushworks Rate CSV",
+                    data=rate_file.read(),
+                    file_name=ESTIMATING_RATE_LIBRARY_FILENAME,
+                    mime="text/csv",
+                    key="download_packaged_rate_library",
+                )
+
+        export_df = estimating_rates_dataframe(active_only=False)
+        if not export_df.empty:
+            export_columns = [c for c in export_df.columns if c != "id"]
+            st.download_button(
+                "Export Current JobHub Rate Library",
+                data=export_df[export_columns].to_csv(index=False).encode("utf-8-sig"),
+                file_name=f"PB_JobHub_Rate_Library_Export_{date.today().isoformat()}.csv",
+                mime="text/csv",
+                key="export_current_rate_library",
+            )
+
+    with tab_browse:
+        browse_df = estimating_rates_dataframe(active_only=False)
+        show_inactive = st.checkbox("Include inactive rates", value=False, key="rate_library_show_inactive")
+        if not show_inactive and not browse_df.empty:
+            browse_df = browse_df[browse_df["Active"].fillna(0).astype(float) == 1]
+        filtered_df = _filter_estimating_rates(browse_df, "rate_library_browse")
+        st.caption(f"Showing {len(filtered_df):,} rate(s). All rates exclude GST.")
+        if filtered_df.empty:
+            st.info("No rates match the selected filters.")
+        else:
+            display_columns = [
+                "Rate Code", "Category", "Item Description", "Project Type", "Work Type", "Unit",
+                "Recommended Rate Ex GST", "Rate Min Ex GST", "Rate Max Ex GST", "Adjustment Type",
+                "Included Scope / Notes", "Effective Date", "Active",
+            ]
+            st.dataframe(filtered_df[display_columns], width="stretch", hide_index=True)
+
+    with tab_manage:
+        st.subheader("Add or update one rate")
+        existing = estimating_rates_dataframe(active_only=False)
+        with st.form("manual_estimating_rate_form"):
+            c1, c2 = st.columns(2)
+            rate_code = c1.text_input("Rate Code")
+            item_description = c2.text_input("Item Description")
+            c3, c4, c5 = st.columns(3)
+            category = c3.text_input("Category")
+            project_type = c4.text_input("Project Type", value="Commercial")
+            work_type = c5.text_input("Work Type", value="New")
+            c6, c7, c8, c9 = st.columns(4)
+            unit = c6.text_input("Unit", value="m²")
+            rate_min = c7.number_input("Minimum", min_value=0.0, step=1.0)
+            rate_rec = c8.number_input("Recommended", min_value=0.0, step=1.0)
+            rate_max = c9.number_input("Maximum", min_value=0.0, step=1.0)
+            adjustment_type = st.selectbox(
+                "Adjustment Type",
+                ["Fixed", "Fixed Range", "Percentage Add", "Cost Plus Percentage"],
+            )
+            rate_basis = st.text_input("Rate Basis", value="Base substrate/item rate")
+            notes = st.text_area("Included Scope / Notes")
+            effective_date = st.text_input("Effective Date", value=str(date.today()))
+            active = st.checkbox("Active", value=True)
+            save_rate = st.form_submit_button("Save / Update Rate")
+            if save_rate:
+                if not rate_code.strip() or not item_description.strip():
+                    pb_error("Rate Code and Item Description are required.")
+                else:
+                    manual_df = pd.DataFrame([{
+                        "Rate Code": rate_code,
+                        "Category": category,
+                        "Item Description": item_description,
+                        "Project Type": project_type,
+                        "Work Type": work_type,
+                        "Unit": unit,
+                        "Rate Min Ex GST": rate_min,
+                        "Recommended Rate Ex GST": rate_rec,
+                        "Rate Max Ex GST": rate_max,
+                        "Adjustment Type": adjustment_type,
+                        "Rate Basis": rate_basis,
+                        "Included Scope / Notes": notes,
+                        "Effective Date": effective_date,
+                        "Active": "Yes" if active else "No",
+                    }])
+                    result = import_estimating_rate_dataframe(manual_df, replace_all=False)
+                    pb_success(f"Rate saved: {result['inserted']} inserted, {result['updated']} updated.")
+                    pb_rerun()
+
+        if not existing.empty:
+            st.divider()
+            st.subheader("Activate, deactivate or delete")
+            rate_options = {
+                f"{row['Rate Code']} | {row['Item Description']} | {row['Project Type']} / {row['Work Type']}": int(row["id"])
+                for _, row in existing.iterrows()
+            }
+            selected_label = st.selectbox("Select rate", list(rate_options.keys()), key="manage_rate_selection")
+            selected_id = rate_options[selected_label]
+            b1, b2, b3 = st.columns(3)
+            if b1.button("Set Active", key="set_rate_active"):
+                execute("UPDATE estimating_rates SET active = 1, updated_at = ? WHERE id = ?", (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), selected_id))
+                pb_rerun()
+            if b2.button("Set Inactive", key="set_rate_inactive"):
+                execute("UPDATE estimating_rates SET active = 0, updated_at = ? WHERE id = ?", (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), selected_id))
+                pb_rerun()
+            confirm_delete = st.checkbox("Confirm permanent deletion", key="confirm_rate_delete")
+            if b3.button("Delete Rate", key="delete_rate_button"):
+                if not confirm_delete:
+                    pb_error("Tick confirm permanent deletion first.")
+                else:
+                    execute("DELETE FROM estimating_rates WHERE id = ?", (selected_id,))
+                    pb_rerun()
+
+
+def render_rate_library_estimate_adder(selected_estimate_id):
+    seed_packaged_estimating_rates_if_empty()
+    rate_df = estimating_rates_dataframe(active_only=True)
+
+    st.markdown("#### Add from Estimating Rate Library")
+    if rate_df.empty:
+        st.info("The estimating rate library is empty. Open Estimating → Rate Library and import the Premier Brushworks CSV.")
+        return
+
+    with st.expander("Search and add a saved rate", expanded=True):
+        filtered_df = _filter_estimating_rates(rate_df, f"estimate_rate_{selected_estimate_id}")
+        if filtered_df.empty:
+            st.info("No rates match the selected filters.")
+            return
+
+        option_map = {
+            (
+                f"{row['Item Description']} | {row['Project Type']} / {row['Work Type']} | "
+                f"{row['Unit']} @ ${float(row['Recommended Rate Ex GST'] or 0):,.2f}"
+            ): int(row["id"])
+            for _, row in filtered_df.iterrows()
+        }
+        selected_label = st.selectbox(
+            "Select saved rate",
+            list(option_map.keys()),
+            key=f"estimate_saved_rate_{selected_estimate_id}",
+        )
+        selected_rate_id = option_map[selected_label]
+        selected_row = filtered_df[filtered_df["id"] == selected_rate_id].iloc[0]
+
+        rate_basis_choice = st.radio(
+            "Rate to use",
+            ["Recommended", "Minimum", "Maximum"],
+            horizontal=True,
+            key=f"estimate_rate_basis_{selected_estimate_id}",
+        )
+        rate_column = {
+            "Recommended": "Recommended Rate Ex GST",
+            "Minimum": "Rate Min Ex GST",
+            "Maximum": "Rate Max Ex GST",
+        }[rate_basis_choice]
+        selected_rate = float(selected_row[rate_column] or 0)
+
+        c1, c2, c3 = st.columns(3)
+        qty = c1.number_input(
+            "Quantity",
+            min_value=0.0,
+            value=1.0,
+            step=1.0,
+            key=f"estimate_rate_qty_{selected_estimate_id}",
+        )
+        override_rate = c2.checkbox("Override rate", value=False, key=f"estimate_rate_override_{selected_estimate_id}")
+        final_rate = c3.number_input(
+            "Unit Rate Ex GST",
+            min_value=0.0,
+            value=float(selected_rate),
+            step=1.0,
+            disabled=not override_rate,
+            key=f"estimate_rate_value_{selected_estimate_id}_{selected_rate_id}_{rate_basis_choice}",
+        )
+        if not override_rate:
+            final_rate = selected_rate
+
+        category = _rate_library_clean_text(selected_row["Category"])
+        section_options = []
+        for value in [category, "Painting Works", "Floor Coatings", "Preliminaries", "Labour", "Materials", "Access / Equipment", "Subcontractor", "Variations", "Other"]:
+            if value and value not in section_options:
+                section_options.append(value)
+        section = st.selectbox(
+            "Estimate Section",
+            section_options,
+            key=f"estimate_rate_section_{selected_estimate_id}",
+        )
+        default_notes = (
+            f"Rate library: {selected_row['Rate Code']} | {rate_basis_choice} rate. "
+            f"{_rate_library_clean_text(selected_row['Included Scope / Notes'])}"
+        ).strip()
+        line_notes = st.text_area(
+            "Line Notes",
+            value=default_notes,
+            key=f"estimate_rate_notes_{selected_estimate_id}_{selected_rate_id}",
+        )
+
+        preview_total = round(float(qty or 0) * float(final_rate or 0), 2)
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Unit", _rate_library_clean_text(selected_row["Unit"]) or "item")
+        m2.metric("Rate Ex GST", f"${float(final_rate or 0):,.2f}")
+        m3.metric("Line Total Ex GST", f"${preview_total:,.2f}")
+
+        if st.button("Add Saved Rate to Estimate", type="primary", key=f"add_saved_rate_{selected_estimate_id}"):
+            if float(qty or 0) <= 0:
+                pb_error("Quantity must be greater than zero.")
+            else:
+                execute("""
+                    INSERT INTO estimate_line_items
+                    (estimate_id, section, item_description, qty, unit, unit_rate, line_total, notes)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    selected_estimate_id,
+                    section,
+                    _rate_library_clean_text(selected_row["Item Description"]),
+                    float(qty),
+                    _rate_library_clean_text(selected_row["Unit"]) or "item",
+                    float(final_rate),
+                    preview_total,
+                    line_notes,
+                ))
+                recalc_estimate_totals(selected_estimate_id)
+                pb_success("Saved estimating rate added to the estimate.")
+                pb_rerun()
+
+# PB_ESTIMATE_LINE_IMPORTER_V1
+def _normalise_estimate_import_header(value):
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
+
+
+def _prepare_estimate_line_import_dataframe(source_df):
+    if source_df is None or source_df.empty:
+        raise ValueError("The uploaded CSV does not contain any line items.")
+
+    aliases = {
+        "section": "Section",
+        "itemdescription": "Item Description",
+        "description": "Item Description",
+        "item": "Item Description",
+        "qty": "Qty",
+        "quantity": "Qty",
+        "unit": "Unit",
+        "unitrate": "Unit Rate",
+        "rate": "Unit Rate",
+        "linetotal": "Line Total",
+        "total": "Line Total",
+        "notes": "Notes",
+        "linenotes": "Notes",
+    }
+
+    rename_map = {}
+    for column in source_df.columns:
+        key = _normalise_estimate_import_header(column)
+        if key in aliases:
+            rename_map[column] = aliases[key]
+
+    work = source_df.rename(columns=rename_map).copy()
+    required = ["Section", "Item Description", "Qty", "Unit", "Unit Rate"]
+    missing = [column for column in required if column not in work.columns]
+    if missing:
+        raise ValueError("Missing required column(s): " + ", ".join(missing))
+
+    if "Line Total" not in work.columns:
+        work["Line Total"] = None
+    if "Notes" not in work.columns:
+        work["Notes"] = ""
+
+    work["Section"] = work["Section"].fillna("").astype(str).str.strip()
+    work["Item Description"] = work["Item Description"].fillna("").astype(str).str.strip()
+    work["Unit"] = work["Unit"].fillna("").astype(str).str.strip()
+    work["Notes"] = work["Notes"].fillna("").astype(str)
+
+    for column in ["Qty", "Unit Rate", "Line Total"]:
+        work[column] = pd.to_numeric(work[column], errors="coerce")
+
+    work["Qty"] = work["Qty"].fillna(0.0)
+    work["Unit Rate"] = work["Unit Rate"].fillna(0.0)
+    calculated_total = (work["Qty"] * work["Unit Rate"]).round(2)
+    work["Line Total"] = work["Line Total"].where(work["Line Total"].notna(), calculated_total)
+    work["Line Total"] = work["Line Total"].round(2)
+
+    work = work[work["Item Description"] != ""].copy()
+    if work.empty:
+        raise ValueError("No valid line items were found after removing blank descriptions.")
+
+    return work[["Section", "Item Description", "Qty", "Unit", "Unit Rate", "Line Total", "Notes"]]
+
+
+def render_estimate_line_item_csv_importer(selected_estimate_id):
+    with st.expander("Import Estimate Working Sheet CSV", expanded=False):
+        st.caption(
+            "Upload line items with these columns: Section, Item Description, Qty, Unit, "
+            "Unit Rate, Line Total and Notes."
+        )
+        uploaded = st.file_uploader(
+            "Choose estimate working-sheet CSV",
+            type=["csv"],
+            key=f"estimate_line_import_file_{selected_estimate_id}",
+        )
+        import_mode = st.radio(
+            "Import mode",
+            ["Append to existing line items", "Replace existing line items"],
+            horizontal=True,
+            key=f"estimate_line_import_mode_{selected_estimate_id}",
+        )
+
+        if uploaded is None:
+            return
+
+        try:
+            if uploaded_file_size(uploaded) > MAX_CSV_UPLOAD_BYTES:
+                raise ValueError("CSV is larger than the 5 MB upload limit.")
+            uploaded.seek(0)
+            source_df = pd.read_csv(uploaded)
+            if len(source_df) > MAX_CSV_IMPORT_ROWS:
+                raise ValueError("CSV contains more than 10,000 rows.")
+            prepared_df = _prepare_estimate_line_import_dataframe(source_df)
+            st.dataframe(prepared_df, width="stretch", hide_index=True)
+            st.metric(
+                "Import Total Ex GST",
+                f"${float(prepared_df['Line Total'].sum()):,.2f}",
+            )
+
+            confirm_replace = True
+            if import_mode.startswith("Replace"):
+                confirm_replace = st.checkbox(
+                    "Confirm replacement of all existing line items",
+                    key=f"estimate_line_import_confirm_{selected_estimate_id}",
+                )
+
+            if st.button(
+                "Import Working Sheet",
+                type="primary",
+                key=f"estimate_line_import_button_{selected_estimate_id}",
+            ):
+                if not confirm_replace:
+                    pb_error("Tick the replacement confirmation box first.")
+                    return
+
+                conn = connect()
+                try:
+                    cur = conn.cursor()
+                    if import_mode.startswith("Replace"):
+                        cur.execute(
+                            "DELETE FROM estimate_line_items WHERE estimate_id = ?",
+                            (selected_estimate_id,),
+                        )
+
+                    insert_sql = (
+                        "INSERT INTO estimate_line_items "
+                        "(estimate_id, section, item_description, qty, unit, unit_rate, line_total, notes) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+                    )
+                    for _, row in prepared_df.iterrows():
+                        cur.execute(insert_sql, (
+                            selected_estimate_id,
+                            str(row["Section"]),
+                            str(row["Item Description"]),
+                            float(row["Qty"] or 0),
+                            str(row["Unit"]),
+                            float(row["Unit Rate"] or 0),
+                            float(row["Line Total"] or 0),
+                            str(row["Notes"]),
+                        ))
+                    conn.commit()
+                except Exception:
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+                    raise
+                finally:
+                    conn.close()
+
+                recalc_estimate_totals(selected_estimate_id)
+                pb_success(f"Imported {len(prepared_df)} estimate line item(s).")
+                pb_rerun()
+
+        except Exception as exc:
+            pb_error(f"Could not import this estimate working sheet: {exc}")
+
+
+# =============================
+# TAKE-OFF JOB PACK IMPORTER
+# PB_JOBHUB_TAKEOFF_JOB_PACK_V1
+# PB_JOBHUB_JOB_PACK_CREATE_UPDATE_V2
+# =============================
+TAKEOFF_PACK_VERSION = "2.0"
+TAKEOFF_PACK_DATA_FILES = {
+    "job_manifest.json",
+    "takeoff_lines.csv",
+    "labour_budget.csv",
+    "material_allowances.csv",
+    "colour_schedule.csv",
+}
+TAKEOFF_PACK_DOCUMENT_EXTENSIONS = {
+    ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".csv", ".txt",
+    ".jpg", ".jpeg", ".png", ".webp",
+}
+
+
+def _takeoff_text(value, default=""):
+    if value is None:
+        return default
+    try:
+        if pd.isna(value):
+            return default
+    except Exception:
+        pass
+    value = str(value).strip()
+    return value if value else default
+
+
+def _takeoff_float(value, default=0.0):
+    if value is None:
+        return float(default)
+    try:
+        if pd.isna(value):
+            return float(default)
+    except Exception:
+        pass
+    if isinstance(value, (int, float)):
+        return float(value)
+    cleaned = str(value).strip().replace("$", "").replace(",", "")
+    cleaned = cleaned.replace(" hrs", "").replace(" hr", "")
+    if not cleaned:
+        return float(default)
+    try:
+        return float(cleaned)
+    except Exception:
+        match = re.search(r"[-+]?\d*\.?\d+", cleaned)
+        return float(match.group(0)) if match else float(default)
+
+
+def _takeoff_header(value):
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
+
+
+def _takeoff_value(mapping, *keys, default=""):
+    if not isinstance(mapping, dict):
+        return default
+    normalised = {_takeoff_header(key): value for key, value in mapping.items()}
+    for key in keys:
+        lookup = _takeoff_header(key)
+        if lookup in normalised and normalised[lookup] not in (None, ""):
+            return normalised[lookup]
+    return default
+
+
+def _takeoff_rename_columns(source_df, aliases):
+    work = source_df.copy()
+    rename_map = {}
+    for column in work.columns:
+        key = _takeoff_header(column)
+        if key in aliases:
+            rename_map[column] = aliases[key]
+    return work.rename(columns=rename_map)
+
+
+def _prepare_takeoff_lines_dataframe(source_df):
+    columns = [
+        "Section", "Item Description", "Qty", "Unit", "Unit Rate", "Line Total",
+        "Estimated Labour Hours", "Material Allowance", "Substrate", "Location",
+        "Coating System", "Colour / Finish", "Notes",
+    ]
+    if source_df is None or source_df.empty:
+        return pd.DataFrame(columns=columns)
+
+    aliases = {
+        "section": "Section",
+        "category": "Section",
+        "itemdescription": "Item Description",
+        "description": "Item Description",
+        "item": "Item Description",
+        "scopeitem": "Item Description",
+        "qty": "Qty",
+        "quantity": "Qty",
+        "measure": "Qty",
+        "unit": "Unit",
+        "unitrate": "Unit Rate",
+        "rate": "Unit Rate",
+        "linetotal": "Line Total",
+        "total": "Line Total",
+        "estimatedlabourhours": "Estimated Labour Hours",
+        "estimatedlaborhours": "Estimated Labour Hours",
+        "labourhours": "Estimated Labour Hours",
+        "laborhours": "Estimated Labour Hours",
+        "hours": "Estimated Labour Hours",
+        "materialallowance": "Material Allowance",
+        "materialcostallowance": "Material Allowance",
+        "substrate": "Substrate",
+        "location": "Location",
+        "area": "Location",
+        "coatingsystem": "Coating System",
+        "paintsystem": "Coating System",
+        "colourfinish": "Colour / Finish",
+        "colorfinish": "Colour / Finish",
+        "colour": "Colour / Finish",
+        "color": "Colour / Finish",
+        "notes": "Notes",
+        "scopenotes": "Notes",
+    }
+    work = _takeoff_rename_columns(source_df, aliases)
+    if "Item Description" not in work.columns:
+        raise ValueError("takeoff_lines.csv requires an Item Description or Description column.")
+
+    defaults = {
+        "Section": "Take-off",
+        "Qty": 0.0,
+        "Unit": "item",
+        "Unit Rate": 0.0,
+        "Line Total": None,
+        "Estimated Labour Hours": 0.0,
+        "Material Allowance": 0.0,
+        "Substrate": "",
+        "Location": "",
+        "Coating System": "",
+        "Colour / Finish": "",
+        "Notes": "",
+    }
+    for column, default in defaults.items():
+        if column not in work.columns:
+            work[column] = default
+
+    for column in ["Qty", "Unit Rate", "Line Total", "Estimated Labour Hours", "Material Allowance"]:
+        work[column] = work[column].map(_takeoff_float)
+    calculated_total = (work["Qty"] * work["Unit Rate"]).round(2)
+    work["Line Total"] = work["Line Total"].where(work["Line Total"] != 0, calculated_total)
+
+    for column in [
+        "Section", "Item Description", "Unit", "Substrate", "Location",
+        "Coating System", "Colour / Finish", "Notes",
+    ]:
+        work[column] = work[column].map(_takeoff_text)
+
+    work["Section"] = work["Section"].replace("", "Take-off")
+    work["Unit"] = work["Unit"].replace("", "item")
+    work = work[work["Item Description"] != ""].copy()
+    if len(work) > MAX_CSV_IMPORT_ROWS:
+        raise ValueError("takeoff_lines.csv contains more than 10,000 valid rows.")
+    return work[columns]
+
+
+def _prepare_takeoff_labour_dataframe(source_df):
+    columns = ["Item Description", "Estimated Labour Hours", "Labour Rate", "Notes"]
+    if source_df is None or source_df.empty:
+        return pd.DataFrame(columns=columns)
+    aliases = {
+        "itemdescription": "Item Description",
+        "description": "Item Description",
+        "item": "Item Description",
+        "estimatedlabourhours": "Estimated Labour Hours",
+        "estimatedlaborhours": "Estimated Labour Hours",
+        "labourhours": "Estimated Labour Hours",
+        "laborhours": "Estimated Labour Hours",
+        "hours": "Estimated Labour Hours",
+        "labourrate": "Labour Rate",
+        "laborrate": "Labour Rate",
+        "hourlyrate": "Labour Rate",
+        "notes": "Notes",
+    }
+    work = _takeoff_rename_columns(source_df, aliases)
+    if "Estimated Labour Hours" not in work.columns:
+        raise ValueError("labour_budget.csv requires an Estimated Labour Hours or Hours column.")
+    if "Item Description" not in work.columns:
+        work["Item Description"] = "Labour budget"
+    if "Labour Rate" not in work.columns:
+        work["Labour Rate"] = 0.0
+    if "Notes" not in work.columns:
+        work["Notes"] = ""
+    work["Estimated Labour Hours"] = work["Estimated Labour Hours"].map(_takeoff_float)
+    work["Labour Rate"] = work["Labour Rate"].map(_takeoff_float)
+    work["Item Description"] = work["Item Description"].map(_takeoff_text)
+    work["Notes"] = work["Notes"].map(_takeoff_text)
+    return work[columns]
+
+
+def _prepare_takeoff_material_dataframe(source_df):
+    columns = [
+        "Product Code / Ref", "Product / Material Name", "Supplier", "Unit",
+        "Unit Price Ex GST", "Colour / Finish", "Qty Required", "Location",
+        "Substrate", "Coating System", "Notes", "Line Cost Ex GST",
+    ]
+    if source_df is None or source_df.empty:
+        return pd.DataFrame(columns=columns)
+    aliases = {
+        "productcoderef": "Product Code / Ref",
+        "productcode": "Product Code / Ref",
+        "code": "Product Code / Ref",
+        "productmaterialname": "Product / Material Name",
+        "productname": "Product / Material Name",
+        "material": "Product / Material Name",
+        "product": "Product / Material Name",
+        "supplier": "Supplier",
+        "unit": "Unit",
+        "unitpriceexgst": "Unit Price Ex GST",
+        "unitprice": "Unit Price Ex GST",
+        "priceexgst": "Unit Price Ex GST",
+        "price": "Unit Price Ex GST",
+        "colourfinish": "Colour / Finish",
+        "colorfinish": "Colour / Finish",
+        "colour": "Colour / Finish",
+        "color": "Colour / Finish",
+        "qtyrequired": "Qty Required",
+        "quantity": "Qty Required",
+        "qty": "Qty Required",
+        "location": "Location",
+        "area": "Location",
+        "substrate": "Substrate",
+        "coatingsystem": "Coating System",
+        "paintsystem": "Coating System",
+        "notes": "Notes",
+    }
+    work = _takeoff_rename_columns(source_df, aliases)
+    if "Product / Material Name" not in work.columns:
+        raise ValueError("material_allowances.csv requires a Product / Material Name or Material column.")
+    defaults = {
+        "Product Code / Ref": "CUSTOM",
+        "Supplier": "",
+        "Unit": "each",
+        "Unit Price Ex GST": 0.0,
+        "Colour / Finish": "",
+        "Qty Required": 0.0,
+        "Location": "",
+        "Substrate": "",
+        "Coating System": "",
+        "Notes": "",
+    }
+    for column, default in defaults.items():
+        if column not in work.columns:
+            work[column] = default
+    for column in ["Unit Price Ex GST", "Qty Required"]:
+        work[column] = work[column].map(_takeoff_float)
+    for column in [
+        "Product Code / Ref", "Product / Material Name", "Supplier", "Unit",
+        "Colour / Finish", "Location", "Substrate", "Coating System", "Notes",
+    ]:
+        work[column] = work[column].map(_takeoff_text)
+    work["Product Code / Ref"] = work["Product Code / Ref"].replace("", "CUSTOM")
+    work["Unit"] = work["Unit"].replace("", "each")
+    work["Line Cost Ex GST"] = (work["Unit Price Ex GST"] * work["Qty Required"]).round(2)
+    work = work[work["Product / Material Name"] != ""].copy()
+    return work[columns]
+
+
+def _prepare_takeoff_colour_dataframe(source_df):
+    columns = ["Location", "Substrate", "Product / Material Name", "Colour / Finish", "Coating System", "Notes"]
+    if source_df is None or source_df.empty:
+        return pd.DataFrame(columns=columns)
+    aliases = {
+        "location": "Location",
+        "area": "Location",
+        "room": "Location",
+        "substrate": "Substrate",
+        "productmaterialname": "Product / Material Name",
+        "product": "Product / Material Name",
+        "material": "Product / Material Name",
+        "paint": "Product / Material Name",
+        "colourfinish": "Colour / Finish",
+        "colorfinish": "Colour / Finish",
+        "colour": "Colour / Finish",
+        "color": "Colour / Finish",
+        "coatingsystem": "Coating System",
+        "paintsystem": "Coating System",
+        "finish": "Coating System",
+        "notes": "Notes",
+    }
+    work = _takeoff_rename_columns(source_df, aliases)
+    defaults = {
+        "Location": "",
+        "Substrate": "",
+        "Product / Material Name": "Colour schedule",
+        "Colour / Finish": "",
+        "Coating System": "",
+        "Notes": "",
+    }
+    for column, default in defaults.items():
+        if column not in work.columns:
+            work[column] = default
+    for column in columns:
+        work[column] = work[column].map(_takeoff_text)
+    work["Product / Material Name"] = work["Product / Material Name"].replace("", "Colour schedule")
+    work = work[(work["Colour / Finish"] != "") | (work["Coating System"] != "") | (work["Location"] != "")].copy()
+    return work[columns]
+
+
+def _takeoff_safe_member_path(member_name):
+    clean_name = str(member_name or "").replace("\\", "/")
+    path = PurePosixPath(clean_name)
+    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+        raise ValueError(f"Unsafe ZIP member path: {member_name}")
+    return path
+
+
+def _takeoff_document_type(member_name):
+    lower = str(member_name or "").lower().replace("\\", "/")
+    name = PurePosixPath(lower).name
+    if "internal_job_sheet" in name or "job_sheet" in name:
+        return "Internal Job Sheet"
+    if "marked_up" in name or "markup" in name or "mark_up" in name:
+        return "Marked-up Plans"
+    if "/original_plans/" in f"/{lower}" or "plan" in name or "drawing" in name:
+        return "Plans / Drawings"
+    if "/specifications/" in f"/{lower}" or "specification" in name or "scope" in name:
+        return "Specification / Scope"
+    if "/colour_schedules/" in f"/{lower}" or "colour" in name or "color" in name or "finish_schedule" in name:
+        return "Colour / Finish Schedule"
+    if "/purchase_orders/" in f"/{lower}" or "purchase_order" in name or re.search(r"(^|[_-])po([_-]|\.)", name):
+        return "Purchase Order"
+    if "takeoff_report" in name or "take_off_report" in name:
+        return "Take-off Report"
+    return "Take-off Pack Document"
+
+
+def _takeoff_find_member(member_names, expected_name):
+    expected = expected_name.lower()
+    for member in member_names:
+        if member.lower() == expected or PurePosixPath(member).name.lower() == expected:
+            return member
+    return None
+
+
+def _takeoff_read_csv_from_zip(zf, member_names, expected_name):
+    member = _takeoff_find_member(member_names, expected_name)
+    if not member:
+        return pd.DataFrame()
+    info = zf.getinfo(member)
+    if info.file_size > MAX_CSV_UPLOAD_BYTES:
+        raise ValueError(f"{expected_name} is larger than the 5 MB CSV limit.")
+    raw = zf.read(member)
+    if not raw.strip():
+        return pd.DataFrame()
+    return pd.read_csv(BytesIO(raw))
+
+
+def _takeoff_bool(value, default=False):
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text_value = str(value).strip().casefold()
+    if text_value in {"1", "true", "yes", "y", "on", "enabled", "restrict", "restricted"}:
+        return True
+    if text_value in {"0", "false", "no", "n", "off", "disabled", "unrestricted"}:
+        return False
+    return bool(default)
+
+
+def _takeoff_list(value):
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        raw_values = list(value)
+    elif isinstance(value, str):
+        value = value.strip()
+        if not value:
+            return []
+        raw_values = re.split(r"[|;,\n]+", value)
+    else:
+        raw_values = [value]
+
+    result = []
+    seen = set()
+    for item in raw_values:
+        clean = _takeoff_text(item)
+        key = clean.casefold()
+        if clean and key not in seen:
+            result.append(clean)
+            seen.add(key)
+    return result
+
+
+def _takeoff_manifest_section(manifest, job_manifest, *keys):
+    for key in keys:
+        candidate = manifest.get(key) if isinstance(manifest, dict) else None
+        if isinstance(candidate, dict):
+            return candidate
+        candidate = job_manifest.get(key) if isinstance(job_manifest, dict) else None
+        if isinstance(candidate, dict):
+            return candidate
+    return {}
+
+
+def _takeoff_insert_id(cur, sql, params):
+    if USE_POSTGRES:
+        cur.execute(sql.rstrip().rstrip(";") + " RETURNING id", params)
+        return int(cur.fetchone()[0])
+    cur.execute(sql, params)
+    return int(cur.lastrowid)
+
+
+def _takeoff_resolve_builder_client(
+    cur,
+    job_details,
+    create_missing=True,
+    fill_blank_existing=True,
+):
+    builder_name = _takeoff_text(job_details.get("builder_client"))
+    if not builder_name:
+        return None, "none"
+
+    fields = [
+        "type", "name", "contact_name", "phone", "email",
+        "address", "qbcc", "abn", "terms", "notes",
+    ]
+    cur.execute(
+        """
+        SELECT id, type, name, contact_name, phone, email, address, qbcc, abn, terms, notes
+        FROM builders_clients
+        WHERE LOWER(TRIM(name)) = LOWER(TRIM(?))
+        LIMIT 1
+        """,
+        (builder_name,),
+    )
+    row = cur.fetchone()
+    incoming = {
+        "type": _takeoff_text(job_details.get("builder_client_type"), "Builder / Client"),
+        "name": builder_name,
+        "contact_name": _takeoff_text(job_details.get("builder_contact_name")),
+        "phone": _takeoff_text(job_details.get("builder_phone")),
+        "email": _takeoff_text(job_details.get("builder_email")),
+        "address": _takeoff_text(job_details.get("builder_address")),
+        "qbcc": _takeoff_text(job_details.get("builder_qbcc")),
+        "abn": _takeoff_text(job_details.get("builder_abn")),
+        "terms": _takeoff_text(job_details.get("builder_terms")),
+        "notes": _takeoff_text(job_details.get("builder_notes")),
+    }
+
+    if row:
+        builder_id = int(row[0])
+        if fill_blank_existing:
+            existing = dict(zip(["id"] + fields, row))
+            updates = []
+            params = []
+            for column in ["type", "contact_name", "phone", "email", "address", "qbcc", "abn", "terms", "notes"]:
+                if incoming[column] and not _takeoff_text(existing.get(column)):
+                    updates.append(f"{column} = ?")
+                    params.append(incoming[column])
+            if updates:
+                params.append(builder_id)
+                cur.execute(
+                    f"UPDATE builders_clients SET {', '.join(updates)} WHERE id = ?",
+                    tuple(params),
+                )
+                return builder_id, "linked_and_completed_blanks"
+        return builder_id, "linked_existing"
+
+    if not create_missing:
+        return None, "missing_not_created"
+
+    builder_id = _takeoff_insert_id(
+        cur,
+        """
+        INSERT INTO builders_clients
+        (type, name, contact_name, phone, email, address, qbcc, abn, terms, notes)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        tuple(incoming[column] for column in fields),
+    )
+    return builder_id, "created"
+
+
+def _takeoff_prepare_target_job(
+    cur,
+    job_mode,
+    target_job_id,
+    job_details,
+    update_job_record=True,
+    create_missing_builder=True,
+    fill_blank_builder_details=True,
+):
+    mode = _takeoff_text(job_mode, "update").strip().casefold()
+    details = dict(job_details or {})
+
+    if mode == "create":
+        job_no = _takeoff_text(details.get("job_no"))
+        job_name = _takeoff_text(details.get("job_name"))
+        if not job_no:
+            raise ValueError("A job number is required to create a new job from the pack.")
+        if not job_name:
+            raise ValueError("A job name is required to create a new job from the pack.")
+
+        cur.execute(
+            "SELECT id FROM jobs WHERE LOWER(TRIM(job_no)) = LOWER(TRIM(?)) LIMIT 1",
+            (job_no,),
+        )
+        if cur.fetchone():
+            raise ValueError(
+                f"Job number {job_no} already exists. Choose Update an existing job instead."
+            )
+
+        builder_id, builder_action = _takeoff_resolve_builder_client(
+            cur,
+            details,
+            create_missing=create_missing_builder,
+            fill_blank_existing=fill_blank_builder_details,
+        )
+        job_id = _takeoff_insert_id(
+            cur,
+            """
+            INSERT INTO jobs
+            (job_no, job_name, builder_client_id, site_address, status, leading_hand,
+             start_date, end_date, contract_value, notes,
+             restrict_material_products, allowed_material_suppliers)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                job_no,
+                job_name,
+                builder_id,
+                _takeoff_text(details.get("site_address")),
+                _takeoff_text(details.get("status"), "Not Started"),
+                _takeoff_text(details.get("leading_hand")),
+                _takeoff_text(details.get("start_date")),
+                _takeoff_text(details.get("end_date")),
+                _takeoff_float(details.get("contract_value_ex_gst")),
+                _takeoff_text(details.get("job_notes")),
+                1 if _takeoff_bool(details.get("restrict_material_products")) else 0,
+                serialise_material_supplier_list(_takeoff_list(details.get("allowed_material_suppliers"))),
+            ),
+        )
+        return job_id, job_no, "created", builder_action
+
+    if not target_job_id:
+        raise ValueError("Choose the existing job that this pack should update.")
+    job_id = int(target_job_id)
+    cur.execute(
+        """
+        SELECT id, job_no, job_name, builder_client_id, site_address, status, leading_hand,
+               start_date, end_date, contract_value, notes,
+               restrict_material_products, allowed_material_suppliers
+        FROM jobs
+        WHERE id = ?
+        """,
+        (job_id,),
+    )
+    existing = cur.fetchone()
+    if not existing:
+        raise ValueError("The selected existing job could not be found.")
+
+    existing_job_no = _takeoff_text(existing[1], f"job_{job_id}")
+    if not update_job_record:
+        return job_id, existing_job_no, "linked_without_job_changes", "unchanged"
+
+    builder_id, builder_action = _takeoff_resolve_builder_client(
+        cur,
+        details,
+        create_missing=create_missing_builder,
+        fill_blank_existing=fill_blank_builder_details,
+    )
+    cur.execute(
+        """
+        UPDATE jobs
+        SET job_no = ?, job_name = ?, builder_client_id = ?, site_address = ?, status = ?,
+            leading_hand = ?, start_date = ?, end_date = ?, contract_value = ?, notes = ?,
+            restrict_material_products = ?, allowed_material_suppliers = ?,
+            row_version = COALESCE(row_version, 1) + 1
+        WHERE id = ?
+        """,
+        (
+            _takeoff_text(details.get("job_no"), existing_job_no),
+            _takeoff_text(details.get("job_name"), _takeoff_text(existing[2])),
+            builder_id if _takeoff_text(details.get("builder_client")) else existing[3],
+            _takeoff_text(details.get("site_address")),
+            _takeoff_text(details.get("status"), "Not Started"),
+            _takeoff_text(details.get("leading_hand")),
+            _takeoff_text(details.get("start_date")),
+            _takeoff_text(details.get("end_date")),
+            _takeoff_float(details.get("contract_value_ex_gst")),
+            _takeoff_text(details.get("job_notes")),
+            1 if _takeoff_bool(details.get("restrict_material_products")) else 0,
+            serialise_material_supplier_list(_takeoff_list(details.get("allowed_material_suppliers"))),
+            job_id,
+        ),
+    )
+    return job_id, _takeoff_text(details.get("job_no"), existing_job_no), "updated", builder_action
+
+def parse_takeoff_job_pack(uploaded_file):
+    if uploaded_file is None:
+        raise ValueError("Choose a Job Pack ZIP first.")
+    if uploaded_file_size(uploaded_file) > MAX_TAKEOFF_PACK_BYTES:
+        raise ValueError("Job Pack is larger than the 150 MB upload limit.")
+    uploaded_file.seek(0)
+    source_bytes = uploaded_file.read()
+    uploaded_file.seek(0)
+
+    try:
+        zf = zipfile.ZipFile(BytesIO(source_bytes), "r")
+    except zipfile.BadZipFile as exc:
+        raise ValueError("The uploaded file is not a valid ZIP archive.") from exc
+
+    with zf:
+        file_infos = [info for info in zf.infolist() if not info.is_dir()]
+        if not file_infos:
+            raise ValueError("The ZIP does not contain any files.")
+        if len(file_infos) > MAX_TAKEOFF_PACK_FILES:
+            raise ValueError(f"The ZIP contains more than {MAX_TAKEOFF_PACK_FILES} files.")
+
+        total_uncompressed = 0
+        member_names = []
+        for info in file_infos:
+            _takeoff_safe_member_path(info.filename)
+            if info.flag_bits & 0x1:
+                raise ValueError(f"Encrypted ZIP member is not supported: {info.filename}")
+            file_type = (info.external_attr >> 16) & 0o170000
+            if file_type == 0o120000:
+                raise ValueError(f"Symbolic links are not allowed in Job Packs: {info.filename}")
+            total_uncompressed += int(info.file_size or 0)
+            if total_uncompressed > MAX_TAKEOFF_PACK_EXTRACTED_BYTES:
+                raise ValueError("The uncompressed Job Pack is larger than 350 MB.")
+            member_names.append(info.filename)
+
+        manifest = {}
+        manifest_member = _takeoff_find_member(member_names, "job_manifest.json")
+        if manifest_member:
+            raw_manifest = zf.read(manifest_member)
+            if len(raw_manifest) > 2 * 1024 * 1024:
+                raise ValueError("job_manifest.json is larger than 2 MB.")
+            try:
+                manifest = json.loads(raw_manifest.decode("utf-8-sig"))
+            except Exception as exc:
+                raise ValueError("job_manifest.json is not valid UTF-8 JSON.") from exc
+            if not isinstance(manifest, dict):
+                raise ValueError("job_manifest.json must contain one JSON object.")
+
+        lines_df = _prepare_takeoff_lines_dataframe(
+            _takeoff_read_csv_from_zip(zf, member_names, "takeoff_lines.csv")
+        )
+        labour_df = _prepare_takeoff_labour_dataframe(
+            _takeoff_read_csv_from_zip(zf, member_names, "labour_budget.csv")
+        )
+        materials_df = _prepare_takeoff_material_dataframe(
+            _takeoff_read_csv_from_zip(zf, member_names, "material_allowances.csv")
+        )
+        colours_df = _prepare_takeoff_colour_dataframe(
+            _takeoff_read_csv_from_zip(zf, member_names, "colour_schedule.csv")
+        )
+
+        if not lines_df.empty and not labour_df.empty:
+            labour_by_item = {}
+            for _, labour_row in labour_df.iterrows():
+                item_key = _takeoff_header(labour_row.get("Item Description"))
+                if item_key:
+                    labour_by_item[item_key] = labour_by_item.get(item_key, 0.0) + _takeoff_float(
+                        labour_row.get("Estimated Labour Hours")
+                    )
+            for line_index, line_row in lines_df.iterrows():
+                if _takeoff_float(line_row.get("Estimated Labour Hours")) > 0:
+                    continue
+                matched_hours = labour_by_item.get(_takeoff_header(line_row.get("Item Description")), 0.0)
+                if matched_hours > 0:
+                    lines_df.at[line_index, "Estimated Labour Hours"] = matched_hours
+
+        ignored_names = TAKEOFF_PACK_DATA_FILES | {"readme.txt", "readme.md"}
+        documents = []
+        for member in member_names:
+            path = PurePosixPath(member)
+            if path.name.lower() in ignored_names or path.name.upper().startswith("PLACE_"):
+                continue
+            if path.suffix.lower() not in TAKEOFF_PACK_DOCUMENT_EXTENSIONS:
+                continue
+            documents.append({
+                "member": member,
+                "file_name": path.name,
+                "document_type": _takeoff_document_type(member),
+                "mime_type": mimetypes.guess_type(path.name)[0] or "application/octet-stream",
+                "size_bytes": int(zf.getinfo(member).file_size or 0),
+            })
+
+    job_manifest = manifest.get("job") if isinstance(manifest.get("job"), dict) else {}
+    estimate_manifest = manifest.get("estimate") if isinstance(manifest.get("estimate"), dict) else {}
+    budget_manifest = manifest.get("budget") if isinstance(manifest.get("budget"), dict) else {}
+    builder_manifest = _takeoff_manifest_section(
+        manifest,
+        job_manifest,
+        "builder_client",
+        "builder",
+        "client",
+    )
+
+    scalar_builder_name = ""
+    for candidate in [
+        job_manifest.get("builder_client"),
+        job_manifest.get("builder"),
+        job_manifest.get("client"),
+        manifest.get("builder_client"),
+        manifest.get("builder"),
+        manifest.get("client"),
+    ]:
+        if candidate and not isinstance(candidate, dict):
+            scalar_builder_name = _takeoff_text(candidate)
+            if scalar_builder_name:
+                break
+
+    source_stem = Path(str(getattr(uploaded_file, "name", "job_pack.zip"))).stem
+    pack_id = _takeoff_text(
+        _takeoff_value(manifest, "pack_id", "takeoff_id", "job_pack_id", default=source_stem),
+        source_stem,
+    )
+    revision = _takeoff_text(
+        _takeoff_value(manifest, "revision", default=_takeoff_value(estimate_manifest, "revision", default="1")),
+        "1",
+    )
+
+    line_hours = float(lines_df["Estimated Labour Hours"].sum()) if not lines_df.empty else 0.0
+    labour_file_hours = float(labour_df["Estimated Labour Hours"].sum()) if not labour_df.empty else 0.0
+    manifest_hours = _takeoff_float(
+        _takeoff_value(estimate_manifest, "labour_hours", "labor_hours", default=_takeoff_value(budget_manifest, "labour_hours", "labor_hours", default=0))
+    )
+    total_labour_hours = manifest_hours or line_hours or labour_file_hours
+
+    labour_rate = PLANNING_LABOUR_RATE
+
+    material_file_total = float(materials_df["Line Cost Ex GST"].sum()) if not materials_df.empty else 0.0
+    line_material_total = float(lines_df["Material Allowance"].sum()) if not lines_df.empty else 0.0
+    manifest_materials = _takeoff_float(
+        _takeoff_value(estimate_manifest, "material_allowance", "materials", default=_takeoff_value(budget_manifest, "material_allowance", "materials", default=0))
+    )
+    material_allowance = manifest_materials or material_file_total or line_material_total
+
+    raw_restrict = _takeoff_value(
+        job_manifest,
+        "restrict_material_products",
+        "restrict_products",
+        "restrict_to_approved_suppliers",
+        default=None,
+    )
+    allowed_suppliers = _takeoff_list(
+        _takeoff_value(
+            job_manifest,
+            "allowed_material_suppliers",
+            "approved_suppliers",
+            "approved_brands",
+            "material_suppliers",
+            default=[],
+        )
+    )
+    restrict_supplied = raw_restrict is not None or bool(allowed_suppliers)
+    restrict_products = _takeoff_bool(raw_restrict, bool(allowed_suppliers))
+
+    summary = {
+        "pack_id": pack_id,
+        "revision": revision,
+        "pack_version": _takeoff_text(_takeoff_value(manifest, "pack_version", default=TAKEOFF_PACK_VERSION), TAKEOFF_PACK_VERSION),
+        "job_no": _takeoff_text(_takeoff_value(job_manifest, "job_no", "job_number")),
+        "job_name": _takeoff_text(_takeoff_value(job_manifest, "job_name", "name", "project_name")),
+        "site_address": _takeoff_text(_takeoff_value(job_manifest, "site_address", "address", "project_address")),
+        "builder_client": _takeoff_text(_takeoff_value(builder_manifest, "name", "builder_client", "builder", "client")) or scalar_builder_name,
+        "builder_client_type": _takeoff_text(_takeoff_value(builder_manifest, "type", "contact_type"), "Builder / Client"),
+        "builder_contact_name": _takeoff_text(_takeoff_value(builder_manifest, "contact_name", "contact", "primary_contact")),
+        "builder_phone": _takeoff_text(_takeoff_value(builder_manifest, "phone", "telephone", "mobile")),
+        "builder_email": _takeoff_text(_takeoff_value(builder_manifest, "email")),
+        "builder_address": _takeoff_text(_takeoff_value(builder_manifest, "address")),
+        "builder_qbcc": _takeoff_text(_takeoff_value(builder_manifest, "qbcc", "qbcc_licence", "qbcc_license")),
+        "builder_abn": _takeoff_text(_takeoff_value(builder_manifest, "abn")),
+        "builder_terms": _takeoff_text(_takeoff_value(builder_manifest, "terms", "payment_terms")),
+        "builder_notes": _takeoff_text(_takeoff_value(builder_manifest, "notes")),
+        "status": _takeoff_text(_takeoff_value(job_manifest, "status", "job_status")),
+        "leading_hand": _takeoff_text(_takeoff_value(job_manifest, "leading_hand", "supervisor", "site_supervisor")),
+        "start_date": _takeoff_text(_takeoff_value(job_manifest, "start_date", "commencement_date")),
+        "end_date": _takeoff_text(_takeoff_value(job_manifest, "end_date", "completion_date")),
+        "contract_value_ex_gst": _takeoff_float(_takeoff_value(
+            job_manifest,
+            "contract_value_ex_gst",
+            "contract_value",
+            "price_ex_gst",
+            "quoted_price_ex_gst",
+            "tender_price_ex_gst",
+            "accepted_price_ex_gst",
+            default=_takeoff_value(estimate_manifest, "total_ex_gst", "tender_price_ex_gst", "quoted_price_ex_gst", default=0),
+        )),
+        "job_notes": _takeoff_text(_takeoff_value(job_manifest, "notes", "scope_summary", "job_notes")),
+        "restrict_material_products": restrict_products,
+        "restrict_material_products_supplied": restrict_supplied,
+        "allowed_material_suppliers": allowed_suppliers,
+        "estimate_no": _takeoff_text(_takeoff_value(estimate_manifest, "estimate_no", "estimate_number")),
+        "estimate_date": _takeoff_text(_takeoff_value(estimate_manifest, "estimate_date", "date"), str(date.today())),
+        "estimate_status": _takeoff_text(_takeoff_value(estimate_manifest, "status"), "Draft"),
+        "labour_hours": total_labour_hours,
+        "labour_rate": labour_rate,
+        "material_allowance": material_allowance,
+        "access_equipment_allowance": _takeoff_float(_takeoff_value(estimate_manifest, "access_equipment_allowance", "access_allowance", default=_takeoff_value(budget_manifest, "access_equipment_allowance", "access_allowance", default=0))),
+        "subcontractor_allowance": _takeoff_float(_takeoff_value(estimate_manifest, "subcontractor_allowance", default=_takeoff_value(budget_manifest, "subcontractor_allowance", default=0))),
+        "sundries_allowance": _takeoff_float(_takeoff_value(estimate_manifest, "sundries_allowance", "consumables_allowance", default=_takeoff_value(budget_manifest, "sundries_allowance", "consumables_allowance", default=0))),
+        "target_gp_percent": _takeoff_float(_takeoff_value(estimate_manifest, "target_gp_percent", "margin_percent", default=_takeoff_value(budget_manifest, "target_gp_percent", "margin_percent", default=35)), 35),
+        "contingency_percent": _takeoff_float(_takeoff_value(estimate_manifest, "contingency_percent", default=0)),
+        "gst_percent": _takeoff_float(_takeoff_value(estimate_manifest, "gst_percent", default=10), 10),
+        "pricing_method": _takeoff_text(_takeoff_value(estimate_manifest, "pricing_method"), "Target Gross Margin"),
+        "notes": _takeoff_text(_takeoff_value(estimate_manifest, "notes", default=_takeoff_value(manifest, "notes"))),
+        "line_pricing_total": float(lines_df["Line Total"].sum()) if not lines_df.empty else 0.0,
+    }
+    if summary["pricing_method"] not in {"Target Gross Margin", "Markup"}:
+        summary["pricing_method"] = "Target Gross Margin"
+
+    has_job_details = any(
+        _takeoff_text(summary.get(key))
+        for key in ["job_no", "job_name", "site_address", "builder_client", "job_notes"]
+    ) or summary["contract_value_ex_gst"] > 0
+    if lines_df.empty and labour_df.empty and materials_df.empty and colours_df.empty and not documents and not has_job_details:
+        raise ValueError(
+            "The ZIP has no usable job details, take-off data, colours, materials or supported documents."
+        )
+
+    return {
+        "source_bytes": source_bytes,
+        "source_name": safe_file_name(str(getattr(uploaded_file, "name", "job_pack.zip"))),
+        "member_names": member_names,
+        "manifest": manifest,
+        "summary": summary,
+        "lines": lines_df,
+        "labour": labour_df,
+        "materials": materials_df,
+        "colours": colours_df,
+        "documents": documents,
+    }
+
+
+
+def build_takeoff_job_pack_template():
+    manifest = {
+        "pack_version": TAKEOFF_PACK_VERSION,
+        "pack_id": "PB-JOBNO-JOB-PACK",
+        "revision": "1",
+        "job": {
+            "job_no": "PB00000",
+            "job_name": "Example Project",
+            "site_address": "",
+            "status": "Quoted",
+            "leading_hand": "",
+            "start_date": "",
+            "end_date": "",
+            "contract_value_ex_gst": 0,
+            "notes": "Scope summary and important job notes.",
+            "restrict_material_products": True,
+            "allowed_material_suppliers": ["Haymes"],
+        },
+        "builder_client": {
+            "type": "Builder",
+            "name": "Example Builder Pty Ltd",
+            "contact_name": "",
+            "phone": "",
+            "email": "",
+            "address": "",
+            "qbcc": "",
+            "abn": "",
+            "terms": "",
+            "notes": "",
+        },
+        "estimate": {
+            "estimate_no": "PB00000-TO-01",
+            "estimate_date": str(date.today()),
+            "revision": "1",
+            "status": "Draft",
+            "labour_hours": 0,
+            "labour_rate": 60,
+            "material_allowance": 0,
+            "access_equipment_allowance": 0,
+            "subcontractor_allowance": 0,
+            "sundries_allowance": 0,
+            "target_gp_percent": 35,
+            "contingency_percent": 0,
+            "gst_percent": 10,
+            "pricing_method": "Target Gross Margin",
+            "notes": "Generated from Premier Brushworks Job Pack.",
+        },
+    }
+    lines = pd.DataFrame([{
+        "Section": "Internal",
+        "Item Description": "Walls - plasterboard",
+        "Qty": 100,
+        "Unit": "m2",
+        "Unit Rate": 0,
+        "Line Total": 0,
+        "Estimated Labour Hours": 12,
+        "Material Allowance": 450,
+        "Substrate": "Plasterboard",
+        "Location": "Ground floor",
+        "Coating System": "1 sealer + 2 finish coats",
+        "Colour / Finish": "To colour schedule",
+        "Notes": "Example only - replace before importing.",
+    }])
+    labour = pd.DataFrame([{
+        "Item Description": "Walls - plasterboard",
+        "Estimated Labour Hours": 12,
+        "Labour Rate": 60,
+        "Notes": "Example only",
+    }])
+    materials = pd.DataFrame([{
+        "Product Code / Ref": "CUSTOM",
+        "Product / Material Name": "Interior low sheen",
+        "Supplier": "Haymes",
+        "Unit": "15L",
+        "Unit Price Ex GST": 150,
+        "Colour / Finish": "To colour schedule",
+        "Qty Required": 3,
+        "Location": "Ground floor walls",
+        "Substrate": "Plasterboard",
+        "Coating System": "2 finish coats",
+        "Notes": "Preliminary allowance",
+    }])
+    colours = pd.DataFrame([{
+        "Location": "Ground floor walls",
+        "Substrate": "Plasterboard",
+        "Product / Material Name": "Interior low sheen",
+        "Colour / Finish": "To be confirmed",
+        "Coating System": "2 finish coats",
+        "Notes": "Example only",
+    }])
+    readme = """Premier Brushworks Job Pack Template
+
+This ZIP can CREATE A NEW JOB or UPDATE AN EXISTING JOB.
+
+Core file:
+- job_manifest.json: job number/name, builder/client, contract price, address, status, dates, notes and approved paint suppliers.
+
+Optional estimating files:
+- takeoff_lines.csv
+- labour_budget.csv
+- material_allowances.csv
+- colour_schedule.csv
+
+Optional document folders/files:
+- original_plans/
+- specifications/
+- colour_schedules/
+- purchase_orders/
+- correspondence/
+- internal_job_sheet.pdf
+- takeoff_report.pdf
+- marked_up_plans.pdf
+
+A job-details-and-documents-only pack is valid; take-off CSV files are optional.
+Increase the revision each time the same pack is reissued to the same job.
+"""
+    output = BytesIO()
+    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("job_manifest.json", json.dumps(manifest, indent=2))
+        zf.writestr("takeoff_lines.csv", lines.to_csv(index=False))
+        zf.writestr("labour_budget.csv", labour.to_csv(index=False))
+        zf.writestr("material_allowances.csv", materials.to_csv(index=False))
+        zf.writestr("colour_schedule.csv", colours.to_csv(index=False))
+        zf.writestr("original_plans/PLACE_PLANS_HERE.txt", "Place architectural plans and drawings in this folder.")
+        zf.writestr("specifications/PLACE_SPECIFICATIONS_HERE.txt", "Place specifications and scopes in this folder.")
+        zf.writestr("colour_schedules/PLACE_COLOUR_SCHEDULES_HERE.txt", "Place colour schedules in this folder.")
+        zf.writestr("purchase_orders/PLACE_PURCHASE_ORDERS_HERE.txt", "Place purchase orders or subcontracts in this folder.")
+        zf.writestr("README.txt", readme)
+    output.seek(0)
+    return output.getvalue()
+
+
+
+def _takeoff_safe_extract_target(pack_folder, member_name):
+    member_path = _takeoff_safe_member_path(member_name)
+    safe_parts = [safe_file_name(part) for part in member_path.parts]
+    target = (Path(pack_folder) / Path(*safe_parts)).resolve()
+    root = Path(pack_folder).resolve()
+    if root != target and root not in target.parents:
+        raise ValueError(f"Unsafe extracted path: {member_name}")
+    return target
+
+
+def import_takeoff_job_pack(
+    job_id,
+    parsed,
+    create_estimate=True,
+    update_budget=True,
+    import_materials=True,
+    attach_documents=True,
+    use_imported_line_pricing=False,
+    job_mode="update",
+    job_details=None,
+    update_job_record=True,
+    create_missing_builder=True,
+    fill_blank_builder_details=True,
+):
+    summary = parsed["summary"]
+    pack_id = _takeoff_text(summary.get("pack_id"), "job-pack")[:120]
+    revision = _takeoff_text(summary.get("revision"), "1")[:60]
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    imported_by = current_username()
+    pack_folder = None
+    extracted_paths = {}
+    estimate_id = None
+    line_count = 0
+    material_count = 0
+    document_count = 0
+    job_action = "linked"
+    builder_action = "unchanged"
+
+    conn = connect()
+    try:
+        cur = conn.cursor()
+        job_id, job_no, job_action, builder_action = _takeoff_prepare_target_job(
+            cur,
+            job_mode,
+            job_id,
+            job_details or summary,
+            update_job_record=update_job_record,
+            create_missing_builder=create_missing_builder,
+            fill_blank_builder_details=fill_blank_builder_details,
+        )
+        job_id = int(job_id)
+
+        cur.execute(
+            "SELECT id, imported_at FROM takeoff_pack_imports WHERE job_id = ? AND pack_id = ? AND revision = ?",
+            (job_id, pack_id, revision),
+        )
+        if cur.fetchone():
+            raise ValueError(
+                f"Pack {pack_id}, revision {revision}, has already been imported into this job. "
+                "Increase the revision in job_manifest.json before importing an updated pack."
+            )
+
+        safe_pack = safe_file_name(pack_id)[:80]
+        safe_revision = safe_file_name(revision)[:40]
+        pack_folder = Path(get_job_folder(job_no)) / "job_packs" / f"{safe_pack}_rev_{safe_revision}"
+        if pack_folder.exists():
+            pack_folder = pack_folder.parent / f"{pack_folder.name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        pack_folder.mkdir(parents=True, exist_ok=False)
+
+        source_zip_path = pack_folder / safe_file_name(parsed.get("source_name") or "job_pack.zip")
+        source_zip_path.write_bytes(parsed["source_bytes"])
+        with zipfile.ZipFile(BytesIO(parsed["source_bytes"]), "r") as zf:
+            for member in parsed["member_names"]:
+                target = _takeoff_safe_extract_target(pack_folder, member)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(zf.read(member))
+                extracted_paths[member] = target
+
+        labour_hours = _takeoff_float(summary.get("labour_hours"))
+        labour_rate = PLANNING_LABOUR_RATE
+        material_allowance = _takeoff_float(summary.get("material_allowance"))
+        access_allowance = _takeoff_float(summary.get("access_equipment_allowance"))
+        subcontractor_allowance = _takeoff_float(summary.get("subcontractor_allowance"))
+        sundries_allowance = _takeoff_float(summary.get("sundries_allowance"))
+        target_gp = _takeoff_float(summary.get("target_gp_percent"), 35.0)
+        contingency = _takeoff_float(summary.get("contingency_percent"))
+        gst_percent = _takeoff_float(summary.get("gst_percent"), 10.0)
+        pricing_method = _takeoff_text(summary.get("pricing_method"), "Target Gross Margin")
+        line_total = _takeoff_float(summary.get("line_pricing_total")) if use_imported_line_pricing else 0.0
+        totals = calculate_estimate_pricing(
+            line_total=line_total,
+            labour_hours=labour_hours,
+            labour_rate=labour_rate,
+            material_allowance=material_allowance,
+            access_equipment_allowance=access_allowance,
+            subcontractor_allowance=subcontractor_allowance,
+            sundries_allowance=sundries_allowance,
+            pricing_percent=target_gp,
+            contingency_percent=contingency,
+            gst_percent=gst_percent,
+            pricing_method=pricing_method,
+        )
+
+        if create_estimate:
+            estimate_no = _takeoff_text(summary.get("estimate_no")) or f"{job_no}-TO-{safe_revision}"
+            estimate_notes = "\n".join(filter(None, [
+                _takeoff_text(summary.get("notes")),
+                f"Imported from Job Pack {pack_id}, revision {revision}.",
+                f"Source folder: {pack_folder}",
+            ]))
+            estimate_id = _takeoff_insert_id(
+                cur,
+                """
+                INSERT INTO estimate_working_sheets
+                (job_id, estimate_no, estimate_date, revision, status, labour_hours, labour_rate,
+                 material_allowance, access_equipment_allowance, subcontractor_allowance, sundries_allowance,
+                 margin_percent, contingency_percent, gst_percent, pricing_method,
+                 total_ex_gst, gst_amount, total_inc_gst, created_at, updated_at, notes)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    job_id,
+                    estimate_no[:120],
+                    _takeoff_text(summary.get("estimate_date"), str(date.today()))[:30],
+                    revision,
+                    _takeoff_text(summary.get("estimate_status"), "Draft")[:30],
+                    labour_hours,
+                    labour_rate,
+                    material_allowance,
+                    access_allowance,
+                    subcontractor_allowance,
+                    sundries_allowance,
+                    target_gp,
+                    contingency,
+                    gst_percent,
+                    pricing_method,
+                    totals["total_ex_gst"],
+                    totals["gst_amount"],
+                    totals["total_inc_gst"],
+                    now,
+                    now,
+                    estimate_notes,
+                ),
+            )
+
+            insert_line_sql = """
+                INSERT INTO estimate_line_items
+                (estimate_id, section, item_description, qty, unit, unit_rate, line_total, notes,
+                 estimated_labour_hours, material_allowance, substrate, work_location,
+                 coating_system, colour_finish, source_pack)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """
+            for _, row in parsed["lines"].iterrows():
+                imported_rate = _takeoff_float(row.get("Unit Rate"))
+                imported_total = _takeoff_float(row.get("Line Total"))
+                notes = _takeoff_text(row.get("Notes"))
+                if not use_imported_line_pricing and (imported_rate or imported_total):
+                    notes = "\n".join(filter(None, [
+                        notes,
+                        f"Reference imported rate: ${imported_rate:,.2f}; reference line total: ${imported_total:,.2f}.",
+                    ]))
+                cur.execute(insert_line_sql, (
+                    estimate_id,
+                    _takeoff_text(row.get("Section"), "Take-off"),
+                    _takeoff_text(row.get("Item Description")),
+                    _takeoff_float(row.get("Qty")),
+                    _takeoff_text(row.get("Unit"), "item"),
+                    imported_rate if use_imported_line_pricing else 0.0,
+                    imported_total if use_imported_line_pricing else 0.0,
+                    notes,
+                    _takeoff_float(row.get("Estimated Labour Hours")),
+                    _takeoff_float(row.get("Material Allowance")),
+                    _takeoff_text(row.get("Substrate")),
+                    _takeoff_text(row.get("Location")),
+                    _takeoff_text(row.get("Coating System")),
+                    _takeoff_text(row.get("Colour / Finish")),
+                    f"{pack_id} rev {revision}",
+                ))
+                line_count += 1
+
+        if update_budget:
+            cur.execute("SELECT notes FROM job_budgets WHERE job_id = ?", (job_id,))
+            existing_budget = cur.fetchone()
+            existing_notes = _takeoff_text(existing_budget[0]) if existing_budget else ""
+            budget_note = "\n".join(filter(None, [
+                existing_notes,
+                f"Imported from Job Pack {pack_id}, revision {revision} on {now} by {imported_by}.",
+            ]))
+            cur.execute("""
+                INSERT INTO job_budgets
+                (job_id, quoted_labour_hours, quoted_labour_cost, quoted_materials,
+                 quoted_access_equipment, quoted_subcontractors, quoted_sundries,
+                 target_gp_percent, locked_at, locked_by, notes)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(job_id) DO UPDATE SET
+                    quoted_labour_hours = excluded.quoted_labour_hours,
+                    quoted_labour_cost = excluded.quoted_labour_cost,
+                    quoted_materials = excluded.quoted_materials,
+                    quoted_access_equipment = excluded.quoted_access_equipment,
+                    quoted_subcontractors = excluded.quoted_subcontractors,
+                    quoted_sundries = excluded.quoted_sundries,
+                    target_gp_percent = excluded.target_gp_percent,
+                    locked_at = excluded.locked_at,
+                    locked_by = excluded.locked_by,
+                    notes = excluded.notes
+            """, (
+                job_id,
+                labour_hours,
+                round(labour_hours * labour_rate, 2),
+                material_allowance,
+                access_allowance,
+                subcontractor_allowance,
+                sundries_allowance,
+                target_gp,
+                now,
+                imported_by,
+                budget_note,
+            ))
+
+        if import_materials:
+            material_rows = []
+            for _, row in parsed["materials"].iterrows():
+                material_rows.append({
+                    "code": _takeoff_text(row.get("Product Code / Ref"), "CUSTOM"),
+                    "name": _takeoff_text(row.get("Product / Material Name")),
+                    "supplier": _takeoff_text(row.get("Supplier")),
+                    "unit": _takeoff_text(row.get("Unit"), "each"),
+                    "unit_price": _takeoff_float(row.get("Unit Price Ex GST")),
+                    "colour": _takeoff_text(row.get("Colour / Finish")),
+                    "qty": _takeoff_float(row.get("Qty Required")),
+                    "location": _takeoff_text(row.get("Location")),
+                    "substrate": _takeoff_text(row.get("Substrate")),
+                    "system": _takeoff_text(row.get("Coating System")),
+                    "notes": _takeoff_text(row.get("Notes")),
+                })
+            for _, row in parsed["colours"].iterrows():
+                material_rows.append({
+                    "code": "COLOUR-SCHEDULE",
+                    "name": _takeoff_text(row.get("Product / Material Name"), "Colour schedule"),
+                    "supplier": "",
+                    "unit": "schedule",
+                    "unit_price": 0.0,
+                    "colour": _takeoff_text(row.get("Colour / Finish")),
+                    "qty": 0.0,
+                    "location": _takeoff_text(row.get("Location")),
+                    "substrate": _takeoff_text(row.get("Substrate")),
+                    "system": _takeoff_text(row.get("Coating System")),
+                    "notes": _takeoff_text(row.get("Notes")),
+                })
+
+            seen_materials = set()
+            for row in material_rows:
+                dedupe_key = tuple(str(row.get(key, "")).strip().casefold() for key in ["code", "name", "colour", "location", "substrate", "system"])
+                if dedupe_key in seen_materials:
+                    continue
+                seen_materials.add(dedupe_key)
+                if not row["name"]:
+                    continue
+                cur.execute(
+                    "SELECT id FROM products WHERE LOWER(TRIM(product_code)) = LOWER(TRIM(?)) LIMIT 1",
+                    (row["code"],),
+                )
+                product_match = cur.fetchone()
+                product_id = int(product_match[0]) if product_match else None
+                detail_notes = " | ".join(filter(None, [
+                    row["notes"],
+                    f"Location: {row['location']}" if row["location"] else "",
+                    f"Substrate: {row['substrate']}" if row["substrate"] else "",
+                    f"System: {row['system']}" if row["system"] else "",
+                    f"Job Pack: {pack_id} rev {revision}",
+                ]))
+                cur.execute("""
+                    INSERT INTO material_entries
+                    (job_id, product_id, qty_required, qty_received, date_ordered, supplier, notes,
+                     custom_product_code, custom_product_name, custom_supplier, custom_unit,
+                     custom_unit_price, custom_colour)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    job_id,
+                    product_id,
+                    row["qty"],
+                    0.0,
+                    "",
+                    row["supplier"],
+                    detail_notes,
+                    "" if product_id else row["code"],
+                    "" if product_id else row["name"],
+                    "" if product_id else row["supplier"],
+                    "" if product_id else row["unit"],
+                    None if product_id else row["unit_price"],
+                    row["colour"],
+                ))
+                material_count += 1
+
+        if attach_documents:
+            for document in parsed["documents"]:
+                file_path = extracted_paths.get(document["member"])
+                if not file_path or not Path(file_path).exists():
+                    continue
+                cur.execute("""
+                    INSERT INTO job_documents
+                    (job_id, document_type, file_name, file_path, created_at, notes, mime_type)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    job_id,
+                    document["document_type"],
+                    document["file_name"],
+                    str(file_path),
+                    now,
+                    f"Imported from Job Pack {pack_id}, revision {revision}.",
+                    document["mime_type"],
+                ))
+                document_count += 1
+
+        cur.execute("""
+            INSERT INTO takeoff_pack_imports
+            (job_id, pack_id, revision, source_file, imported_at, imported_by,
+             estimate_id, line_count, material_count, document_count, manifest_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            job_id,
+            pack_id,
+            revision,
+            parsed.get("source_name", ""),
+            now,
+            imported_by,
+            estimate_id,
+            line_count,
+            material_count,
+            document_count,
+            json.dumps(parsed.get("manifest") or {}, default=str, sort_keys=True),
+        ))
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        if pack_folder is not None:
+            shutil.rmtree(pack_folder, ignore_errors=True)
+        raise
+    finally:
+        conn.close()
+
+    record_audit_event(
+        "job_pack_imported",
+        "job",
+        job_id,
+        {
+            "pack_id": pack_id,
+            "revision": revision,
+            "job_action": job_action,
+            "builder_action": builder_action,
+            "estimate_id": estimate_id,
+            "line_count": line_count,
+            "material_count": material_count,
+            "document_count": document_count,
+        },
+    )
+    return {
+        "job_id": job_id,
+        "job_no": job_no,
+        "job_action": job_action,
+        "builder_action": builder_action,
+        "estimate_id": estimate_id,
+        "line_count": line_count,
+        "material_count": material_count,
+        "document_count": document_count,
+        "pack_folder": str(pack_folder),
+        "labour_hours": _takeoff_float(summary.get("labour_hours")),
+        "material_allowance": _takeoff_float(summary.get("material_allowance")),
+    }
+
+
+
+def takeoff_job_pack_import_page():
+    st.header("Import / Create Job Pack")
+    st.caption(
+        "Upload one Premier Brushworks Job Pack ZIP. JobHub can create a complete new job or update an existing job, "
+        "then import the builder/client, contract price, colours, take-off, budgets, plans, scope, specifications, "
+        "purchase orders and supporting documents. Nothing is saved until the final review is confirmed."
+    )
+
+    st.download_button(
+        "Download Job Pack Template",
+        data=build_takeoff_job_pack_template(),
+        file_name="PB_JobHub_Job_Pack_Template.zip",
+        mime="application/zip",
+        key="download_takeoff_job_pack_template",
+    )
+
+    uploaded_pack = st.file_uploader(
+        "Choose a Premier Brushworks Job Pack ZIP",
+        type=["zip"],
+        key="takeoff_job_pack_upload",
+    )
+    if uploaded_pack is None:
+        st.info("Choose a ZIP to preview the job details and documents before anything is saved.")
+        return
+
+    try:
+        parsed = parse_takeoff_job_pack(uploaded_pack)
+    except Exception as exc:
+        pb_error(f"Could not read this Job Pack: {exc}")
+        return
+
+    summary = parsed["summary"]
+    st.markdown("### Pack Preview")
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Pack ID", summary["pack_id"])
+    m2.metric("Revision", summary["revision"])
+    m3.metric("Take-off Lines", len(parsed["lines"]))
+    m4.metric("Colours / Materials", len(parsed["colours"]) + len(parsed["materials"]))
+    m5.metric("Documents", len(parsed["documents"]))
+
+    job_options = get_job_options()
+    action_options = ["Create a new job from this pack"]
+    if job_options:
+        action_options.append("Update an existing job")
+    default_action = 0
+    manifest_job_no = _takeoff_text(summary.get("job_no"))
+    manifest_match_label = None
+    if manifest_job_no and job_options:
+        for label in job_options:
+            if label.split(" - ", 1)[0].strip().casefold() == manifest_job_no.casefold():
+                manifest_match_label = label
+                default_action = 1
+                break
+
+    job_action_label = st.radio(
+        "What should JobHub do?",
+        action_options,
+        index=default_action if default_action < len(action_options) else 0,
+        horizontal=True,
+        key="job_pack_job_action",
+    )
+    create_new_job = job_action_label.startswith("Create")
+    job_mode = "create" if create_new_job else "update"
+    selected_job_id = None
+    selected_job_label = "New job"
+    current = None
+
+    if not create_new_job:
+        labels = list(job_options.keys())
+        default_index = labels.index(manifest_match_label) if manifest_match_label in labels else 0
+        selected_job_label = st.selectbox(
+            "Existing job to update",
+            labels,
+            index=default_index,
+            key="takeoff_pack_target_job",
+        )
+        selected_job_id = job_options[selected_job_label]
+        current_df = df_query("""
+            SELECT j.*, COALESCE(bc.type, '') AS builder_client_type,
+                   COALESCE(bc.name, '') AS builder_name,
+                   COALESCE(bc.contact_name, '') AS builder_contact_name,
+                   COALESCE(bc.phone, '') AS builder_phone,
+                   COALESCE(bc.email, '') AS builder_email,
+                   COALESCE(bc.address, '') AS builder_address,
+                   COALESCE(bc.qbcc, '') AS builder_qbcc,
+                   COALESCE(bc.abn, '') AS builder_abn,
+                   COALESCE(bc.terms, '') AS builder_terms,
+                   COALESCE(bc.notes, '') AS builder_notes
+            FROM jobs j
+            LEFT JOIN builders_clients bc ON bc.id = j.builder_client_id
+            WHERE j.id = ?
+        """, (selected_job_id,))
+        if current_df.empty:
+            pb_error("The selected job could not be loaded.")
+            return
+        current = current_df.iloc[0]
+
+        previous = df_query("""
+            SELECT pack_id AS 'Pack ID', revision AS 'Revision', source_file AS 'Source File',
+                   imported_at AS 'Imported At', imported_by AS 'Imported By',
+                   line_count AS 'Lines', material_count AS 'Materials', document_count AS 'Documents'
+            FROM takeoff_pack_imports
+            WHERE job_id = ?
+            ORDER BY id DESC
+        """, (selected_job_id,))
+        if not previous.empty:
+            with st.expander("Previous Job Pack Imports", expanded=False):
+                st.dataframe(previous, width="stretch", hide_index=True)
+
+    update_job_record = True
+    if not create_new_job:
+        update_job_record = st.checkbox(
+            "Update the existing job details from this pack",
+            value=True,
+            key="job_pack_update_existing_record",
+            help="Untick this to attach the pack data and documents without changing the job number, builder, price, address or other job details.",
+        )
+
+    def pack_or_existing(pack_key, existing_key=None, default=""):
+        pack_value = summary.get(pack_key)
+        if isinstance(pack_value, (int, float)):
+            if float(pack_value or 0) != 0:
+                return pack_value
+        elif _takeoff_text(pack_value):
+            return pack_value
+        if current is not None and existing_key:
+            return current.get(existing_key, default)
+        return default
+
+    proposed_job_no = (
+        _takeoff_text(summary.get("job_no")) or next_job_no()
+        if create_new_job
+        else _takeoff_text(current.get("job_no"))
+    )
+    if (
+        not create_new_job
+        and manifest_job_no
+        and manifest_job_no.casefold() != proposed_job_no.casefold()
+    ):
+        st.warning(
+            f"The pack job number is {manifest_job_no}, but you selected {proposed_job_no}. "
+            "The existing job number will be preserved unless you manually change it below."
+        )
+    proposed_job_name = _takeoff_text(pack_or_existing("job_name", "job_name"))
+    proposed_address = _takeoff_text(pack_or_existing("site_address", "site_address"))
+    proposed_builder = _takeoff_text(pack_or_existing("builder_client", "builder_name"))
+    proposed_contract = _takeoff_float(pack_or_existing("contract_value_ex_gst", "contract_value", 0))
+    proposed_status = _takeoff_text(pack_or_existing("status", "status", "Quoted" if create_new_job else "Not Started"))
+    proposed_leading_hand = _takeoff_text(pack_or_existing("leading_hand", "leading_hand"))
+    proposed_start = _takeoff_text(pack_or_existing("start_date", "start_date"))
+    proposed_end = _takeoff_text(pack_or_existing("end_date", "end_date"))
+    existing_notes = _takeoff_text(current.get("notes")) if current is not None else ""
+    pack_notes = _takeoff_text(summary.get("job_notes"))
+    proposed_notes = "\n".join(dict.fromkeys(filter(None, [existing_notes, pack_notes])))
+
+    st.markdown("### Job Details to Create / Update")
+    disabled_job_fields = (not create_new_job and not update_job_record)
+    c1, c2 = st.columns(2)
+    final_job_no = c1.text_input(
+        "Job Number",
+        value=proposed_job_no,
+        disabled=disabled_job_fields,
+        key="job_pack_final_job_no",
+    )
+    final_job_name = c2.text_input(
+        "Job Name",
+        value=proposed_job_name,
+        disabled=disabled_job_fields,
+        key="job_pack_final_job_name",
+    )
+    final_site_address = st.text_input(
+        "Site Address",
+        value=proposed_address,
+        disabled=disabled_job_fields,
+        key="job_pack_final_site_address",
+    )
+
+    c3, c4, c5 = st.columns(3)
+    status_options = ["Not Started", "Quoted", "Booked", "Active", "On Hold", "Completed", "Invoiced", "Paid", "Archived"]
+    if proposed_status and proposed_status not in status_options:
+        status_options.append(proposed_status)
+    final_status = c3.selectbox(
+        "Job Status",
+        status_options,
+        index=status_options.index(proposed_status) if proposed_status in status_options else 0,
+        disabled=disabled_job_fields,
+        key="job_pack_final_status",
+    )
+    employee_names = list(get_employee_options(active_only=False).keys())
+    leading_options = [""] + employee_names
+    if proposed_leading_hand and proposed_leading_hand not in leading_options:
+        leading_options.append(proposed_leading_hand)
+    final_leading_hand = c4.selectbox(
+        "Leading Hand",
+        leading_options,
+        index=leading_options.index(proposed_leading_hand) if proposed_leading_hand in leading_options else 0,
+        disabled=disabled_job_fields,
+        key="job_pack_final_leading_hand",
+    )
+    final_contract_value = c5.number_input(
+        "Contract Price Ex GST",
+        min_value=0.0,
+        step=100.0,
+        value=float(proposed_contract),
+        disabled=disabled_job_fields,
+        key="job_pack_final_contract_value",
+    )
+
+    c6, c7 = st.columns(2)
+    final_start_date = c6.text_input(
+        "Start Date (YYYY-MM-DD)",
+        value=proposed_start,
+        disabled=disabled_job_fields,
+        key="job_pack_final_start_date",
+    )
+    final_end_date = c7.text_input(
+        "End Date (YYYY-MM-DD)",
+        value=proposed_end,
+        disabled=disabled_job_fields,
+        key="job_pack_final_end_date",
+    )
+    final_job_notes = st.text_area(
+        "Job Notes / Scope Summary",
+        value=proposed_notes,
+        disabled=disabled_job_fields,
+        key="job_pack_final_job_notes",
+    )
+
+    st.markdown("#### Builder / Client")
+    final_builder_name = st.text_input(
+        "Builder / Client Name",
+        value=proposed_builder,
+        disabled=disabled_job_fields,
+        key="job_pack_final_builder_name",
+    )
+    with st.expander("Builder / client contact details", expanded=bool(summary.get("builder_email") or summary.get("builder_phone"))):
+        bc1, bc2 = st.columns(2)
+        final_builder_type = bc1.text_input(
+            "Type",
+            value=_takeoff_text(pack_or_existing("builder_client_type", "builder_client_type", "Builder / Client")),
+            disabled=disabled_job_fields,
+            key="job_pack_builder_type",
+        )
+        final_builder_contact = bc2.text_input(
+            "Contact Name",
+            value=_takeoff_text(pack_or_existing("builder_contact_name", "builder_contact_name")),
+            disabled=disabled_job_fields,
+            key="job_pack_builder_contact",
+        )
+        bc3, bc4 = st.columns(2)
+        final_builder_phone = bc3.text_input(
+            "Phone",
+            value=_takeoff_text(pack_or_existing("builder_phone", "builder_phone")),
+            disabled=disabled_job_fields,
+            key="job_pack_builder_phone",
+        )
+        final_builder_email = bc4.text_input(
+            "Email",
+            value=_takeoff_text(pack_or_existing("builder_email", "builder_email")),
+            disabled=disabled_job_fields,
+            key="job_pack_builder_email",
+        )
+        final_builder_address = st.text_input(
+            "Builder / Client Address",
+            value=_takeoff_text(pack_or_existing("builder_address", "builder_address")),
+            disabled=disabled_job_fields,
+            key="job_pack_builder_address",
+        )
+        bc5, bc6, bc7 = st.columns(3)
+        final_builder_qbcc = bc5.text_input(
+            "QBCC",
+            value=_takeoff_text(pack_or_existing("builder_qbcc", "builder_qbcc")),
+            disabled=disabled_job_fields,
+            key="job_pack_builder_qbcc",
+        )
+        final_builder_abn = bc6.text_input(
+            "ABN",
+            value=_takeoff_text(pack_or_existing("builder_abn", "builder_abn")),
+            disabled=disabled_job_fields,
+            key="job_pack_builder_abn",
+        )
+        final_builder_terms = bc7.text_input(
+            "Payment Terms",
+            value=_takeoff_text(pack_or_existing("builder_terms", "builder_terms")),
+            disabled=disabled_job_fields,
+            key="job_pack_builder_terms",
+        )
+        final_builder_notes = st.text_area(
+            "Builder / Client Notes",
+            value=_takeoff_text(pack_or_existing("builder_notes", "builder_notes")),
+            disabled=disabled_job_fields,
+            key="job_pack_builder_notes",
+        )
+
+    create_missing_builder = st.checkbox(
+        "Create this builder/client if it is not already in JobHub",
+        value=True,
+        disabled=disabled_job_fields,
+        key="job_pack_create_missing_builder",
+    )
+    fill_blank_builder_details = st.checkbox(
+        "Fill blank fields on an existing builder/client record from this pack",
+        value=True,
+        disabled=disabled_job_fields,
+        key="job_pack_fill_builder_blanks",
+        help="Existing non-blank contact details are not overwritten.",
+    )
+
+    st.markdown("#### Approved Paint Supplier / Brand")
+    supplier_options = get_product_supplier_options()
+    current_suppliers = parse_material_supplier_list(current.get("allowed_material_suppliers", "")) if current is not None else []
+    pack_suppliers = _takeoff_list(summary.get("allowed_material_suppliers"))
+    default_suppliers = pack_suppliers or current_suppliers
+    for supplier in default_suppliers:
+        if supplier not in supplier_options:
+            supplier_options.append(supplier)
+    if summary.get("restrict_material_products_supplied"):
+        default_restrict = bool(summary.get("restrict_material_products"))
+    elif current is not None:
+        default_restrict = bool(int(current.get("restrict_material_products", 0) or 0))
+    else:
+        default_restrict = bool(default_suppliers)
+    final_restrict_products = st.checkbox(
+        "Only show approved suppliers/brands for this job",
+        value=default_restrict,
+        disabled=disabled_job_fields,
+        key="job_pack_restrict_products",
+    )
+    final_allowed_suppliers = st.multiselect(
+        "Approved suppliers / brands",
+        supplier_options,
+        default=default_suppliers,
+        disabled=disabled_job_fields,
+        key="job_pack_allowed_suppliers",
+    )
+
+    job_details = {
+        "job_no": final_job_no,
+        "job_name": final_job_name,
+        "site_address": final_site_address,
+        "status": final_status,
+        "leading_hand": final_leading_hand,
+        "start_date": final_start_date,
+        "end_date": final_end_date,
+        "contract_value_ex_gst": final_contract_value,
+        "job_notes": final_job_notes,
+        "builder_client": final_builder_name,
+        "builder_client_type": final_builder_type,
+        "builder_contact_name": final_builder_contact,
+        "builder_phone": final_builder_phone,
+        "builder_email": final_builder_email,
+        "builder_address": final_builder_address,
+        "builder_qbcc": final_builder_qbcc,
+        "builder_abn": final_builder_abn,
+        "builder_terms": final_builder_terms,
+        "builder_notes": final_builder_notes,
+        "restrict_material_products": final_restrict_products,
+        "allowed_material_suppliers": final_allowed_suppliers,
+    }
+
+    preview_summary = pd.DataFrame([{
+        "Action": "Create New Job" if create_new_job else f"Update {selected_job_label}",
+        "Job Number": final_job_no,
+        "Job Name": final_job_name,
+        "Builder / Client": final_builder_name,
+        "Site Address": final_site_address,
+        "Contract Price Ex GST": f"${final_contract_value:,.2f}",
+        "Status": final_status,
+        "Leading Hand": final_leading_hand,
+        "Approved Brands": ", ".join(final_allowed_suppliers),
+        "Restrict Products": "Yes" if final_restrict_products else "No",
+    }])
+    st.dataframe(preview_summary, width="stretch", hide_index=True)
+
+    if not parsed["lines"].empty:
+        st.markdown("#### Take-off Lines and Item Labour Hours")
+        st.dataframe(parsed["lines"], width="stretch", hide_index=True)
+    if not parsed["labour"].empty:
+        with st.expander("Labour Budget File", expanded=False):
+            st.dataframe(parsed["labour"], width="stretch", hide_index=True)
+    if not parsed["materials"].empty:
+        st.markdown("#### Material Cost Allowances")
+        st.dataframe(parsed["materials"], width="stretch", hide_index=True)
+    if not parsed["colours"].empty:
+        st.markdown("#### Colour / Finish Schedule")
+        st.dataframe(parsed["colours"], width="stretch", hide_index=True)
+    if parsed["documents"]:
+        documents_preview = pd.DataFrame([{
+            "Document Type": item["document_type"],
+            "File Name": item["file_name"],
+            "Size MB": round(item["size_bytes"] / (1024 * 1024), 2),
+        } for item in parsed["documents"]])
+        st.markdown("#### Plans and Documents to Attach")
+        st.dataframe(documents_preview, width="stretch", hide_index=True)
+    else:
+        st.warning("No plans, specifications, colour schedule, purchase order or supporting documents were found in the ZIP.")
+
+    st.markdown("### Import Options")
+    has_estimate_data = (
+        not parsed["lines"].empty
+        or summary["labour_hours"] > 0
+        or summary["material_allowance"] > 0
+        or summary["access_equipment_allowance"] > 0
+        or summary["subcontractor_allowance"] > 0
+        or summary["sundries_allowance"] > 0
+    )
+    c8, c9 = st.columns(2)
+    create_estimate = c8.checkbox(
+        "Create draft Estimate Working Sheet",
+        value=has_estimate_data,
+        key="takeoff_import_create_estimate",
+    )
+    update_budget = c9.checkbox(
+        "Update / lock Job Budget from imported allowances",
+        value=has_estimate_data,
+        key="takeoff_import_budget",
+    )
+    c10, c11 = st.columns(2)
+    import_materials = c10.checkbox(
+        "Import Materials and Colour Schedule",
+        value=not parsed["materials"].empty or not parsed["colours"].empty,
+        key="takeoff_import_materials",
+    )
+    attach_documents = c11.checkbox(
+        "Attach supplied plans and documents to the Job Folder",
+        value=bool(parsed["documents"]),
+        key="takeoff_import_documents",
+    )
+    use_line_pricing = st.checkbox(
+        "Use imported line rates and line totals in estimate pricing",
+        value=False,
+        help=(
+            "Leave this off for normal internal Job Packs so labour and material allowances are not counted twice. "
+            "The imported reference rates are retained in line notes."
+        ),
+        key="takeoff_import_line_pricing",
+    )
+
+    validation_messages = []
+    if create_new_job and not _takeoff_text(final_job_no):
+        validation_messages.append("Enter a job number.")
+    if create_new_job and not _takeoff_text(final_job_name):
+        validation_messages.append("Enter a job name.")
+    if final_restrict_products and not final_allowed_suppliers:
+        validation_messages.append("Select at least one approved supplier/brand or turn off the product restriction.")
+    if validation_messages:
+        for message in validation_messages:
+            pb_error(message)
+
+    confirmation_payload = {
+        "job_mode": job_mode,
+        "job_id": selected_job_id,
+        "job_details": job_details,
+        "pack_id": summary["pack_id"],
+        "revision": summary["revision"],
+        "update_job_record": update_job_record,
+        "create_estimate": create_estimate,
+        "update_budget": update_budget,
+        "import_materials": import_materials,
+        "attach_documents": attach_documents,
+        "use_line_pricing": use_line_pricing,
+    }
+    accepted = review_acceptance_checkbox(
+        "job_pack_import_create_update",
+        confirmation_payload,
+        "I have reviewed the job, builder/client, price, colours, plans, pack revision and import options and approve this action.",
+    )
+
+    if st.button(
+        "Create / Update Job from Pack",
+        type="primary",
+        disabled=not accepted or bool(validation_messages),
+        key="takeoff_job_pack_import_button",
+    ):
+        try:
+            result = import_takeoff_job_pack(
+                selected_job_id,
+                parsed,
+                create_estimate=create_estimate,
+                update_budget=update_budget,
+                import_materials=import_materials,
+                attach_documents=attach_documents,
+                use_imported_line_pricing=use_line_pricing,
+                job_mode=job_mode,
+                job_details=job_details,
+                update_job_record=update_job_record,
+                create_missing_builder=create_missing_builder,
+                fill_blank_builder_details=fill_blank_builder_details,
+            )
+            action_text = {
+                "created": "created",
+                "updated": "updated",
+                "linked_without_job_changes": "linked without changing its job details",
+            }.get(result["job_action"], "updated")
+            pb_success(
+                f"Job {result['job_no']} was successfully {action_text}. "
+                f"Added {result['line_count']} take-off line(s), "
+                f"{result['material_count']} material/colour row(s), and "
+                f"{result['document_count']} plan/document(s)."
+            )
+            st.info(
+                f"Budget: {result['labour_hours']:.2f} estimated labour hours and "
+                f"${result['material_allowance']:,.2f} material allowance."
+            )
+            st.caption(f"Saved Job Pack folder: {result['pack_folder']}")
+        except Exception as exc:
+            pb_error(f"The Job Pack was not imported: {exc}")
+
+
+
+def estimate_totals(
+    estimate_id,
+    labour_hours,
+    labour_rate,
+    material_allowance,
+    access_equipment_allowance,
+    subcontractor_allowance,
+    sundries_allowance,
+    margin_percent,
+    contingency_percent,
+    gst_percent,
+    pricing_method="Target Gross Margin",
+):
+    line_df = df_query("SELECT COALESCE(SUM(line_total), 0) AS line_total FROM estimate_line_items WHERE estimate_id = ?", (estimate_id,))
+    line_total = float(line_df.iloc[0]["line_total"] or 0) if not line_df.empty else 0.0
+    return calculate_estimate_pricing(
+        line_total=line_total,
+        labour_hours=labour_hours,
+        labour_rate=PLANNING_LABOUR_RATE,
+        material_allowance=material_allowance,
+        access_equipment_allowance=access_equipment_allowance,
+        subcontractor_allowance=subcontractor_allowance,
+        sundries_allowance=sundries_allowance,
+        pricing_percent=margin_percent,
+        contingency_percent=contingency_percent,
+        gst_percent=gst_percent,
+        pricing_method=pricing_method,
+    )
+
+
+def recalc_estimate_totals(estimate_id):
+    est = df_query("SELECT * FROM estimate_working_sheets WHERE id = ?", (estimate_id,))
+    if est.empty:
+        return
+    r = est.iloc[0]
+    totals = estimate_totals(
+        estimate_id,
+        r["labour_hours"], r["labour_rate"], r["material_allowance"], r["access_equipment_allowance"],
+        r["subcontractor_allowance"], r["sundries_allowance"], r["margin_percent"],
+        r["contingency_percent"], r["gst_percent"],
+        r.get("pricing_method") or "Markup",
+    )
+    execute("""
+        UPDATE estimate_working_sheets
+        SET labour_rate = ?, total_ex_gst = ?, gst_amount = ?, total_inc_gst = ?, updated_at = ?
+        WHERE id = ?
+    """, (
+        PLANNING_LABOUR_RATE,
+        totals["total_ex_gst"],
+        totals["gst_amount"],
+        totals["total_inc_gst"],
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        estimate_id,
+    ))
+
+
+# PB_ESTIMATE_ARCHIVE_DELETE_V1
+def permanently_delete_estimate_working_sheet(estimate_id):
+    conn = connect()
+    try:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM estimate_line_items WHERE estimate_id = ?", (int(estimate_id),))
+        cur.execute("DELETE FROM estimate_working_sheets WHERE id = ?", (int(estimate_id),))
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+
+
+def render_estimate_archive_delete_controls(selected_estimate_id, current):
+    if not is_manager_or_admin():
+        return
+
+    is_archived = int(current.get("archived") or 0) == 1
+    estimate_no = str(current.get("estimate_no") or f"Estimate {selected_estimate_id}")
+    revision = str(current.get("revision") or "")
+    estimate_label = f"{estimate_no} {revision}".strip()
+
+    with st.expander("Manage Estimate Working Sheet", expanded=False):
+        st.caption("Admin and Manager access only.")
+
+        if is_archived:
+            st.warning("This estimate is archived and hidden from the normal estimate list.")
+            if st.button("Restore Estimate Working Sheet", key=f"restore_estimate_{selected_estimate_id}"):
+                execute("""
+                    UPDATE estimate_working_sheets
+                    SET archived = 0, archived_at = '', archived_by = ''
+                    WHERE id = ?
+                """, (selected_estimate_id,))
+                pb_success(f"{estimate_label} restored successfully.")
+                st.session_state.pop("estimate_select", None)
+                refresh()
+        else:
+            archive_confirmed = st.checkbox(
+                "Confirm archive of this estimate working sheet",
+                key=f"confirm_archive_estimate_{selected_estimate_id}",
+            )
+            if st.button("Archive Estimate Working Sheet", key=f"archive_estimate_{selected_estimate_id}"):
+                if not archive_confirmed:
+                    pb_error("Tick the archive confirmation box first.")
+                else:
+                    user = get_current_user() or {}
+                    archived_by = str(user.get("username") or user.get("employee_name") or current_role() or "manager")
+                    execute("""
+                        UPDATE estimate_working_sheets
+                        SET archived = 1, archived_at = ?, archived_by = ?
+                        WHERE id = ?
+                    """, (
+                        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        archived_by,
+                        selected_estimate_id,
+                    ))
+                    pb_success(f"{estimate_label} archived successfully.")
+                    st.session_state.pop("estimate_select", None)
+                    refresh()
+
+        st.divider()
+        pb_error("Permanent deletion cannot be undone. It removes the estimate and every linked line item.")
+        delete_text = st.text_input(
+            "Type DELETE to permanently remove this estimate",
+            key=f"delete_estimate_text_{selected_estimate_id}",
+        )
+        delete_confirmed = st.checkbox(
+            "I understand this estimate and its line items will be permanently deleted",
+            key=f"delete_estimate_checkbox_{selected_estimate_id}",
+        )
+        if st.button("Delete Estimate Permanently", key=f"delete_estimate_permanently_{selected_estimate_id}"):
+            if str(delete_text or "").strip().upper() != "DELETE":
+                pb_error("Type DELETE exactly before permanently deleting the estimate.")
+            elif not delete_confirmed:
+                pb_error("Tick the permanent deletion confirmation box first.")
+            else:
+                permanently_delete_estimate_working_sheet(selected_estimate_id)
+                st.session_state.pop("estimate_select", None)
+                pb_success(f"{estimate_label} deleted permanently.")
+                refresh()
+
+
+def estimate_working_sheet_page():
+    st.header("Estimate Working Sheet")
+    st.caption("Build a working estimate and link it directly to the job it relates to.")
+
+    job_options = get_job_options()
+    if not job_options:
+        st.info("Create a job first, then you can create an estimate working sheet.")
+        return
+
+    selected_job = st.selectbox("Select Job", list(job_options.keys()), key="estimate_job_select")
+    selected_job_id = job_options[selected_job]
+
+    job_details = df_query("""
+        SELECT j.job_no AS 'Job No', j.job_name AS 'Job Name', bc.name AS 'Builder / Client',
+               j.site_address AS 'Site Address', j.status AS 'Status', j.contract_value AS 'Contract Value'
+        FROM jobs j
+        LEFT JOIN builders_clients bc ON bc.id = j.builder_client_id
+        WHERE j.id = ?
+    """, (selected_job_id,))
+    if not job_details.empty:
+        st.dataframe(job_details, width="stretch", hide_index=True)
+
+    show_archived_estimates = st.checkbox(
+        "Show archived estimate working sheets",
+        value=False,
+        key=f"show_archived_estimates_{selected_job_id}",
+    )
+    archived_estimate_filter = "" if show_archived_estimates else "AND COALESCE(archived, 0) = 0"
+
+    estimates = df_query(f"""
+        SELECT id, estimate_no, revision, estimate_date, status,
+               total_ex_gst, total_inc_gst, COALESCE(archived, 0) AS archived
+        FROM estimate_working_sheets
+        WHERE job_id = ?
+        {archived_estimate_filter}
+        ORDER BY id DESC
+    """, (selected_job_id,))
+
+    with st.expander("Create New Estimate Working Sheet", expanded=estimates.empty):
+        estimate_count_df = df_query(
+            "SELECT COUNT(*) AS total FROM estimate_working_sheets WHERE job_id = ?",
+            (selected_job_id,),
+        )
+        next_rev = int(estimate_count_df.iloc[0]["total"] or 0) + 1 if not estimate_count_df.empty else 1
+        default_job_no = "EST"
+        if not job_details.empty:
+            default_job_no = str(job_details.iloc[0]["Job No"])
+        with st.form("create_estimate_form"):
+            col1, col2, col3 = st.columns(3)
+            estimate_no = col1.text_input("Estimate No", value=f"{default_job_no}-EST-{next_rev:02d}")
+            estimate_date = col2.text_input("Estimate Date", value=str(date.today()))
+            revision = col3.text_input("Revision", value=f"Rev {next_rev}")
+            notes = st.text_area("Initial Notes")
+            created = st.form_submit_button("Create Estimate Working Sheet")
+            if created:
+                now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                execute("""
+                    INSERT INTO estimate_working_sheets
+                    (job_id, estimate_no, estimate_date, revision, status, labour_hours, labour_rate,
+                     material_allowance, access_equipment_allowance, subcontractor_allowance, sundries_allowance,
+                     margin_percent, contingency_percent, gst_percent, pricing_method,
+                     total_ex_gst, gst_amount, total_inc_gst,
+                     created_at, updated_at, notes)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    selected_job_id, estimate_no, estimate_date, revision, "Draft",
+                    0, PLANNING_LABOUR_RATE, 0, 0, 0, 0, 35, 0, 10, "Target Gross Margin",
+                    0, 0, 0, now, now, notes,
+                ))
+                record_audit_event("estimate_created", "estimate", estimate_no, {"job_id": selected_job_id})
+                pb_success("Estimate working sheet created.")
+                refresh()
+
+    estimates = df_query(f"""
+        SELECT id, estimate_no, revision, estimate_date, status,
+               total_ex_gst, total_inc_gst, COALESCE(archived, 0) AS archived
+        FROM estimate_working_sheets
+        WHERE job_id = ?
+        {archived_estimate_filter}
+        ORDER BY id DESC
+    """, (selected_job_id,))
+
+    if estimates.empty:
+        st.info("No estimate working sheets saved for this job yet.")
+        return
+
+    estimate_options = {
+        (
+            f"{row['estimate_no']} - {row['revision']} - {row['status']} - "
+            f"${float(row['total_inc_gst'] or 0):,.2f} inc GST"
+            f"{' - ARCHIVED' if int(row.get('archived') or 0) == 1 else ''}"
+        ): int(row["id"])
+        for _, row in estimates.iterrows()
+    }
+    selected_estimate_label = st.selectbox("Select Estimate Working Sheet", list(estimate_options.keys()), key="estimate_select")
+    selected_estimate_id = estimate_options[selected_estimate_label]
+
+    current = df_query("SELECT * FROM estimate_working_sheets WHERE id = ?", (selected_estimate_id,))
+    if current.empty:
+        st.warning("Selected estimate could not be found.")
+        return
+    current = current.iloc[0]
+
+    render_estimate_archive_delete_controls(selected_estimate_id, current)
+
+    tab_summary, tab_lines, tab_view = st.tabs(["Summary / Pricing", "Line Items", "View / Export"])
+
+    with tab_summary:
+        with st.form("estimate_summary_form"):
+            col1, col2, col3, col4 = st.columns(4)
+            estimate_no = col1.text_input("Estimate No", value=str(current["estimate_no"] or ""))
+            estimate_date = col2.text_input("Estimate Date", value=str(current["estimate_date"] or str(date.today())))
+            revision = col3.text_input("Revision", value=str(current["revision"] or ""))
+            statuses = ["Draft", "Sent", "Approved", "Lost", "Superseded"]
+            current_status = str(current["status"] or "Draft")
+            status_index = statuses.index(current_status) if current_status in statuses else 0
+            status = col4.selectbox("Status", statuses, index=status_index)
+
+            col5, col6 = st.columns(2)
+            labour_hours = col5.number_input("Labour Hours", min_value=0.0, step=1.0, value=float(current["labour_hours"] or 0))
+            labour_rate = col6.number_input(
+                "Planning Labour Rate",
+                min_value=0.0,
+                step=5.0,
+                value=PLANNING_LABOUR_RATE,
+                disabled=True,
+                help="Estimates use the fixed planning rate. Actual job costs use each employee's recorded wage cost.",
+            )
+
+            col7, col8, col9, col10 = st.columns(4)
+            material_allowance = col7.number_input("Material Allowance", min_value=0.0, step=100.0, value=float(current["material_allowance"] or 0))
+            access_equipment_allowance = col8.number_input("Access / Equipment Allowance", min_value=0.0, step=100.0, value=float(current["access_equipment_allowance"] or 0))
+            subcontractor_allowance = col9.number_input("Subcontractor Allowance", min_value=0.0, step=100.0, value=float(current["subcontractor_allowance"] or 0))
+            sundries_allowance = col10.number_input("Sundries / Consumables", min_value=0.0, step=50.0, value=float(current["sundries_allowance"] or 0))
+
+            col11, col12, col13, col14 = st.columns(4)
+            pricing_methods = ["Target Gross Margin", "Markup"]
+            current_pricing_method = str(current.get("pricing_method") or "Markup")
+            if current_pricing_method not in pricing_methods:
+                current_pricing_method = "Markup"
+            pricing_method = col11.selectbox(
+                "Pricing Method",
+                pricing_methods,
+                index=pricing_methods.index(current_pricing_method),
+                help="Gross margin divides by 1 − margin rate. Markup adds a percentage to cost.",
+            )
+            pricing_label = (
+                "Target Gross Margin %"
+                if pricing_method == "Target Gross Margin"
+                else "Markup %"
+            )
+            margin_percent = col12.number_input(
+                pricing_label,
+                min_value=0.0,
+                max_value=99.0 if pricing_method == "Target Gross Margin" else 500.0,
+                step=1.0,
+                value=min(
+                    float(current["margin_percent"] or 0),
+                    99.0 if pricing_method == "Target Gross Margin" else 500.0,
+                ),
+            )
+            contingency_percent = col13.number_input("Contingency %", min_value=0.0, max_value=100.0, step=1.0, value=float(current["contingency_percent"] or 0))
+            gst_percent = col14.number_input("GST %", min_value=0.0, max_value=100.0, step=1.0, value=float(current["gst_percent"] or 10))
+            notes = st.text_area("Notes / Scope Notes", value=str(current["notes"] or ""))
+
+            preview = estimate_totals(
+                selected_estimate_id, labour_hours, labour_rate, material_allowance,
+                access_equipment_allowance, subcontractor_allowance, sundries_allowance,
+                margin_percent, contingency_percent, gst_percent, pricing_method,
+            )
+            st.markdown("### Pricing Preview")
+            c1, c2, c3, c4, c5 = st.columns(5)
+            c1.metric("Direct Cost", f"${preview['direct_total']:,.2f}")
+            c2.metric("Pricing Addition", f"${preview['margin_amount']:,.2f}")
+            c3.metric("Total Ex GST", f"${preview['total_ex_gst']:,.2f}")
+            c4.metric("Total Inc GST", f"${preview['total_inc_gst']:,.2f}")
+            c5.metric("Achieved Gross Margin", f"{preview['achieved_margin_percent']:,.2f}%")
+
+            saved = st.form_submit_button("Save Estimate Summary")
+            if saved:
+                execute("""
+                    UPDATE estimate_working_sheets
+                    SET estimate_no = ?, estimate_date = ?, revision = ?, status = ?, labour_hours = ?, labour_rate = ?,
+                        material_allowance = ?, access_equipment_allowance = ?, subcontractor_allowance = ?, sundries_allowance = ?,
+                        margin_percent = ?, contingency_percent = ?, gst_percent = ?, pricing_method = ?,
+                        total_ex_gst = ?, gst_amount = ?, total_inc_gst = ?,
+                        updated_at = ?, notes = ?
+                    WHERE id = ?
+                """, (estimate_no, estimate_date, revision, status, labour_hours, labour_rate, material_allowance,
+                      access_equipment_allowance, subcontractor_allowance, sundries_allowance, margin_percent, contingency_percent,
+                      gst_percent, pricing_method, preview["total_ex_gst"], preview["gst_amount"], preview["total_inc_gst"],
+                      datetime.now().strftime("%Y-%m-%d %H:%M:%S"), notes, selected_estimate_id))
+                record_audit_event(
+                    "estimate_pricing_updated",
+                    "estimate",
+                    selected_estimate_id,
+                    {
+                        "pricing_method": pricing_method,
+                        "pricing_percent": margin_percent,
+                        "total_ex_gst": preview["total_ex_gst"],
+                    },
+                )
+                pb_success("Estimate summary saved.")
+                refresh()
+
+    with tab_lines:
+        st.subheader("Estimate Line Items")
+        render_estimate_line_item_csv_importer(selected_estimate_id)
+        render_rate_library_estimate_adder(selected_estimate_id)
+
+        st.markdown("#### Add Manual Line Item")
+        with st.form("add_estimate_line_form"):
+            col1, col2 = st.columns(2)
+            section = col1.selectbox("Section", ["Preliminaries", "Labour", "Materials", "Access / Equipment", "Subcontractor", "Variations", "Other"])
+            item_description = col2.text_input("Item Description")
+            col3, col4, col5 = st.columns(3)
+            qty = col3.number_input("Qty", min_value=0.0, step=1.0)
+            unit = col4.text_input("Unit", value="item")
+            unit_rate = col5.number_input("Unit Rate", min_value=0.0, step=10.0)
+            line_notes = st.text_area("Line Notes")
+            added = st.form_submit_button("Add Line Item")
+            if added and item_description:
+                line_total = round(float(qty or 0) * float(unit_rate or 0), 2)
+                execute("""
+                    INSERT INTO estimate_line_items
+                    (estimate_id, section, item_description, qty, unit, unit_rate, line_total, notes)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (selected_estimate_id, section, item_description, qty, unit, unit_rate, line_total, line_notes))
+                recalc_estimate_totals(selected_estimate_id)
+                pb_success("Line item added.")
+                refresh()
+
+        lines_df = df_query("""
+            SELECT id, section AS 'Section', item_description AS 'Description', qty AS 'Qty', unit AS 'Unit',
+                   estimated_labour_hours AS 'Estimated Labour Hours', material_allowance AS 'Material Allowance',
+                   substrate AS 'Substrate', work_location AS 'Location', coating_system AS 'Coating System',
+                   colour_finish AS 'Colour / Finish', unit_rate AS 'Unit Rate', line_total AS 'Line Total',
+                   source_pack AS 'Source Pack', notes AS 'Notes'
+            FROM estimate_line_items
+            WHERE estimate_id = ?
+            ORDER BY id
+        """, (selected_estimate_id,))
+        if lines_df.empty:
+            st.info("No line items added yet.")
+        else:
+            st.dataframe(lines_df.drop(columns=["id"]), width="stretch", hide_index=True)
+            st.metric("Line Item Total", f"${float(lines_df['Line Total'].fillna(0).sum()):,.2f}")
+            delete_options = {f"{r['Section']} - {r['Description']} - ${float(r['Line Total'] or 0):,.2f}": int(r["id"]) for _, r in lines_df.iterrows()}
+            selected_delete = st.selectbox("Line item to delete", list(delete_options.keys()))
+            confirm = st.checkbox("Confirm delete selected line item")
+            if st.button("Delete Selected Line Item"):
+                if not confirm:
+                    pb_error("Tick the confirm box first.")
+                else:
+                    execute("DELETE FROM estimate_line_items WHERE id = ?", (delete_options[selected_delete],))
+                    recalc_estimate_totals(selected_estimate_id)
+                    pb_success("Line item deleted.")
+                    refresh()
+
+    with tab_view:
+        summary_df = df_query("""
+            SELECT e.estimate_no AS 'Estimate No', e.revision AS 'Revision', e.estimate_date AS 'Date', e.status AS 'Status',
+                   j.job_no AS 'Job No', j.job_name AS 'Job Name', e.labour_hours AS 'Labour Hours', e.labour_rate AS 'Labour Rate',
+                   e.material_allowance AS 'Material Allowance', e.access_equipment_allowance AS 'Access / Equipment',
+                   e.subcontractor_allowance AS 'Subcontractor', e.sundries_allowance AS 'Sundries', e.margin_percent AS 'Margin %',
+                   e.contingency_percent AS 'Contingency %', e.total_ex_gst AS 'Total Ex GST', e.gst_amount AS 'GST',
+                   e.total_inc_gst AS 'Total Inc GST', e.notes AS 'Notes'
+            FROM estimate_working_sheets e
+            JOIN jobs j ON j.id = e.job_id
+            WHERE e.id = ?
+        """, (selected_estimate_id,))
+        lines_export = df_query("""
+            SELECT section AS 'Section', item_description AS 'Description', qty AS 'Qty', unit AS 'Unit',
+                   estimated_labour_hours AS 'Estimated Labour Hours', material_allowance AS 'Material Allowance',
+                   substrate AS 'Substrate', work_location AS 'Location', coating_system AS 'Coating System',
+                   colour_finish AS 'Colour / Finish', unit_rate AS 'Unit Rate', line_total AS 'Line Total',
+                   source_pack AS 'Source Pack', notes AS 'Notes'
+            FROM estimate_line_items
+            WHERE estimate_id = ?
+            ORDER BY id
+        """, (selected_estimate_id,))
+        st.markdown("### Estimate Summary")
+        st.dataframe(summary_df, width="stretch", hide_index=True)
+        st.markdown("### Estimate Lines")
+        st.dataframe(lines_export, width="stretch", hide_index=True)
+
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            summary_df.to_excel(writer, index=False, sheet_name="Estimate Summary")
+            lines_export.to_excel(writer, index=False, sheet_name="Estimate Lines")
+            for ws in writer.book.worksheets:
+                for column_cells in ws.columns:
+                    max_len = 0
+                    col_letter = column_cells[0].column_letter
+                    for cell in column_cells:
+                        value = "" if cell.value is None else str(cell.value)
+                        max_len = max(max_len, len(value))
+                    ws.column_dimensions[col_letter].width = min(max(max_len + 2, 12), 45)
+        output.seek(0)
+        clean_name = str(summary_df.iloc[0]["Estimate No"] if not summary_df.empty else "estimate_working_sheet").replace("/", "-").replace("\\", "-")
+        st.download_button(
+            "Download Estimate Working Sheet Excel",
+            data=output.getvalue(),
+            file_name=f"{clean_name}_Estimate_Working_Sheet.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+
+
+# =============================
+# PRODUCT LIST RESTORE
+# =============================
+def restore_product_list():
+    products = [('PB-H00001', 'Coverplus Interior L/S White', 'Haymes', '', 168.0, ''), ('PB-H00002', 'Elite Ceiling Toned White, 15L', 'Haymes', '15L', 90.0, ''), ('PB-H00003', 'Elite Ceiling White, 15L', 'Haymes', '15L', 90.0, ''), ('PB-H00004', 'Elite Interior Low Sheen White', 'Haymes', '', 118.0, ''), ('PB-H00005', 'Elite Interior Matt White, 15L', 'Haymes', '15L', 125.0, ''), ('PB-H00006', 'Elite Acrylic Sealer Undercoat', 'Haymes', '', 105.36, ''), ('PB-H00007', 'Elite Quick Dry Primer Undercoat', 'Haymes', '', 123.55, ''), ('PB-H00008', 'Expressions Low Sheen DKT, 4L', 'Haymes', '4L', 74.13, ''), ('PB-H00009', 'Expressions Low Sheen EDT, 4L', 'Haymes', '4L', 74.13, ''), ('PB-H00010', 'Expressions Low Sheen UDT, 4L', 'Haymes', '4L', 74.13, ''), ('PB-H00011', 'Expressions Low Sheen White', 'Haymes', '', 107.48, ''), ('PB-H00012', 'Expressions Low Sheen White', 'Haymes', '', 145.0, ''), ('PB-H00013', 'Expressions Low Sheen White, 4L', 'Haymes', '4L', 67.26, ''), ('PB-H00014', 'Solashield Low Sheen DKT, 10L', 'Haymes', '10L', 115.0, ''), ('PB-H00015', 'Solashield Low Sheen DKT, 15L', 'Haymes', '15L', 160.0, ''), ('PB-H00016', 'Solashield Low Sheen DKT, 4L', 'Haymes', '4L', 73.55, ''), ('PB-H00017', 'Solashield Low Sheen EDT, 10L', 'Haymes', '10L', 115.0, ''), ('PB-H00018', 'Solashield Low Sheen EDT, 15L', 'Haymes', '15L', 160.0, ''), ('PB-H00019', 'Solashield Low Sheen EDT, 4L', 'Haymes', '4L', 73.55, ''), ('PB-H00020', 'Solashield Low Sheen UDT, 10L', 'Haymes', '10L', 115.0, ''), ('PB-H00021', 'Solashield Low Sheen UDT, 15L', 'Haymes', '15L', 160.0, ''), ('PB-H00022', 'Solashield Low Sheen UDT, 4L', 'Haymes', '4L', 73.55, ''), ('PB-H00023', 'Solashield Low Sheen White, 10L', 'Haymes', '10L', 107.42, ''), ('PB-H00024', 'Solashield Low Sheen White, 15L', 'Haymes', '15L', 148.0, ''), ('PB-H00025', 'Solashield Low Sheen White, 4L', 'Haymes', '4L', 67.4, ''), ('PB-H00026', 'R/Tex Roll On Coarse, 15L', 'Haymes', '15L', 175.0, ''), ('PB-H00027', 'Solashield Satin DKT, 15L', 'Haymes', '15L', 160.0, ''), ('PB-H00028', 'Solashield Satin EDT, 15L', 'Haymes', '15L', 160.0, ''), ('PB-H00029', 'Solashield Satin UDT, 15L', 'Haymes', '15L', 160.0, ''), ('PB-H00030', 'Solashield Satin White, 10L', 'Haymes', '10L', 115.0, ''), ('PB-H00031', 'Solashield Satin White, 15L', 'Haymes', '15L', 148.0, ''), ('PB-H00032', 'Ultra Premium Primer Sealer', 'Haymes', '', 167.46, ''), ('PB-H00033', 'Acrylic Sealer Undercoat', 'Haymes', '', 120.0, ''), ('PB-H00034', 'Ultratrim High Gloss White', 'Haymes', '', 130.0, ''), ('PB-H00035', 'Ultratrim Semi Gloss White', 'Haymes', '', 130.0, ''), ('PB-H00036', 'Woodcare Aqualac Floor Satin', 'Haymes', '', 250.44, '')]
+
+    restored = 0
+    for row in products:
+        execute("""
+            INSERT INTO products
+            (product_code, product_name, supplier, unit, price_ex_gst, notes)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(product_code) DO UPDATE SET
+                product_name = excluded.product_name,
+                supplier = excluded.supplier,
+                unit = excluded.unit,
+                price_ex_gst = excluded.price_ex_gst,
+                notes = excluded.notes
+        """, row)
+        restored += 1
+
+    return restored
+
+
+def product_count():
+    try:
+        df = df_query("SELECT COUNT(*) AS 'count' FROM products")
+        if not df.empty:
+            return int(df.iloc[0]["count"])
+    except Exception:
+        pass
+    return 0
+
+
+def restore_taubmans_product_list():
+    products = [('T ALL WEATHER L/S W15L 18', '187200/15L', '30001918', '15L', 145.0), ('T ALL WEATHER L/S A15L 18', '187204/15L', '30001923', '15L', 150.0), ('T ALL WEATHER L/S N15L 18', '187205/15L', '30001928', '15L', 150.0), ('T ALL WEATHER L/S D15L 18', '187209/15L', '30001942', '15L', 150.0), ('T ALL WEATHER L/S W10L 18', '187200/10L', '30001917', '10L', 120.0), ('T ALL WEATHER L/S A10L 18', '187204/10L', '30001922', '10L', 122.5), ('T ALL WEATHER L/S N10L 18', '187205/10L', '30001927', '10L', 122.5), ('T ALL WEATHER L/S D10L 18', '187209/10L', '30001941', '10L', 122.5), ('T ALL WEATHER L/S W4L 18', '187200/4L', '30001921', '4L', 57.5), ('T ALL WEATHER L/S A4L 18', '187204/4L', '30001926', '4L', 60.0), ('T ALL WEATHER L/S N4L 18', '187205/4L', '30001931', '4L', 60.0), ('T ALL WEATHER L/S D4L 18', '187209/4L', '30001944', '4L', 60.0), ('T ALL WEATHER MATT W15L 18', '187100/15L', '30001906', '15L', 145.0), ('T ALL WEATHER MATT A15L 18', '187104/15L', '30001910', '15L', 150.0), ('T ALL WEATHER MATT N15L 18', '187105/15L', '30001914', '15L', 150.0), ('T ALL WEATHER S/G W15L 18', '187400/15L', '30001950', '15L', 145.0), ('T ALL WEATHER S/G D15L 19', '187409/15L', '30001963', '15L', 150.0), ('T ALL WEATHER S/G A10L 19', '187404/10L', '30001954', '10L', 122.5), ('T ENDURE INT L/S W15L 18', '124200/15L', '30001368', '15L', 145.0), ('T ENDURE INT L/S W10L 18', '124200/10L', '30001367', '10L', 120.0), ('T ENDURE INT L/S W4L 18', '124200/4L', '30001371', '4L', 57.5), ('T ENDURE INT MATT W15L 18', '124100/15L', '30001356', '15L', 160.0), ('T ENDURE INT MATT W10L 18', '124100/10L', '30001355', '10L', 135.0), ('T ENDURE INT MATT W4L 18', '124100/4L', '30001359', '4L', 60.0), ('T PURE PERF L/S W15L 21', '279250/15L', '30008591', '15L', 145.0), ('T PURE PERF MATT W15L 21', '279150/15L', '30008588', '15L', 145.0), ('T PURE PERF CEILING W15L 21', '279050/15L', '30008581', '15L', 120.0), ('T Ceiling Premium W15L 22', '128000/15L', '30010919', '15L', 120.0), ('T PURE PERF WB ENAMEL GLOSS W10L 21', '279950/10L', '30008738', '10L', 122.0), ('T PURE PERF WB ENAMEL S/G W10L 21', '279850/10L', '30008596', '10L', 122.0), ('T PURE PERF WB ENAMEL GLOSS W4L 21', '279950/4L', '30008739', '4L', 65.0), ('T PURE PERF WB ENAMEL S/G W4L 21', '279850/4L', '30008737', '4L', 65.0), ('T WB ENAMEL GLOSS W10L 19', '121610/10L', '30001326', '10L', 125.0), ('T WB ENAMEL S/G W10L 19', '121410/10L', '30001294', '10L', 125.0), ('T WB ENAMEL GLOSS W4L 19', '121610/4L', '30001329', '4L', 65.0), ('T WB ENAMEL S/G W4L 19', '121410/4L', '30001297', '4L', 65.0), ('T ULTIMATE ENAMEL S/G W10L 19', '132810/10L', '30001427', '10L', 170.0), ('T ULTIMATE ENAMEL GLOSS W10L 19', '132910/10L', '30001441', '10L', 170.0), ('T ULTIMATE ENAMEL S/G W4L 19', '132810/4L', '30001429', '4L', 80.0), ('T ULTIMATE ENAMEL GLOSS W4L 19', '132910/4L', '30001443', '4L', 80.0), ('T TRADE EDGE UC W15L 16', '259500/15L', '30002265', '15L', 90.0), ('T ULTRA PREP W15L 09', '288500/15L', '30002664', '15L', 110.0), ('T TRADEX ULTRAPREP 15L', '274520/15L', '30002331', '15L', 105.0), ('T PURE PERF PREP W15L 21', '279550/15L', '30008595', '15L', 120.0), ('T TRADEX CEILING W15L 15', '274000/15L', '30002310', '15L', 100.0), ('T PRO INT L/S W15L 20', '278200/15L', '30002370', '15L', 120.0), ('T PRO EXT L/S W15L 20', '278710/15L', '30002387', '15L', 135.0), ('T PRO ENAMEL W/B GLOSS W10L20', '278600/10L', '30002381', '10L', 120.0), ('T PRO ENAMEL W/B S/G W10L 20', '278400/10L', '30002376', '10L', 120.0), ('T PRO CEILING W15L 20', '278000/15L', '30002364', '15L', 105.0), ('T 3IN1 W15L 15', '108100/15L', '30000957', '15L', 130.0), ('T 3IN1 W4L 15', '108100/4L', '30000960', '4L', 60.0), ('J PRO DECK OIL NAT 10L 17', '481200/10L', '30004332', '10L', 170.0), ('J PRO DECK OIL NAT 4L 17', '481200/4L', '30004334', '4L', 75.0), ('J PRO EXT CLEAR GLOSS 4L 17', '481121/4L', '30004331', '4L', 80.0), ('J PRO EXT CLEAR SATIN 4L 17', '481120/4L', '30004328', '4L', 80.0), ('T ARMAWALL A/SHIELD W15L 09', '310400/15L', '30003018', '15L', 150.0), ('T ARMAWALL PRIMER 15L 09', '315500/15L', '30003036', '15L', 135.0), ('T ARMAWALL SEALER BOND C10L', '315705/10L', '30003039', '10L', 135.0), ('T ARMAWALL SEALER BOND W10L', '315700/10L', '30003038', '10L', 135.0)]
+
+    restored = 0
+    for product_name, product_code, taubmans_sku, unit, price_ex_gst in products:
+        execute("""
+            INSERT INTO products
+            (product_code, product_name, supplier, unit, price_ex_gst, notes)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(product_code) DO UPDATE SET
+                product_name = excluded.product_name,
+                supplier = excluded.supplier,
+                unit = excluded.unit,
+                price_ex_gst = excluded.price_ex_gst,
+                notes = excluded.notes
+        """, (
+            product_code,
+            product_name,
+            "Taubmans",
+            unit,
+            float(price_ex_gst),
+            f"Taubmans SKU: {taubmans_sku} | Source: uploaded Premier Brushworks Taubmans price list"
+        ))
+        restored += 1
+
+    return restored
+
+
+def taubmans_product_count():
+    try:
+        df = df_query("SELECT COUNT(*) AS 'count' FROM products WHERE supplier = 'Taubmans'")
+        if not df.empty:
+            return int(df.iloc[0]["count"])
+    except Exception:
+        pass
+    return 0
+
+
+
+
+
+def restore_haymes_and_taubmans_product_lists():
+    products = [('PB-H00001', 'Coverplus Interior L/S White', 'Haymes', '', 168.0, ''), ('PB-H00002', 'Elite Ceiling Toned White, 15L', 'Haymes', '15L', 90.0, ''), ('PB-H00003', 'Elite Ceiling White, 15L', 'Haymes', '15L', 90.0, ''), ('PB-H00004', 'Elite Interior Low Sheen White', 'Haymes', '', 118.0, ''), ('PB-H00005', 'Elite Interior Matt White, 15L', 'Haymes', '15L', 125.0, ''), ('PB-H00006', 'Elite Acrylic Sealer Undercoat', 'Haymes', '', 105.36, ''), ('PB-H00007', 'Elite Quick Dry Primer Undercoat', 'Haymes', '', 123.55, ''), ('PB-H00008', 'Expressions Low Sheen DKT, 4L', 'Haymes', '4L', 74.13, ''), ('PB-H00009', 'Expressions Low Sheen EDT, 4L', 'Haymes', '4L', 74.13, ''), ('PB-H00010', 'Expressions Low Sheen UDT, 4L', 'Haymes', '4L', 74.13, ''), ('PB-H00011', 'Expressions Low Sheen White', 'Haymes', '', 107.48, ''), ('PB-H00012', 'Expressions Low Sheen White', 'Haymes', '', 145.0, ''), ('PB-H00013', 'Expressions Low Sheen White, 4L', 'Haymes', '4L', 67.26, ''), ('PB-H00014', 'Solashield Low Sheen DKT, 10L', 'Haymes', '10L', 115.0, ''), ('PB-H00015', 'Solashield Low Sheen DKT, 15L', 'Haymes', '15L', 160.0, ''), ('PB-H00016', 'Solashield Low Sheen DKT, 4L', 'Haymes', '4L', 73.55, ''), ('PB-H00017', 'Solashield Low Sheen EDT, 10L', 'Haymes', '10L', 115.0, ''), ('PB-H00018', 'Solashield Low Sheen EDT, 15L', 'Haymes', '15L', 160.0, ''), ('PB-H00019', 'Solashield Low Sheen EDT, 4L', 'Haymes', '4L', 73.55, ''), ('PB-H00020', 'Solashield Low Sheen UDT, 10L', 'Haymes', '10L', 115.0, ''), ('PB-H00021', 'Solashield Low Sheen UDT, 15L', 'Haymes', '15L', 160.0, ''), ('PB-H00022', 'Solashield Low Sheen UDT, 4L', 'Haymes', '4L', 73.55, ''), ('PB-H00023', 'Solashield Low Sheen White, 10L', 'Haymes', '10L', 107.42, ''), ('PB-H00024', 'Solashield Low Sheen White, 15L', 'Haymes', '15L', 148.0, ''), ('PB-H00025', 'Solashield Low Sheen White, 4L', 'Haymes', '4L', 67.4, ''), ('PB-H00026', 'R/Tex Roll On Coarse, 15L', 'Haymes', '15L', 175.0, ''), ('PB-H00027', 'Solashield Satin DKT, 15L', 'Haymes', '15L', 160.0, ''), ('PB-H00028', 'Solashield Satin EDT, 15L', 'Haymes', '15L', 160.0, ''), ('PB-H00029', 'Solashield Satin UDT, 15L', 'Haymes', '15L', 160.0, ''), ('PB-H00030', 'Solashield Satin White, 10L', 'Haymes', '10L', 115.0, ''), ('PB-H00031', 'Solashield Satin White, 15L', 'Haymes', '15L', 148.0, ''), ('PB-H00032', 'Ultra Premium Primer Sealer', 'Haymes', '', 167.46, ''), ('PB-H00033', 'Acrylic Sealer Undercoat', 'Haymes', '', 120.0, ''), ('PB-H00034', 'Ultratrim High Gloss White', 'Haymes', '', 130.0, ''), ('PB-H00035', 'Ultratrim Semi Gloss White', 'Haymes', '', 130.0, ''), ('PB-H00036', 'Woodcare Aqualac Floor Satin', 'Haymes', '', 250.44, ''), ('187200/15L', 'T ALL WEATHER L/S W15L 18', 'Taubmans', '15L', 145.0, 'Taubmans SKU: 30001918 | Source: uploaded Premier Brushworks Taubmans price list'), ('187204/15L', 'T ALL WEATHER L/S A15L 18', 'Taubmans', '15L', 150.0, 'Taubmans SKU: 30001923 | Source: uploaded Premier Brushworks Taubmans price list'), ('187205/15L', 'T ALL WEATHER L/S N15L 18', 'Taubmans', '15L', 150.0, 'Taubmans SKU: 30001928 | Source: uploaded Premier Brushworks Taubmans price list'), ('187209/15L', 'T ALL WEATHER L/S D15L 18', 'Taubmans', '15L', 150.0, 'Taubmans SKU: 30001942 | Source: uploaded Premier Brushworks Taubmans price list'), ('187200/10L', 'T ALL WEATHER L/S W10L 18', 'Taubmans', '10L', 120.0, 'Taubmans SKU: 30001917 | Source: uploaded Premier Brushworks Taubmans price list'), ('187204/10L', 'T ALL WEATHER L/S A10L 18', 'Taubmans', '10L', 122.5, 'Taubmans SKU: 30001922 | Source: uploaded Premier Brushworks Taubmans price list'), ('187205/10L', 'T ALL WEATHER L/S N10L 18', 'Taubmans', '10L', 122.5, 'Taubmans SKU: 30001927 | Source: uploaded Premier Brushworks Taubmans price list'), ('187209/10L', 'T ALL WEATHER L/S D10L 18', 'Taubmans', '10L', 122.5, 'Taubmans SKU: 30001941 | Source: uploaded Premier Brushworks Taubmans price list'), ('187200/4L', 'T ALL WEATHER L/S W4L 18', 'Taubmans', '4L', 57.5, 'Taubmans SKU: 30001921 | Source: uploaded Premier Brushworks Taubmans price list'), ('187204/4L', 'T ALL WEATHER L/S A4L 18', 'Taubmans', '4L', 60.0, 'Taubmans SKU: 30001926 | Source: uploaded Premier Brushworks Taubmans price list'), ('187205/4L', 'T ALL WEATHER L/S N4L 18', 'Taubmans', '4L', 60.0, 'Taubmans SKU: 30001931 | Source: uploaded Premier Brushworks Taubmans price list'), ('187209/4L', 'T ALL WEATHER L/S D4L 18', 'Taubmans', '4L', 60.0, 'Taubmans SKU: 30001944 | Source: uploaded Premier Brushworks Taubmans price list'), ('187100/15L', 'T ALL WEATHER MATT W15L 18', 'Taubmans', '15L', 145.0, 'Taubmans SKU: 30001906 | Source: uploaded Premier Brushworks Taubmans price list'), ('187104/15L', 'T ALL WEATHER MATT A15L 18', 'Taubmans', '15L', 150.0, 'Taubmans SKU: 30001910 | Source: uploaded Premier Brushworks Taubmans price list'), ('187105/15L', 'T ALL WEATHER MATT N15L 18', 'Taubmans', '15L', 150.0, 'Taubmans SKU: 30001914 | Source: uploaded Premier Brushworks Taubmans price list'), ('187400/15L', 'T ALL WEATHER S/G W15L 18', 'Taubmans', '15L', 145.0, 'Taubmans SKU: 30001950 | Source: uploaded Premier Brushworks Taubmans price list'), ('187409/15L', 'T ALL WEATHER S/G D15L 19', 'Taubmans', '15L', 150.0, 'Taubmans SKU: 30001963 | Source: uploaded Premier Brushworks Taubmans price list'), ('187404/10L', 'T ALL WEATHER S/G A10L 19', 'Taubmans', '10L', 122.5, 'Taubmans SKU: 30001954 | Source: uploaded Premier Brushworks Taubmans price list'), ('124200/15L', 'T ENDURE INT L/S W15L 18', 'Taubmans', '15L', 145.0, 'Taubmans SKU: 30001368 | Source: uploaded Premier Brushworks Taubmans price list'), ('124200/10L', 'T ENDURE INT L/S W10L 18', 'Taubmans', '10L', 120.0, 'Taubmans SKU: 30001367 | Source: uploaded Premier Brushworks Taubmans price list'), ('124200/4L', 'T ENDURE INT L/S W4L 18', 'Taubmans', '4L', 57.5, 'Taubmans SKU: 30001371 | Source: uploaded Premier Brushworks Taubmans price list'), ('124100/15L', 'T ENDURE INT MATT W15L 18', 'Taubmans', '15L', 160.0, 'Taubmans SKU: 30001356 | Source: uploaded Premier Brushworks Taubmans price list'), ('124100/10L', 'T ENDURE INT MATT W10L 18', 'Taubmans', '10L', 135.0, 'Taubmans SKU: 30001355 | Source: uploaded Premier Brushworks Taubmans price list'), ('124100/4L', 'T ENDURE INT MATT W4L 18', 'Taubmans', '4L', 60.0, 'Taubmans SKU: 30001359 | Source: uploaded Premier Brushworks Taubmans price list'), ('279250/15L', 'T PURE PERF L/S W15L 21', 'Taubmans', '15L', 145.0, 'Taubmans SKU: 30008591 | Source: uploaded Premier Brushworks Taubmans price list'), ('279150/15L', 'T PURE PERF MATT W15L 21', 'Taubmans', '15L', 145.0, 'Taubmans SKU: 30008588 | Source: uploaded Premier Brushworks Taubmans price list'), ('279050/15L', 'T PURE PERF CEILING W15L 21', 'Taubmans', '15L', 120.0, 'Taubmans SKU: 30008581 | Source: uploaded Premier Brushworks Taubmans price list'), ('128000/15L', 'T Ceiling Premium W15L 22', 'Taubmans', '15L', 120.0, 'Taubmans SKU: 30010919 | Source: uploaded Premier Brushworks Taubmans price list'), ('279950/10L', 'T PURE PERF WB ENAMEL GLOSS W10L 21', 'Taubmans', '10L', 122.0, 'Taubmans SKU: 30008738 | Source: uploaded Premier Brushworks Taubmans price list'), ('279850/10L', 'T PURE PERF WB ENAMEL S/G W10L 21', 'Taubmans', '10L', 122.0, 'Taubmans SKU: 30008596 | Source: uploaded Premier Brushworks Taubmans price list'), ('279950/4L', 'T PURE PERF WB ENAMEL GLOSS W4L 21', 'Taubmans', '4L', 65.0, 'Taubmans SKU: 30008739 | Source: uploaded Premier Brushworks Taubmans price list'), ('279850/4L', 'T PURE PERF WB ENAMEL S/G W4L 21', 'Taubmans', '4L', 65.0, 'Taubmans SKU: 30008737 | Source: uploaded Premier Brushworks Taubmans price list'), ('121610/10L', 'T WB ENAMEL GLOSS W10L 19', 'Taubmans', '10L', 125.0, 'Taubmans SKU: 30001326 | Source: uploaded Premier Brushworks Taubmans price list'), ('121410/10L', 'T WB ENAMEL S/G W10L 19', 'Taubmans', '10L', 125.0, 'Taubmans SKU: 30001294 | Source: uploaded Premier Brushworks Taubmans price list'), ('121610/4L', 'T WB ENAMEL GLOSS W4L 19', 'Taubmans', '4L', 65.0, 'Taubmans SKU: 30001329 | Source: uploaded Premier Brushworks Taubmans price list'), ('121410/4L', 'T WB ENAMEL S/G W4L 19', 'Taubmans', '4L', 65.0, 'Taubmans SKU: 30001297 | Source: uploaded Premier Brushworks Taubmans price list'), ('132810/10L', 'T ULTIMATE ENAMEL S/G W10L 19', 'Taubmans', '10L', 170.0, 'Taubmans SKU: 30001427 | Source: uploaded Premier Brushworks Taubmans price list'), ('132910/10L', 'T ULTIMATE ENAMEL GLOSS W10L 19', 'Taubmans', '10L', 170.0, 'Taubmans SKU: 30001441 | Source: uploaded Premier Brushworks Taubmans price list'), ('132810/4L', 'T ULTIMATE ENAMEL S/G W4L 19', 'Taubmans', '4L', 80.0, 'Taubmans SKU: 30001429 | Source: uploaded Premier Brushworks Taubmans price list'), ('132910/4L', 'T ULTIMATE ENAMEL GLOSS W4L 19', 'Taubmans', '4L', 80.0, 'Taubmans SKU: 30001443 | Source: uploaded Premier Brushworks Taubmans price list'), ('259500/15L', 'T TRADE EDGE UC W15L 16', 'Taubmans', '15L', 90.0, 'Taubmans SKU: 30002265 | Source: uploaded Premier Brushworks Taubmans price list'), ('288500/15L', 'T ULTRA PREP W15L 09', 'Taubmans', '15L', 110.0, 'Taubmans SKU: 30002664 | Source: uploaded Premier Brushworks Taubmans price list'), ('274520/15L', 'T TRADEX ULTRAPREP 15L', 'Taubmans', '15L', 105.0, 'Taubmans SKU: 30002331 | Source: uploaded Premier Brushworks Taubmans price list'), ('279550/15L', 'T PURE PERF PREP W15L 21', 'Taubmans', '15L', 120.0, 'Taubmans SKU: 30008595 | Source: uploaded Premier Brushworks Taubmans price list'), ('274000/15L', 'T TRADEX CEILING W15L 15', 'Taubmans', '15L', 100.0, 'Taubmans SKU: 30002310 | Source: uploaded Premier Brushworks Taubmans price list'), ('278200/15L', 'T PRO INT L/S W15L 20', 'Taubmans', '15L', 120.0, 'Taubmans SKU: 30002370 | Source: uploaded Premier Brushworks Taubmans price list'), ('278710/15L', 'T PRO EXT L/S W15L 20', 'Taubmans', '15L', 135.0, 'Taubmans SKU: 30002387 | Source: uploaded Premier Brushworks Taubmans price list'), ('278600/10L', 'T PRO ENAMEL W/B GLOSS W10L20', 'Taubmans', '10L', 120.0, 'Taubmans SKU: 30002381 | Source: uploaded Premier Brushworks Taubmans price list'), ('278400/10L', 'T PRO ENAMEL W/B S/G W10L 20', 'Taubmans', '10L', 120.0, 'Taubmans SKU: 30002376 | Source: uploaded Premier Brushworks Taubmans price list'), ('278000/15L', 'T PRO CEILING W15L 20', 'Taubmans', '15L', 105.0, 'Taubmans SKU: 30002364 | Source: uploaded Premier Brushworks Taubmans price list'), ('108100/15L', 'T 3IN1 W15L 15', 'Taubmans', '15L', 130.0, 'Taubmans SKU: 30000957 | Source: uploaded Premier Brushworks Taubmans price list'), ('108100/4L', 'T 3IN1 W4L 15', 'Taubmans', '4L', 60.0, 'Taubmans SKU: 30000960 | Source: uploaded Premier Brushworks Taubmans price list'), ('481200/10L', 'J PRO DECK OIL NAT 10L 17', 'Taubmans', '10L', 170.0, 'Taubmans SKU: 30004332 | Source: uploaded Premier Brushworks Taubmans price list'), ('481200/4L', 'J PRO DECK OIL NAT 4L 17', 'Taubmans', '4L', 75.0, 'Taubmans SKU: 30004334 | Source: uploaded Premier Brushworks Taubmans price list'), ('481121/4L', 'J PRO EXT CLEAR GLOSS 4L 17', 'Taubmans', '4L', 80.0, 'Taubmans SKU: 30004331 | Source: uploaded Premier Brushworks Taubmans price list'), ('481120/4L', 'J PRO EXT CLEAR SATIN 4L 17', 'Taubmans', '4L', 80.0, 'Taubmans SKU: 30004328 | Source: uploaded Premier Brushworks Taubmans price list'), ('310400/15L', 'T ARMAWALL A/SHIELD W15L 09', 'Taubmans', '15L', 150.0, 'Taubmans SKU: 30003018 | Source: uploaded Premier Brushworks Taubmans price list'), ('315500/15L', 'T ARMAWALL PRIMER 15L 09', 'Taubmans', '15L', 135.0, 'Taubmans SKU: 30003036 | Source: uploaded Premier Brushworks Taubmans price list'), ('315705/10L', 'T ARMAWALL SEALER BOND C10L', 'Taubmans', '10L', 135.0, 'Taubmans SKU: 30003039 | Source: uploaded Premier Brushworks Taubmans price list'), ('315700/10L', 'T ARMAWALL SEALER BOND W10L', 'Taubmans', '10L', 135.0, 'Taubmans SKU: 30003038 | Source: uploaded Premier Brushworks Taubmans price list')]
+
+    restored = 0
+    for product_code, product_name, supplier, unit, price_ex_gst, notes in products:
+        execute("""
+            INSERT INTO products
+            (product_code, product_name, supplier, unit, price_ex_gst, notes)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(product_code) DO UPDATE SET
+                product_name = excluded.product_name,
+                supplier = excluded.supplier,
+                unit = excluded.unit,
+                price_ex_gst = excluded.price_ex_gst,
+                notes = excluded.notes
+        """, (
+            product_code,
+            product_name,
+            supplier,
+            unit,
+            float(price_ex_gst or 0),
+            notes
+        ))
+        restored += 1
+
+    return restored
+
+
+def haymes_product_count():
+    try:
+        df = df_query("SELECT COUNT(*) AS 'count' FROM products WHERE supplier = 'Haymes'")
+        if not df.empty:
+            return int(df.iloc[0]["count"])
+    except Exception:
+        pass
+    return 0
+
+
+def combined_paint_product_count():
+    try:
+        df = df_query("SELECT COUNT(*) AS 'count' FROM products WHERE supplier IN ('Haymes', 'Taubmans')")
+        if not df.empty:
+            return int(df.iloc[0]["count"])
+    except Exception:
+        pass
+    return 0
+
+
+def restore_builders_clients_and_employees():
+    """Historical embedded master data was removed for privacy and safety."""
+    raise RuntimeError(
+        "Embedded customer and employee data has been removed. "
+        "Use the protected CSV import workflow instead."
+    )
+
+
+
+def builders_clients_count():
+    try:
+        df = df_query("SELECT COUNT(*) AS 'count' FROM builders_clients")
+        if not df.empty:
+            return int(df.iloc[0]["count"])
+    except Exception:
+        pass
+    return 0
+
+
+def employees_count():
+    try:
+        df = df_query("SELECT COUNT(*) AS 'count' FROM employees")
+        if not df.empty:
+            return int(df.iloc[0]["count"])
+    except Exception:
+        pass
+    return 0
+
+
+
+
+# =============================
+# USER ACCOUNT DUPLICATE CLEANUP
+# =============================
+def normalise_username_value(username):
+    return str(username or "").strip().lower()
+
+
+def user_duplicate_summary():
+    try:
+        users = df_query("""
+            SELECT u.id,
+                   u.username,
+                   u.role,
+                   u.employee_id,
+                   u.active,
+                   COALESCE(e.name, '') AS employee_name,
+                   u.notes
+            FROM app_users u
+            LEFT JOIN employees e ON e.id = u.employee_id
+            ORDER BY LOWER(TRIM(u.username)), u.id
+        """)
+    except Exception:
+        return pd.DataFrame()
+
+    if users.empty:
+        return users
+
+    duplicate_ids = set()
+
+    # Same username duplicates, ignoring case/spaces.
+    username_groups = {}
+    for _, row in users.iterrows():
+        key = normalise_username_value(row["username"])
+        if key:
+            username_groups.setdefault(key, []).append(int(row["id"]))
+
+    for ids in username_groups.values():
+        if len(ids) > 1:
+            duplicate_ids.update(ids)
+
+    # Same linked employee duplicates.
+    employee_groups = {}
+    for _, row in users.iterrows():
+        try:
+            emp_id = int(row["employee_id"]) if row["employee_id"] not in [None, "", "None"] and pd.notna(row["employee_id"]) else None
+        except Exception:
+            emp_id = None
+        if emp_id:
+            employee_groups.setdefault(emp_id, []).append(int(row["id"]))
+
+    for ids in employee_groups.values():
+        if len(ids) > 1:
+            duplicate_ids.update(ids)
+
+    if not duplicate_ids:
+        return pd.DataFrame()
+
+    return users[users["id"].isin(duplicate_ids)].copy()
+
+
+def clean_duplicate_user_accounts():
+    """
+    Deletes duplicate login rows.
+    Keeps:
+    - the currently logged-in user if they are in a duplicate group
+    - otherwise an active admin where possible
+    - otherwise an active account
+    - otherwise the lowest id
+    """
+    users = df_query("""
+        SELECT u.id,
+               u.username,
+               u.role,
+               u.employee_id,
+               u.active,
+               COALESCE(e.name, '') AS employee_name,
+               u.notes
+        FROM app_users u
+        LEFT JOIN employees e ON e.id = u.employee_id
+        ORDER BY u.id
+    """)
+
+    if users.empty:
+        return {"deleted": 0, "kept": 0, "skipped": 0}
+
+    current_user = get_current_user() or {}
+    current_user_id = int(current_user.get("id", -1))
+
+    ids_to_delete = set()
+    keep_ids = set()
+
+    def choose_keep(group_df):
+        # Keep current logged-in user if present.
+        current_rows = group_df[group_df["id"].astype(int) == current_user_id]
+        if not current_rows.empty:
+            return int(current_rows.iloc[0]["id"])
+
+        # Prefer active admin.
+        active_admin = group_df[
+            (group_df["role"].astype(str) == "admin") &
+            (group_df["active"].fillna(0).astype(int) == 1)
+        ]
+        if not active_admin.empty:
+            return int(active_admin.sort_values("id").iloc[0]["id"])
+
+        # Prefer active account.
+        active = group_df[group_df["active"].fillna(0).astype(int) == 1]
+        if not active.empty:
+            return int(active.sort_values("id").iloc[0]["id"])
+
+        # Otherwise keep first row.
+        return int(group_df.sort_values("id").iloc[0]["id"])
+
+    # Duplicates by username.
+    users["_username_key"] = users["username"].apply(normalise_username_value)
+    for key, group in users.groupby("_username_key"):
+        if key and len(group) > 1:
+            keep_id = choose_keep(group)
+            keep_ids.add(keep_id)
+            for uid in group["id"].astype(int).tolist():
+                if uid != keep_id:
+                    ids_to_delete.add(uid)
+
+    # Duplicates by linked employee.
+    linked = users[users["employee_id"].notna()].copy()
+    if not linked.empty:
+        for emp_id, group in linked.groupby("employee_id"):
+            if emp_id not in [None, "", "None"] and len(group) > 1:
+                keep_id = choose_keep(group)
+                keep_ids.add(keep_id)
+                for uid in group["id"].astype(int).tolist():
+                    if uid != keep_id:
+                        ids_to_delete.add(uid)
+
+    # Never delete current user.
+    ids_to_delete.discard(current_user_id)
+
+    # Never delete last active admin.
+    admin_count_df = df_query("""
+        SELECT COUNT(*) AS 'count'
+        FROM app_users
+        WHERE role = 'admin' AND active = 1
+    """)
+    active_admin_count = int(admin_count_df.iloc[0]["count"]) if not admin_count_df.empty else 0
+
+    skipped = 0
+    deleted = 0
+
+    for uid in sorted(ids_to_delete):
+        row_df = users[users["id"].astype(int) == int(uid)]
+        if row_df.empty:
+            continue
+
+        row = row_df.iloc[0]
+        is_active_admin = str(row["role"]) == "admin" and int(row["active"] or 0) == 1
+
+        if is_active_admin and active_admin_count <= 1:
+            skipped += 1
+            continue
+
+        try:
+            execute("DELETE FROM app_users WHERE id = ?", (int(uid),))
+            deleted += 1
+            if is_active_admin:
+                active_admin_count -= 1
+        except Exception:
+            # If deletion fails, safely disable it instead.
+            try:
+                execute("UPDATE app_users SET active = 0, notes = COALESCE(notes, '') || ' | duplicate disabled' WHERE id = ?", (int(uid),))
+                skipped += 1
+            except Exception:
+                skipped += 1
+
+    # Add unique indexes after cleanup so they cannot double up again.
+    try:
+        execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_app_users_username_lower_unique ON app_users (LOWER(TRIM(username)))")
+    except Exception:
+        pass
+
+    try:
+        execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_app_users_employee_unique ON app_users (employee_id) WHERE employee_id IS NOT NULL")
+    except Exception:
+        pass
+
+    return {"deleted": deleted, "kept": len(keep_ids), "skipped": skipped}
+
+
+
+# =============================
+# USER LINK SAFETY
+# =============================
+def employee_linked_to_other_user(employee_id, selected_user_id):
+    """
+    Returns the other user account already linked to an employee, if any.
+    Prevents app_users.employee_id unique constraint crashes.
+    """
+    if employee_id in [None, "", "None"]:
+        return pd.DataFrame()
+
+    try:
+        return df_query("""
+            SELECT id, username, role, active
+            FROM app_users
+            WHERE employee_id = ? AND id <> ?
+            LIMIT 1
+        """, (employee_id, selected_user_id))
+    except Exception:
+        return pd.DataFrame()
+
+
+def safe_update_user_account(selected_user_id, username, role, employee_id, active, notes):
+    """
+    Safely updates app_users and prevents duplicate employee login links.
+    Returns (success, message).
+    """
+    username = str(username or "").strip()
+
+    if not username:
+        return False, "Username cannot be blank."
+
+    # Check username duplicate, ignoring case/spaces.
+    existing_username = df_query("""
+        SELECT id, username
+        FROM app_users
+        WHERE LOWER(TRIM(username)) = LOWER(TRIM(?)) AND id <> ?
+        LIMIT 1
+    """, (username, selected_user_id))
+
+    if not existing_username.empty:
+        return False, f"Username '{username}' is already used by another account."
+
+    # Check employee duplicate link.
+    other_link = employee_linked_to_other_user(employee_id, selected_user_id)
+    if not other_link.empty:
+        other = other_link.iloc[0]
+        return False, (
+            f"This employee is already linked to user account '{other['username']}'. "
+            "Delete, disable, or unlink that duplicate account first, or choose 'No Employee Link'."
+        )
+
+    try:
+        execute("""
+            UPDATE app_users
+            SET username = ?, role = ?, employee_id = ?, active = ?, notes = ?
+            WHERE id = ?
+        """, (username, role, employee_id, active, notes, selected_user_id))
+        return True, "User updated."
+    except Exception as e:
+        message = str(e)
+        if "idx_app_users_employee_unique" in message or "app_users_employee_id" in message or "duplicate key" in message:
+            return False, (
+                "That employee is already linked to another user account. "
+                "Open User Access and use Clean Duplicate User Accounts, or select No Employee Link."
+            )
+        return False, f"User update failed: {message}"
+
+
+
+# =============================
+# BULK USER ACCOUNT DELETE
+# =============================
+# =============================
+# BULK EMPLOYEE DELETE / DEACTIVATE
+# =============================
+
+# =============================
+# LINKED USER / EMPLOYEE DELETE
+# =============================
+def employee_has_job_history(employee_id):
+    """
+    Employees with wage/timesheet history should not be fully deleted because
+    deleting them can break job costing history. They are marked Inactive instead.
+    """
+    linked = []
+
+    for table, column, label in [
+        ("wage_entries", "employee_id", "wage records"),
+        ("timesheet_entries", "employee_id", "timesheets"),
+    ]:
+        try:
+            if has_related_records(table, column, employee_id):
+                linked.append(label)
+        except Exception:
+            pass
+
+    return linked
+
+
+def delete_employee_and_linked_users(employee_id):
+    """
+    Employee delete button behaviour:
+    - Deletes linked app user login account(s).
+    - Deletes the employee record only if there is no wage/timesheet history.
+    - If history exists, the employee is marked Inactive.
+    - Protects current logged-in user and last active admin.
+    """
+    result = {
+        "deleted_users": 0,
+        "deleted_employee": 0,
+        "deactivated_employee": 0,
+        "skipped": 0,
+        "messages": [],
+    }
+
+    try:
+        employee_id = int(employee_id)
+    except Exception:
+        result["skipped"] += 1
+        result["messages"].append("Invalid employee id.")
+        return result
+
+    emp_df = df_query("SELECT id, name, status FROM employees WHERE id = ? LIMIT 1", (employee_id,))
+    if emp_df.empty:
+        result["skipped"] += 1
+        result["messages"].append(f"Employee id {employee_id} not found.")
+        return result
+
+    employee_name = str(emp_df.iloc[0]["name"])
+
+    current_user = get_current_user() or {}
+    try:
+        current_user_id = int(current_user.get("id", -1))
+    except Exception:
+        current_user_id = -1
+
+    linked_users = df_query("""
+        SELECT id, username, role, active
+        FROM app_users
+        WHERE employee_id = ?
+        ORDER BY id
+    """, (employee_id,))
+
+    for _, user_row in linked_users.iterrows():
+        user_id = int(user_row["id"])
+        username = str(user_row["username"])
+        role = str(user_row["role"])
+        active = int(user_row["active"] or 0)
+
+        if user_id == current_user_id:
+            result["skipped"] += 1
+            result["messages"].append(f"Skipped linked user {username}: cannot delete the account currently logged in.")
+            continue
+
+        if role == "admin" and active == 1:
+            admin_count_df = df_query("SELECT COUNT(*) AS 'count' FROM app_users WHERE role = 'admin' AND active = 1")
+            active_admin_count = int(admin_count_df.iloc[0]["count"]) if not admin_count_df.empty else 0
+            if active_admin_count <= 1:
+                result["skipped"] += 1
+                result["messages"].append(f"Skipped linked user {username}: cannot delete the last active admin account.")
+                continue
+
+        try:
+            execute("DELETE FROM app_users WHERE id = ?", (user_id,))
+            result["deleted_users"] += 1
+            result["messages"].append(f"Deleted linked user login: {username}")
+        except Exception as e:
+            result["skipped"] += 1
+            result["messages"].append(f"Could not delete linked user {username}: {e}")
+
+    # If a protected linked user remains, do not fully delete the employee.
+    remaining_users = df_query("SELECT COUNT(*) AS 'count' FROM app_users WHERE employee_id = ?", (employee_id,))
+    remaining_user_count = int(remaining_users.iloc[0]["count"]) if not remaining_users.empty else 0
+
+    if remaining_user_count > 0:
+        try:
+            execute("UPDATE employees SET status = 'Inactive' WHERE id = ?", (employee_id,))
+            result["deactivated_employee"] += 1
+            result["messages"].append(f"Marked {employee_name} inactive because a protected linked user account remains.")
+        except Exception as e:
+            result["skipped"] += 1
+            result["messages"].append(f"Could not deactivate {employee_name}: {e}")
+        return result
+
+    history = employee_has_job_history(employee_id)
+
+    if history:
+        try:
+            execute("UPDATE employees SET status = 'Inactive' WHERE id = ?", (employee_id,))
+            result["deactivated_employee"] += 1
+            result["messages"].append(
+                f"Deleted linked login(s), but marked {employee_name} inactive because they have: " + ", ".join(history)
+            )
+        except Exception as e:
+            result["skipped"] += 1
+            result["messages"].append(f"Could not deactivate {employee_name}: {e}")
+    else:
+        try:
+            execute("DELETE FROM employees WHERE id = ?", (employee_id,))
+            result["deleted_employee"] += 1
+            result["messages"].append(f"Deleted employee record: {employee_name}")
+        except Exception as e:
+            try:
+                execute("UPDATE employees SET status = 'Inactive' WHERE id = ?", (employee_id,))
+                result["deactivated_employee"] += 1
+                result["messages"].append(f"Could not fully delete {employee_name}, so marked inactive instead. Reason: {e}")
+            except Exception:
+                result["skipped"] += 1
+                result["messages"].append(f"Could not delete or deactivate {employee_name}: {e}")
+
+    return result
+
+
+def delete_user_and_linked_employee(user_id):
+    """
+    User delete button behaviour:
+    - Deletes the app user login account.
+    - If linked to an employee, also deletes that employee if there is no wage/timesheet history.
+    - If history exists, the employee is marked Inactive.
+    - Protects current logged-in user and last active admin.
+    """
+    result = {
+        "deleted_users": 0,
+        "deleted_employee": 0,
+        "deactivated_employee": 0,
+        "skipped": 0,
+        "messages": [],
+    }
+
+    try:
+        user_id = int(user_id)
+    except Exception:
+        result["skipped"] += 1
+        result["messages"].append("Invalid user id.")
+        return result
+
+    user_df = df_query("""
+        SELECT id, username, role, employee_id, active
+        FROM app_users
+        WHERE id = ?
+        LIMIT 1
+    """, (user_id,))
+
+    if user_df.empty:
+        result["skipped"] += 1
+        result["messages"].append(f"User id {user_id} not found.")
+        return result
+
+    user_row = user_df.iloc[0]
+    username = str(user_row["username"])
+    role = str(user_row["role"])
+    active = int(user_row["active"] or 0)
+
+    try:
+        employee_id = int(user_row["employee_id"]) if user_row["employee_id"] not in [None, "", "None"] and pd.notna(user_row["employee_id"]) else None
+    except Exception:
+        employee_id = None
+
+    current_user = get_current_user() or {}
+    try:
+        current_user_id = int(current_user.get("id", -1))
+    except Exception:
+        current_user_id = -1
+
+    if user_id == current_user_id:
+        result["skipped"] += 1
+        result["messages"].append(f"Skipped {username}: cannot delete the account currently logged in.")
+        return result
+
+    if role == "admin" and active == 1:
+        admin_count_df = df_query("SELECT COUNT(*) AS 'count' FROM app_users WHERE role = 'admin' AND active = 1")
+        active_admin_count = int(admin_count_df.iloc[0]["count"]) if not admin_count_df.empty else 0
+        if active_admin_count <= 1:
+            result["skipped"] += 1
+            result["messages"].append(f"Skipped {username}: cannot delete the last active admin account.")
+            return result
+
+    try:
+        execute("DELETE FROM app_users WHERE id = ?", (user_id,))
+        result["deleted_users"] += 1
+        result["messages"].append(f"Deleted user login: {username}")
+    except Exception as e:
+        result["skipped"] += 1
+        result["messages"].append(f"Could not delete user {username}: {e}")
+        return result
+
+    if not employee_id:
+        return result
+
+    emp_df = df_query("SELECT id, name, status FROM employees WHERE id = ? LIMIT 1", (employee_id,))
+    if emp_df.empty:
+        result["messages"].append("Linked employee record was not found.")
+        return result
+
+    employee_name = str(emp_df.iloc[0]["name"])
+
+    # If other user accounts still link to this employee, do not fully delete employee.
+    other_users = df_query("SELECT COUNT(*) AS 'count' FROM app_users WHERE employee_id = ?", (employee_id,))
+    other_user_count = int(other_users.iloc[0]["count"]) if not other_users.empty else 0
+
+    if other_user_count > 0:
+        try:
+            execute("UPDATE employees SET status = 'Inactive' WHERE id = ?", (employee_id,))
+            result["deactivated_employee"] += 1
+            result["messages"].append(f"Marked linked employee {employee_name} inactive because another login still references them.")
+        except Exception as e:
+            result["skipped"] += 1
+            result["messages"].append(f"Could not deactivate linked employee {employee_name}: {e}")
+        return result
+
+    history = employee_has_job_history(employee_id)
+
+    if history:
+        try:
+            execute("UPDATE employees SET status = 'Inactive' WHERE id = ?", (employee_id,))
+            result["deactivated_employee"] += 1
+            result["messages"].append(f"Marked linked employee {employee_name} inactive because they have: " + ", ".join(history))
+        except Exception as e:
+            result["skipped"] += 1
+            result["messages"].append(f"Could not deactivate linked employee {employee_name}: {e}")
+    else:
+        try:
+            execute("DELETE FROM employees WHERE id = ?", (employee_id,))
+            result["deleted_employee"] += 1
+            result["messages"].append(f"Deleted linked employee record: {employee_name}")
+        except Exception as e:
+            try:
+                execute("UPDATE employees SET status = 'Inactive' WHERE id = ?", (employee_id,))
+                result["deactivated_employee"] += 1
+                result["messages"].append(f"Could not fully delete linked employee {employee_name}, so marked inactive instead. Reason: {e}")
+            except Exception:
+                result["skipped"] += 1
+                result["messages"].append(f"Could not delete or deactivate linked employee {employee_name}: {e}")
+
+    return result
+
+
+def delete_or_deactivate_selected_employees(employee_ids):
+    """
+    Bulk employee delete:
+    Deletes linked user login(s) too. If the employee has job history,
+    the login is deleted and the employee is marked Inactive.
+    """
+    combined = {
+        "deleted_users": 0,
+        "deleted_employee": 0,
+        "deactivated_employee": 0,
+        "skipped": 0,
+        "messages": [],
+    }
+
+    if not employee_ids:
+        combined["messages"].append("No employees selected.")
+        return combined
+
+    for emp_id in employee_ids:
+        result = delete_employee_and_linked_users(emp_id)
+        for key in ["deleted_users", "deleted_employee", "deactivated_employee", "skipped"]:
+            combined[key] += result.get(key, 0)
+        combined["messages"].extend(result.get("messages", []))
+
+    return combined
+
+
+def delete_selected_user_accounts(user_ids):
+    """
+    Bulk user delete:
+    Deletes selected user login(s) and linked employee record(s) where safe.
+    If linked employee has job history, employee is marked Inactive.
+    """
+    combined = {
+        "deleted_users": 0,
+        "deleted_employee": 0,
+        "deactivated_employee": 0,
+        "skipped": 0,
+        "messages": [],
+    }
+
+    if not user_ids:
+        combined["messages"].append("No user accounts selected.")
+        return combined
+
+    for uid in user_ids:
+        result = delete_user_and_linked_employee(uid)
+        for key in ["deleted_users", "deleted_employee", "deactivated_employee", "skipped"]:
+            combined[key] += result.get(key, 0)
+        combined["messages"].extend(result.get("messages", []))
+
+    return combined
+
+
+
+# =============================
+# JOB COSTS / FORECASTING + JOBHUB AI
+# =============================
+def jc_float(value, default=0.0):
+    try:
+        if value is None or value == "" or pd.isna(value):
+            return float(default)
+        return float(value)
+    except Exception:
+        return float(default)
+
+
+def jc_percent(numerator, denominator):
+    denominator = jc_float(denominator)
+    if denominator == 0:
+        return 0.0
+    return round((jc_float(numerator) / denominator) * 100, 2)
+
+
+def jc_parse_date(value):
+    if value is None or str(value).strip() == "":
+        return None
+    text = str(value).strip()[:10]
+    for fmt in ["%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%Y/%m/%d"]:
+        try:
+            return datetime.strptime(text, fmt).date()
+        except Exception:
+            pass
+    return None
+
+
+def jc_business_days(start_value, end_value):
+    start = jc_parse_date(start_value)
+    end = jc_parse_date(end_value)
+    if not start or not end or end < start:
+        return 0
+    days = 0
+    current = start
+    while current <= end:
+        if current.weekday() < 5:
+            days += 1
+        current += timedelta(days=1)
+    return days
+
+
+def jc_add_business_days(start_date, days):
+    current = start_date or date.today()
+    added = 0
+    days = int(max(days, 0))
+    while added < days:
+        current += timedelta(days=1)
+        if current.weekday() < 5:
+            added += 1
+    return current
+
+
+def jc_month_label(value):
+    d = jc_parse_date(value)
+    return d.strftime("%Y-%m") if d else "Unscheduled"
+
+
+def job_cost_summary_dataframe():
+    jobs = df_query("""
+        SELECT j.id AS 'job_id',
+               j.job_no AS 'Job No',
+               j.job_name AS 'Job Name',
+               COALESCE(bc.name, '') AS 'Builder / Client',
+               j.site_address AS 'Site Address',
+               j.status AS 'Status',
+               j.leading_hand AS 'Leading Hand',
+               j.start_date AS 'Start Date',
+               j.end_date AS 'End Date',
+               COALESCE(j.contract_value, 0) AS 'Contract Value',
+               j.notes AS 'Notes'
+        FROM jobs j
+        LEFT JOIN builders_clients bc ON bc.id = j.builder_client_id
+        ORDER BY j.job_no
+    """)
+
+    if jobs.empty:
+        return jobs
+
+    materials = df_query("""
+        SELECT m.job_id,
+               COALESCE(SUM(COALESCE(m.qty_required, 0) * COALESCE(m.custom_unit_price, p.price_ex_gst, 0)), 0) AS 'Committed Material Cost',
+               COALESCE(SUM(COALESCE(m.qty_received, 0) * COALESCE(m.custom_unit_price, p.price_ex_gst, 0)), 0) AS 'Actual Material Cost',
+               COALESCE(SUM(COALESCE(m.qty_required, 0)), 0) AS 'Material Qty Required',
+               COALESCE(SUM(COALESCE(m.qty_received, 0)), 0) AS 'Material Qty Received',
+               COUNT(*) AS 'Material Lines'
+        FROM material_entries m
+        LEFT JOIN products p ON p.id = m.product_id
+        GROUP BY m.job_id
+    """)
+
+    wages = df_query("""
+        SELECT w.job_id,
+               COALESCE(SUM(COALESCE(w.hours, 0)), 0) AS 'Wage Hours',
+               COALESCE(SUM(
+                   COALESCE(w.hours, 0) *
+                   COALESCE(NULLIF(w.hourly_rate_snapshot, 0), e.rate_plus_10, e.base_hourly_rate, 0)
+               ), 0) AS 'Actual Labour Cost',
+               COUNT(*) AS 'Wage Lines'
+        FROM wage_entries w
+        LEFT JOIN employees e ON e.id = w.employee_id
+        GROUP BY w.job_id
+    """)
+
+    timesheets = df_query("""
+        SELECT job_id,
+               COALESCE(SUM(COALESCE(total_hours, 0)), 0) AS 'Timesheet Hours',
+               COUNT(*) AS 'Timesheet Lines'
+        FROM timesheet_entries
+        GROUP BY job_id
+    """)
+
+    estimates = df_query("""
+        SELECT e.job_id,
+               e.estimate_no AS 'Latest Estimate',
+               e.revision AS 'Estimate Revision',
+               COALESCE(e.labour_hours, 0) AS 'Estimated Labour Hours',
+               COALESCE(e.labour_rate, 0) AS 'Estimated Labour Rate',
+               COALESCE(e.material_allowance, 0) AS 'Estimated Materials',
+               COALESCE(e.access_equipment_allowance, 0) AS 'Estimated Access / Equipment',
+               COALESCE(e.subcontractor_allowance, 0) AS 'Estimated Subcontractor',
+               COALESCE(e.sundries_allowance, 0) AS 'Estimated Sundries',
+               COALESCE(e.total_ex_gst, 0) AS 'Estimate Total Ex GST',
+               COALESCE(e.total_inc_gst, 0) AS 'Estimate Total Inc GST'
+        FROM estimate_working_sheets e
+        JOIN (
+            SELECT job_id, MAX(id) AS max_id
+            FROM estimate_working_sheets
+            WHERE COALESCE(archived, 0) = 0
+              AND COALESCE(status, 'Draft') NOT IN ('Lost', 'Superseded')
+            GROUP BY job_id
+        ) latest ON latest.max_id = e.id
+    """)
+
+    df = jobs.copy()
+    for extra in [materials, wages, timesheets, estimates]:
+        if extra is not None and not extra.empty:
+            df = df.merge(extra, on="job_id", how="left")
+
+    number_cols = [
+        "Contract Value", "Committed Material Cost", "Actual Material Cost", "Material Qty Required", "Material Qty Received",
+        "Material Lines", "Wage Hours", "Actual Labour Cost", "Wage Lines", "Timesheet Hours",
+        "Timesheet Lines", "Estimated Labour Hours", "Estimated Labour Rate", "Estimated Materials",
+        "Estimated Access / Equipment", "Estimated Subcontractor", "Estimated Sundries",
+        "Estimate Total Ex GST", "Estimate Total Inc GST"
+    ]
+
+    for col in number_cols:
+        if col not in df.columns:
+            df[col] = 0.0
+        df[col] = df[col].fillna(0)
+    df["Estimated Labour Rate"] = PLANNING_LABOUR_RATE
+
+    for col in ["Latest Estimate", "Estimate Revision"]:
+        if col not in df.columns:
+            df[col] = ""
+        df[col] = df[col].fillna("")
+
+    df["Actual Labour Hours"] = df["Wage Hours"]
+    df["Total Actual Cost"] = df["Actual Material Cost"] + df["Actual Labour Cost"]
+    df["Gross Profit"] = df["Contract Value"] - df["Total Actual Cost"]
+    df["Gross Profit %"] = df.apply(lambda r: jc_percent(r["Gross Profit"], r["Contract Value"]), axis=1)
+    df["Cost to Date %"] = df.apply(lambda r: jc_percent(r["Total Actual Cost"], r["Contract Value"]), axis=1)
+    df["Remaining Labour Hours"] = (df["Estimated Labour Hours"] - df["Timesheet Hours"]).clip(lower=0)
+    df["Working Days Scheduled"] = df.apply(lambda r: jc_business_days(r["Start Date"], r["End Date"]), axis=1)
+    df["Forecast Month"] = df["Start Date"].apply(jc_month_label)
+    return df
+
+
+def job_costs_forecasting_page():
+    st.header("Job Costs / Forecasting")
+    st.caption("Job cost breakdowns, financial forecasting and labour/schedule forecasting.")
+
+    df = job_cost_summary_dataframe()
+    if df.empty:
+        st.info("No jobs found yet.")
+        return
+
+    section = st.radio(
+        "Section",
+        ["Selected Job Breakdown", "Financial Forecast", "Scheduling Forecast", "Export"],
+        horizontal=True,
+        key="job_cost_forecast_section",
+    )
+
+    if section == "Selected Job Breakdown":
+        job_options = {f"{r['Job No']} - {r['Job Name']}": int(r["job_id"]) for _, r in df.iterrows()}
+        selected = st.selectbox("Select Job", list(job_options.keys()), key="job_cost_selected")
+        row = df[df["job_id"].astype(int) == int(job_options[selected])].iloc[0]
+
+        st.subheader(f"{row['Job No']} - {row['Job Name']}")
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Contract Value", f"${jc_float(row['Contract Value']):,.2f}")
+        c2.metric("Actual Cost to Date", f"${jc_float(row['Total Actual Cost']):,.2f}")
+        c3.metric("Gross Profit", f"${jc_float(row['Gross Profit']):,.2f}")
+        c4.metric("Gross Profit %", f"{jc_float(row['Gross Profit %']):.2f}%")
+
+        c5, c6, c7, c8 = st.columns(4)
+        c5.metric("Material Cost", f"${jc_float(row['Actual Material Cost']):,.2f}")
+        c6.metric("Labour Cost", f"${jc_float(row['Actual Labour Cost']):,.2f}")
+        c7.metric("Timesheet Hours", f"{jc_float(row['Timesheet Hours']):.2f}")
+        c8.metric("Remaining Est. Hours", f"{jc_float(row['Remaining Labour Hours']):.2f}")
+
+        st.markdown("### Forecast Inputs")
+        i1, i2, i3, i4 = st.columns(4)
+        target_gp = i1.number_input("Target GP %", min_value=0.0, max_value=100.0, value=35.0, step=1.0)
+        labour_cost_hour = i2.number_input(
+            "Forecast Labour Cost / Hour",
+            min_value=0.0,
+            value=PLANNING_LABOUR_RATE,
+            step=5.0,
+            disabled=True,
+            help="Forecast labour uses $60/hour. Actual labour cost remains based on recorded employee wage costs.",
+        )
+        crew_size = i3.number_input("Crew Size", min_value=1.0, value=3.0, step=1.0)
+        hours_day = i4.number_input("Hours / Person / Day", min_value=1.0, value=8.0, step=0.5)
+
+        target_cost = jc_float(row["Contract Value"]) * (1 - target_gp / 100)
+        remaining_cost_budget = max(target_cost - jc_float(row["Total Actual Cost"]), 0)
+        remaining_by_budget = remaining_cost_budget / labour_cost_hour if labour_cost_hour else 0
+        remaining_hours = jc_float(row["Remaining Labour Hours"]) or remaining_by_budget
+        daily_capacity = crew_size * hours_day
+        days_required = int((remaining_hours + daily_capacity - 0.001) // daily_capacity) if daily_capacity else 0
+        if daily_capacity and remaining_hours % daily_capacity:
+            days_required += 1
+        finish_date = jc_add_business_days(date.today(), days_required)
+
+        forecast_cost = jc_float(row["Total Actual Cost"]) + remaining_hours * labour_cost_hour
+        forecast_profit = jc_float(row["Contract Value"]) - forecast_cost
+        forecast_gp = jc_percent(forecast_profit, row["Contract Value"])
+
+        f1, f2, f3, f4 = st.columns(4)
+        f1.metric("Remaining Cost Budget", f"${remaining_cost_budget:,.2f}")
+        f2.metric("Forecast Remaining Hours", f"{remaining_hours:,.2f}")
+        f3.metric("Forecast Finish", str(finish_date))
+        f4.metric("Forecast GP %", f"{forecast_gp:.2f}%")
+
+        if forecast_gp < target_gp:
+            st.warning("Forecast is below target. Check labour, materials, scope changes and variations.")
+        else:
+            pb_success("Forecast is at or above target based on these inputs.")
+
+        detail_cols = [
+            "Job No", "Job Name", "Builder / Client", "Status", "Leading Hand", "Start Date", "End Date",
+            "Contract Value", "Actual Material Cost", "Actual Labour Cost", "Total Actual Cost",
+            "Gross Profit", "Gross Profit %", "Estimate Total Ex GST", "Estimated Labour Hours",
+            "Timesheet Hours", "Remaining Labour Hours", "Working Days Scheduled"
+        ]
+        st.dataframe(pd.DataFrame([row[detail_cols]]), width="stretch", hide_index=True)
+
+    elif section == "Financial Forecast":
+        st.subheader("Financial Forecast by Job")
+        statuses = ["All"] + sorted([str(x) for x in df["Status"].fillna("").unique() if str(x).strip()])
+        selected_status = st.selectbox("Status Filter", statuses)
+        filtered = df.copy()
+        if selected_status != "All":
+            filtered = filtered[filtered["Status"].astype(str) == selected_status]
+
+        total_contract = jc_float(filtered["Contract Value"].sum()) if not filtered.empty else 0
+        total_cost = jc_float(filtered["Total Actual Cost"].sum()) if not filtered.empty else 0
+        total_profit = total_contract - total_cost
+        total_gp = jc_percent(total_profit, total_contract)
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Contract Value", f"${total_contract:,.2f}")
+        c2.metric("Cost to Date", f"${total_cost:,.2f}")
+        c3.metric("Gross Profit", f"${total_profit:,.2f}")
+        c4.metric("Gross Profit %", f"{total_gp:.2f}%")
+
+        show_cols = [
+            "Job No", "Job Name", "Builder / Client", "Status", "Start Date", "End Date",
+            "Contract Value", "Total Actual Cost", "Gross Profit", "Gross Profit %",
+            "Actual Material Cost", "Actual Labour Cost", "Timesheet Hours", "Estimate Total Ex GST"
+        ]
+        st.dataframe(filtered[[c for c in show_cols if c in filtered.columns]], width="stretch", hide_index=True)
+
+        monthly = filtered.groupby("Forecast Month", dropna=False).agg({
+            "Contract Value": "sum",
+            "Total Actual Cost": "sum",
+            "Gross Profit": "sum",
+            "Timesheet Hours": "sum",
+        }).reset_index()
+        if not monthly.empty:
+            monthly["Gross Profit %"] = monthly.apply(lambda r: jc_percent(r["Gross Profit"], r["Contract Value"]), axis=1)
+            st.markdown("### Forecast by Month")
+            st.dataframe(monthly, width="stretch", hide_index=True)
+
+    elif section == "Scheduling Forecast":
+        st.subheader("Scheduling / Labour Forecast")
+        hours_day = st.number_input("Default Hours / Person / Day", min_value=1.0, value=7.5, step=0.5)
+        sched = df.copy()
+        sched["Budget Labour Hours"] = sched["Estimated Labour Hours"]
+        sched["Budget Labour Hours"] = sched.apply(
+            lambda r: jc_float(r["Budget Labour Hours"]) if jc_float(r["Budget Labour Hours"]) > 0 else jc_float(r["Contract Value"]) / 120,
+            axis=1,
+        )
+        sched["Remaining Hours"] = (sched["Budget Labour Hours"] - sched["Timesheet Hours"]).clip(lower=0)
+        sched["Remaining Painter Days"] = (sched["Remaining Hours"] / hours_day).round(2)
+        sched["Required Painters"] = sched.apply(
+            lambda r: round(jc_float(r["Budget Labour Hours"]) / (jc_float(r["Working Days Scheduled"]) * hours_day), 2)
+            if jc_float(r["Working Days Scheduled"]) > 0 else 0,
+            axis=1,
+        )
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Remaining Labour Hours", f"{jc_float(sched['Remaining Hours'].sum()):,.2f}")
+        c2.metric("Remaining Painter Days", f"{jc_float(sched['Remaining Painter Days'].sum()):,.2f}")
+        c3.metric("Jobs in Forecast", len(sched))
+
+        cols = [
+            "Job No", "Job Name", "Status", "Leading Hand", "Start Date", "End Date",
+            "Working Days Scheduled", "Budget Labour Hours", "Timesheet Hours",
+            "Remaining Hours", "Required Painters", "Remaining Painter Days"
+        ]
+        st.dataframe(sched[[c for c in cols if c in sched.columns]], width="stretch", hide_index=True)
+
+    else:
+        st.subheader("Export Job Cost / Forecast Data")
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            df.drop(columns=["job_id"], errors="ignore").to_excel(writer, index=False, sheet_name="Job Forecast")
+            monthly = df.groupby("Forecast Month", dropna=False).agg({
+                "Contract Value": "sum",
+                "Total Actual Cost": "sum",
+                "Gross Profit": "sum",
+                "Timesheet Hours": "sum",
+            }).reset_index()
+            if not monthly.empty:
+                monthly["Gross Profit %"] = monthly.apply(lambda r: jc_percent(r["Gross Profit"], r["Contract Value"]), axis=1)
+            monthly.to_excel(writer, index=False, sheet_name="Monthly Forecast")
+            for ws in writer.book.worksheets:
+                for column_cells in ws.columns:
+                    max_len = 0
+                    col_letter = column_cells[0].column_letter
+                    for cell in column_cells:
+                        value = "" if cell.value is None else str(cell.value)
+                        max_len = max(max_len, len(value))
+                    ws.column_dimensions[col_letter].width = min(max(max_len + 2, 12), 45)
+        output.seek(0)
+        st.download_button(
+            "Download Job Cost / Forecast Excel",
+            data=output.getvalue(),
+            file_name="PB_JobHub_Job_Cost_Forecast.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+
+def jobhub_ai_api_key():
+    try:
+        if "OPENAI_API_KEY" in st.secrets:
+            return st.secrets["OPENAI_API_KEY"]
+    except Exception:
+        pass
+    return os.environ.get("OPENAI_API_KEY", "")
+
+
+def jobhub_ai_model():
+    try:
+        if "OPENAI_MODEL" in st.secrets:
+            return st.secrets["OPENAI_MODEL"]
+    except Exception:
+        pass
+    return os.environ.get("OPENAI_MODEL", "gpt-5.5")
+
+
+def jobhub_ai_context(selected_job_id=None):
+    df = job_cost_summary_dataframe()
+    lines = []
+
+    if selected_job_id and not df.empty:
+        selected = df[df["job_id"].astype(int) == int(selected_job_id)]
+        if not selected.empty:
+            r = selected.iloc[0]
+            lines.append("SELECTED JOB SUMMARY")
+            for col in [
+                "Job No", "Job Name", "Builder / Client", "Status", "Leading Hand", "Start Date", "End Date",
+                "Contract Value", "Actual Material Cost", "Actual Labour Cost", "Total Actual Cost",
+                "Gross Profit", "Gross Profit %", "Timesheet Hours", "Estimated Labour Hours", "Remaining Labour Hours"
+            ]:
+                if col in selected.columns:
+                    lines.append(f"{col}: {r.get(col, '')}")
+
+            materials = df_query("""
+                SELECT COALESCE(NULLIF(m.custom_product_code, ''), p.product_code, '') AS 'Product Code',
+                       COALESCE(NULLIF(m.custom_product_name, ''), p.product_name, '') AS 'Product Name',
+                       m.qty_required AS 'Qty Required',
+                       m.qty_received AS 'Qty Received',
+                       COALESCE(m.custom_unit_price, p.price_ex_gst, 0) AS 'Unit Price',
+                       ROUND(CAST((COALESCE(m.qty_required, 0) * COALESCE(m.custom_unit_price, p.price_ex_gst, 0)) AS numeric), 2) AS 'Line Cost',
+                       m.notes AS 'Notes'
+                FROM material_entries m
+                LEFT JOIN products p ON p.id = m.product_id
+                WHERE m.job_id = ?
+                ORDER BY m.id DESC
+                LIMIT 50
+            """, (selected_job_id,))
+            if not materials.empty:
+                if not ai_personal_data_enabled():
+                    materials = materials.drop(columns=["Notes"], errors="ignore")
+                lines.append("\nMATERIALS")
+                lines.append(materials.to_csv(index=False))
+
+            timesheets = df_query("""
+                SELECT t.employee_id AS 'Employee ID',
+                       e.name AS 'Employee',
+                       t.work_date AS 'Date',
+                       t.total_hours AS 'Hours',
+                       t.work_type AS 'Work Type',
+                       t.status AS 'Status',
+                       t.notes AS 'Notes'
+                FROM timesheet_entries t
+                LEFT JOIN employees e ON e.id = t.employee_id
+                WHERE t.job_id = ?
+                ORDER BY t.work_date DESC
+                LIMIT 50
+            """, (selected_job_id,))
+            if not timesheets.empty:
+                if not ai_personal_data_enabled():
+                    timesheets["Employee"] = timesheets["Employee ID"].map(
+                        lambda value: f"Staff #{int(value)}"
+                    )
+                    timesheets = timesheets.drop(
+                        columns=["Employee ID", "Notes"],
+                        errors="ignore",
+                    )
+                lines.append("\nTIMESHEETS")
+                lines.append(timesheets.to_csv(index=False))
+    else:
+        if not df.empty:
+            overview_cols = [
+                "Job No", "Job Name", "Status", "Start Date", "End Date", "Contract Value",
+                "Total Actual Cost", "Gross Profit", "Gross Profit %", "Timesheet Hours"
+            ]
+            lines.append("ALL JOBS OVERVIEW")
+            lines.append(df[[c for c in overview_cols if c in df.columns]].head(60).to_csv(index=False))
+
+    return "\n".join(lines)[:18000]
+
+
+
+
+
+
+
+# =============================
+# APP BUILDER AI
+# =============================
+def app_builder_read_file(path, max_chars=12000):
+    try:
+        p = Path(path)
+        if not p.exists() or not p.is_file():
+            return ""
+        text = p.read_text(encoding="utf-8", errors="ignore")
+        if len(text) > max_chars:
+            return text[:max_chars] + f"\n\n...[trimmed after {max_chars} characters]..."
+        return text
+    except Exception as e:
+        return f"Could not read {path}: {e}"
+
+
+def app_builder_file_tree():
+    allowed = []
+    try:
+        root = Path(".")
+        for p in root.rglob("*"):
+            if p.is_file():
+                name = str(p).replace("\\", "/")
+                if "__pycache__" in name or ".git" in name or "pb_jobhub.db" in name or "secrets.toml" in name:
+                    continue
+                if name.endswith((".py", ".txt", ".toml", ".sql")):
+                    allowed.append(name)
+    except Exception:
+        allowed = ["pb_jobhub_app.py", "requirements.txt", "SUPABASE_SCHEMA_MANUAL_BACKUP.sql"]
+    return sorted(allowed)[:80]
+
+
+def app_builder_relevant_code_snippets(question, max_snippets=8, chars_per_snippet=1800):
+    """
+    Pulls relevant sections from pb_jobhub_app.py without sending the full app every time.
+    """
+    source = app_builder_read_file("pb_jobhub_app.py", max_chars=400000)
+    if not source:
+        return ""
+
+    terms = []
+    for raw in re.findall(r"[A-Za-z_]{4,}", str(question).lower()):
+        if raw not in ["this", "that", "with", "from", "your", "have", "will", "make", "need", "want", "please"]:
+            terms.append(raw)
+
+    priority_terms = [
+        "streamlit", "supabase", "postgres", "connect", "df_query", "execute", "job", "employee",
+        "timesheet", "estimate", "material", "product", "user", "login", "forecast", "ai", "openai"
+    ]
+    terms = list(dict.fromkeys(terms + priority_terms))
+
+    snippets = []
+    lines = source.splitlines()
+    lower_lines = [l.lower() for l in lines]
+
+    matched_indexes = []
+    for i, line in enumerate(lower_lines):
+        if any(t in line for t in terms):
+            matched_indexes.append(i)
+
+    # group nearby line matches
+    used = set()
+    for idx in matched_indexes:
+        if len(snippets) >= max_snippets:
+            break
+        start = max(idx - 20, 0)
+        end = min(idx + 60, len(lines))
+        key = (start // 40, end // 40)
+        if key in used:
+            continue
+        used.add(key)
+        snippet = "\n".join(lines[start:end])
+        if len(snippet) > chars_per_snippet:
+            snippet = snippet[:chars_per_snippet] + "\n...[snippet trimmed]..."
+        snippets.append(f"--- pb_jobhub_app.py lines approx {start+1}-{end} ---\n{snippet}")
+
+    return "\n\n".join(snippets)
+
+
+def app_builder_notes_context(limit=20):
+    try:
+        notes = df_query("""
+            SELECT topic AS 'Topic', note AS 'Note', source AS 'Source', created_at AS 'Created'
+            FROM app_builder_notes
+            ORDER BY id DESC
+            LIMIT ?
+        """, (limit,))
+        if notes.empty:
+            return ""
+        return notes.to_csv(index=False)
+    except Exception:
+        return ""
+
+
+def save_app_builder_note(topic, note, source="Manual / AI"):
+    execute("""
+        INSERT INTO app_builder_notes (topic, note, source, created_at)
+        VALUES (?, ?, ?, ?)
+    """, (topic, note, source, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+
+
+
+
+
+
+
+# =============================
+# APP BUILDER SELF-EDIT HELPERS
+# =============================
+SELF_EDIT_ALLOWED_FILES = {
+    "pb_jobhub_app.py",
+    "requirements.txt",
+    "SUPABASE_SCHEMA_MANUAL_BACKUP.sql",
+    ".streamlit/config.toml",
+}
+
+
+def self_edit_enabled():
+    return (
+        is_admin()
+        and str(os.getenv("JOBHUB_ENABLE_SELF_EDIT", "")).strip().casefold()
+        in {"1", "true", "yes", "on"}
+    )
+
+
+def self_edit_safe_path(target_file):
+    target_file = str(target_file or "").strip().replace("\\", "/")
+    if target_file not in SELF_EDIT_ALLOWED_FILES:
+        return None, f"File not allowed for self-edit: {target_file}"
+
+    p = Path(target_file)
+    if ".." in p.parts or p.is_absolute():
+        return None, "Unsafe file path."
+
+    return p, None
+
+
+def self_edit_extract_json(text):
+    """
+    Extracts a JSON array from AI output.
+    Expected format:
+    [
+      {
+        "target_file": "pb_jobhub_app.py",
+        "find": "exact old text",
+        "replace": "new text",
+        "reason": "why"
+      }
+    ]
+    """
+    raw = str(text or "").strip()
+
+    # Remove markdown fences if present.
+    raw = re.sub(r"^```(?:json)?", "", raw.strip(), flags=re.I).strip()
+    raw = re.sub(r"```$", "", raw.strip()).strip()
+
+    try:
+        data = json.loads(raw)
+        if isinstance(data, dict) and "replacements" in data:
+            data = data["replacements"]
+        return data if isinstance(data, list) else []
+    except Exception:
+        pass
+
+    # Try to find the first JSON array in text.
+    start = raw.find("[")
+    end = raw.rfind("]")
+    if start != -1 and end != -1 and end > start:
+        try:
+            data = json.loads(raw[start:end+1])
+            return data if isinstance(data, list) else []
+        except Exception:
+            pass
+
+    return []
+
+
+def self_edit_validate_replacements(replacements):
+    issues = []
+    if not replacements:
+        issues.append("No replacement JSON found.")
+        return issues
+
+    for i, item in enumerate(replacements, start=1):
+        if not isinstance(item, dict):
+            issues.append(f"Replacement {i} is not an object.")
+            continue
+
+        target = item.get("target_file", "")
+        find = item.get("find", "")
+        replace = item.get("replace", "")
+
+        path, error = self_edit_safe_path(target)
+        if error:
+            issues.append(f"Replacement {i}: {error}")
+
+        if not find:
+            issues.append(f"Replacement {i}: find text is empty.")
+
+        if replace is None:
+            issues.append(f"Replacement {i}: replace text is missing.")
+
+        if path and path.exists():
+            try:
+                file_text = path.read_text(encoding="utf-8", errors="ignore")
+                if find and find not in file_text:
+                    issues.append(f"Replacement {i}: find text was not found in {target}.")
+            except Exception as e:
+                issues.append(f"Replacement {i}: could not read {target}: {e}")
+        elif path:
+            issues.append(f"Replacement {i}: target file does not exist: {target}")
+
+    return issues
+
+
+def self_edit_apply_replacements(replacements):
+    """
+    Applies exact find/replace patches.
+    Creates backups first.
+    If pb_jobhub_app.py compile fails, restores the backup.
+    """
+    result = {
+        "applied": 0,
+        "backups": [],
+        "messages": [],
+        "success": False,
+    }
+
+    issues = self_edit_validate_replacements(replacements)
+    if issues:
+        result["messages"].extend(issues)
+        return result
+
+    backup_root = Path(tempfile.gettempdir()) / "pb_jobhub_self_edit_backups"
+    backup_root.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    backup_map = {}
+
+    def restore_every_touched_file():
+        restored = []
+        for original, backup in backup_map.items():
+            try:
+                shutil.copy2(backup, original)
+                restored.append(original)
+            except Exception as restore_error:
+                result["messages"].append(
+                    f"Could not restore {original}: {restore_error}"
+                )
+        if restored:
+            result["messages"].append(
+                "Restored all touched files: " + ", ".join(sorted(restored))
+            )
+
+    try:
+        for item in replacements:
+            target_file = item["target_file"]
+            find = item["find"]
+            replace = item["replace"]
+
+            path, error = self_edit_safe_path(target_file)
+            if error:
+                raise RuntimeError(error)
+
+            path = path.resolve()
+            if str(path) not in backup_map:
+                safe_backup_name = re.sub(r"[^A-Za-z0-9._-]", "_", str(path))
+                backup_path = backup_root / f"{safe_backup_name}.{stamp}.bak"
+                backup_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(path, backup_path)
+                result["backups"].append(str(backup_path))
+                backup_map[str(path)] = str(backup_path)
+
+            current = path.read_text(encoding="utf-8", errors="ignore")
+            updated = current.replace(find, replace, 1)
+            path.write_text(updated, encoding="utf-8")
+            result["applied"] += 1
+            result["messages"].append(f"Applied replacement to {target_file}: {item.get('reason', 'No reason provided')}")
+
+        # Compile check and rollback for Python app file.
+        if "pb_jobhub_app.py" in [str(item.get("target_file")) for item in replacements]:
+            try:
+                py_compile.compile("pb_jobhub_app.py", doraise=True)
+                result["messages"].append("Python compile check passed after self-edit.")
+            except Exception as compile_error:
+                restore_every_touched_file()
+                result["messages"].append(
+                    f"Compile failed. Every touched file was rolled back. Error: {compile_error}"
+                )
+                return result
+
+        result["success"] = True
+        return result
+
+    except Exception as e:
+        restore_every_touched_file()
+        result["messages"].append(f"Self-edit failed: {e}")
+        return result
+
+
+def save_app_code_change(title, request, ai_response, patch_json, target_files, status, result_message=""):
+    execute("""
+        INSERT INTO app_code_changes
+        (title, request, ai_response, patch_json, target_files, status, created_at, applied_at, result_message)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        title,
+        request,
+        ai_response,
+        patch_json,
+        target_files,
+        status,
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S") if status == "Applied" else "",
+        result_message,
+    ))
+
+
+def app_builder_self_edit_prompt(user_request):
+    current_code = app_builder_relevant_code_snippets(user_request, max_snippets=12, chars_per_snippet=2500)
+    file_tree = "\n".join(app_builder_file_tree())
+
+    return f"""
+You are App Builder AI for Premier Brushworks JobHub.
+
+The user wants you to alter the app code. You must return ONLY valid JSON. No markdown. No explanation outside JSON.
+
+Return a JSON array of exact text replacements:
+[
+  {{
+    "target_file": "pb_jobhub_app.py",
+    "find": "exact existing text to find",
+    "replace": "replacement text",
+    "reason": "short reason"
+  }}
+]
+
+Rules:
+- Only target these files: pb_jobhub_app.py, requirements.txt, SUPABASE_SCHEMA_MANUAL_BACKUP.sql, .streamlit/config.toml
+- Use exact find text from the code context.
+- Keep changes small and safe.
+- If the request needs a large rebuild, return one small safe first step.
+- Do not include secrets.
+- Do not include markdown fences.
+- Do not invent code locations that are not in context.
+
+FILE TREE:
+{file_tree}
+
+RELEVANT CODE:
+{current_code}
+
+USER REQUEST:
+{user_request}
+"""
+
+
+def app_builder_self_edit_section():
+    if not self_edit_enabled():
+        pb_error(
+            "Runtime source editing is disabled in production. "
+            "Use App Builder AI to prepare a patch, then review, test and deploy it through version control."
+        )
+        return
+    st.subheader("Controlled Self-Edit")
+    st.warning(
+        "This lets App Builder AI apply exact code replacements to the running app files. "
+        "On Streamlit Cloud, file changes may not permanently survive a redeploy unless you download the changed file and upload it to GitHub."
+    )
+
+    st.caption(
+        "Safety: only exact text replacements are allowed, only approved files can be changed, "
+        "a backup is created, and pb_jobhub_app.py is compile-checked after changes."
+    )
+
+    request = st.text_area(
+        "What code change should the AI make?",
+        height=140,
+        placeholder="Example: Add a dashboard card showing jobs with missing timesheets this week.",
+        key="self_edit_request",
+    )
+
+    if st.checkbox("Show relevant code context", value=False, key="self_edit_show_context"):
+        st.code(app_builder_relevant_code_snippets(request or "jobhub app"), language="python")
+
+    if st.button("Generate Self-Edit Patch", key="generate_self_edit_patch"):
+        if not request.strip():
+            pb_error("Enter a code change request first.")
+        else:
+            prompt = app_builder_self_edit_prompt(request)
+            with st.spinner("Generating safe code replacement JSON..."):
+                answer, error = jobhub_ai_answer(prompt, "")
+
+            if error:
+                pb_error(error)
+            else:
+                st.session_state["self_edit_ai_response"] = answer
+                st.session_state["self_edit_request"] = request
+                pb_success("Patch proposal generated.")
+
+    ai_response = st.session_state.get("self_edit_ai_response", "")
+    stored_request = st.session_state.get("self_edit_request", request)
+
+    if ai_response:
+        st.markdown("### Proposed Patch JSON")
+        st.code(ai_response, language="json")
+
+        replacements = self_edit_extract_json(ai_response)
+        issues = self_edit_validate_replacements(replacements)
+
+        if issues:
+            pb_error("Patch is not ready to apply:")
+            for issue in issues:
+                st.write(f"- {issue}")
+        else:
+            pb_success(f"Patch validated. {len(replacements)} replacement(s) ready.")
+            preview_rows = []
+            for i, item in enumerate(replacements, start=1):
+                preview_rows.append({
+                    "No": i,
+                    "Target File": item.get("target_file", ""),
+                    "Find Length": len(str(item.get("find", ""))),
+                    "Replace Length": len(str(item.get("replace", ""))),
+                    "Reason": item.get("reason", ""),
+                })
+            st.dataframe(pd.DataFrame(preview_rows), width="stretch", hide_index=True)
+
+            confirm = st.text_input(
+                "To apply this AI code change to the running app, type: APPLY CODE CHANGE",
+                key="self_edit_confirm",
+            )
+
+            if st.button("Apply AI Code Change", key="apply_self_edit_patch"):
+                if confirm.strip().upper() != "APPLY CODE CHANGE":
+                    pb_error("Type APPLY CODE CHANGE exactly before applying.")
+                else:
+                    result = self_edit_apply_replacements(replacements)
+                    status = "Applied" if result["success"] else "Failed"
+                    save_app_code_change(
+                        title=stored_request[:100],
+                        request=stored_request,
+                        ai_response=ai_response,
+                        patch_json=json.dumps(replacements, indent=2),
+                        target_files=", ".join(sorted(set(str(x.get("target_file", "")) for x in replacements))),
+                        status=status,
+                        result_message="\n".join(result["messages"]),
+                    )
+
+                    if result["success"]:
+                        pb_success(f"Applied {result['applied']} code replacement(s).")
+                        st.info("Download the changed file below and upload it to GitHub so the change persists after redeploy.")
+                    else:
+                        pb_error("Patch was not applied or was rolled back.")
+
+                    with st.expander("Self-edit result details", expanded=True):
+                        for msg in result["messages"]:
+                            st.write(msg)
+
+    st.markdown("### Download Current App Files")
+    for file_name in ["pb_jobhub_app.py", "requirements.txt", "SUPABASE_SCHEMA_MANUAL_BACKUP.sql"]:
+        p, error = self_edit_safe_path(file_name)
+        if p and p.exists():
+            data = p.read_text(encoding="utf-8", errors="ignore").encode("utf-8")
+            st.download_button(
+                f"Download {file_name}",
+                data=data,
+                file_name=file_name,
+                mime="text/plain",
+                key=f"download_{file_name}",
+            )
+
+    st.markdown("### Code Change History")
+    try:
+        changes = df_query("""
+            SELECT id AS 'ID',
+                   title AS 'Title',
+                   target_files AS 'Target Files',
+                   status AS 'Status',
+                   created_at AS 'Created',
+                   result_message AS 'Result'
+            FROM app_code_changes
+            ORDER BY id DESC
+            LIMIT 50
+        """)
+        if changes.empty:
+            st.info("No code changes saved yet.")
+        else:
+            st.dataframe(changes, width="stretch", hide_index=True)
+    except Exception:
+        st.info("Code change history table will be available after the app initializes the database.")
+
+
+
+# =============================
+# FREE LOCAL AI / OLLAMA OVERRIDES
+# =============================
+def ai_secret(name, default=""):
+    try:
+        if name in st.secrets:
+            return st.secrets[name]
+    except Exception:
+        pass
+    return os.environ.get(name, default)
+
+
+def ai_provider():
+    """
+    AI provider rules:
+    - AI_PROVIDER=openai: use OpenAI online/cloud.
+    - AI_PROVIDER=ollama: use local Ollama only.
+    - AI_PROVIDER=auto or blank:
+        * if OPENAI_API_KEY exists, use OpenAI
+        * if hosted on Render and no OpenAI key, switch AI off
+        * if running locally and no OpenAI key, use Ollama
+    - AI_PROVIDER=none/off/disabled: switch AI off
+    """
+    provider = str(ai_secret("AI_PROVIDER", "auto")).strip().lower()
+
+    if provider in ["none", "off", "disabled", "disable", "false", "0", "no", "no_ai", "no-ai"]:
+        return "none"
+
+    if provider not in ["ollama", "openai", "auto"]:
+        provider = "auto"
+
+    has_openai_key = bool(str(jobhub_ai_api_key() or "").strip())
+    is_render = bool(os.getenv("RENDER") or os.getenv("RENDER_SERVICE_ID"))
+
+    if provider == "openai":
+        return "openai"
+
+    if provider == "ollama":
+        return "ollama"
+
+    # auto mode
+    if has_openai_key:
+        return "openai"
+
+    if is_render:
+        return "none"
+
+    return "ollama"
+
+
+def ai_disabled_message():
+    return (
+        "External AI is switched off unless it is explicitly enabled. "
+        "After approving your privacy policy, add AI_PROVIDER=openai, OPENAI_API_KEY and "
+        "JOBHUB_ALLOW_EXTERNAL_AI=true in the hosting environment. "
+        "For free Ollama AI, run JobHub locally on the same computer as Ollama."
+    )
+
+
+def ollama_base_url():
+    return str(ai_secret("OLLAMA_BASE_URL", "http://localhost:11434")).rstrip("/")
+
+
+def ollama_model():
+    return str(ai_secret("OLLAMA_MODEL", "llama3.2:3b")).strip() or "llama3.2:3b"
+
+
+def ollama_timeout():
+    try:
+        return int(ai_secret("OLLAMA_TIMEOUT", "120"))
+    except Exception:
+        return 120
+
+
+def openai_enabled():
+    return bool(str(jobhub_ai_api_key() or "").strip())
+
+
+def external_ai_enabled():
+    return str(ai_secret("JOBHUB_ALLOW_EXTERNAL_AI", "false")).strip().casefold() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def ai_personal_data_enabled():
+    return str(ai_secret("JOBHUB_AI_INCLUDE_PERSONAL_DATA", "false")).strip().casefold() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def ollama_status():
+    try:
+        response = requests.get(f"{ollama_base_url()}/api/tags", timeout=5)
+        if response.status_code == 200:
+            return True, f"Ollama connected at {ollama_base_url()} using model {ollama_model()}."
+        return False, f"Ollama responded with status {response.status_code}. Check Ollama is running."
+    except Exception as e:
+        return False, f"Ollama not reachable at {ollama_base_url()}. Start Ollama on this computer. Details: {e}"
+
+
+def ai_backend_ready():
+    provider = ai_provider()
+
+    if provider == "none":
+        return False, ai_disabled_message()
+
+    if provider == "openai":
+        if openai_enabled() and external_ai_enabled():
+            return True, f"Using OpenAI online model {jobhub_ai_model()}."
+        if not external_ai_enabled():
+            return False, (
+                "External AI is disabled. Set JOBHUB_ALLOW_EXTERNAL_AI=true only after "
+                "approving the organisation's AI data policy."
+            )
+        return False, "AI_PROVIDER is openai but OPENAI_API_KEY is missing."
+
+    if provider == "ollama":
+        return ollama_status()
+
+    return False, ai_disabled_message()
+
+
+def ollama_generate(prompt, system="", context="", model=None, timeout=None):
+    if ai_provider() == "none":
+        return None, ai_disabled_message()
+
+    if ai_provider() == "openai":
+        return None, "Ollama is not used in OpenAI mode. Use the JobHub AI Assistant or App Builder AI with OpenAI."
+
+    model = model or ollama_model()
+    timeout = timeout or ollama_timeout()
+
+    full_prompt = ""
+    if system:
+        full_prompt += "SYSTEM:\n" + str(system).strip() + "\n\n"
+    if context:
+        full_prompt += "CONTEXT:\n" + str(context).strip() + "\n\n"
+    full_prompt += "USER:\n" + str(prompt).strip()
+
+    payload = {
+        "model": model,
+        "prompt": full_prompt,
+        "stream": False,
+    }
+
+    try:
+        response = requests.post(
+            f"{ollama_base_url()}/api/generate",
+            json=payload,
+            timeout=timeout,
+        )
+        if response.status_code >= 400:
+            return None, f"Ollama error {response.status_code}: {response.text[:1000]}"
+
+        data = response.json()
+        return data.get("response", "").strip(), None
+    except Exception as e:
+        return None, f"Ollama request failed: {e}"
+
+
+def openai_responses_answer(prompt, context_text="", include_web=False, require_web=False, system_text=""):
+    if not external_ai_enabled():
+        return None, (
+            "External AI is disabled by policy. An administrator must explicitly set "
+            "JOBHUB_ALLOW_EXTERNAL_AI=true before JobHub can send data to OpenAI."
+        )
+    api_key = jobhub_ai_api_key()
+    if not api_key:
+        return None, "OPENAI_API_KEY is missing."
+
+    payload = {
+        "model": jobhub_ai_model(),
+        "input": (
+            (system_text or "You are a helpful assistant for Premier Brushworks JobHub.") +
+            "\n\nCONTEXT:\n" + str(context_text or "") +
+            "\n\nUSER REQUEST:\n" + str(prompt)
+        ),
+    }
+
+    if include_web:
+        payload["tools"] = [{"type": "web_search"}]
+        payload["tool_choice"] = "required" if require_web else "auto"
+
+    try:
+        response = requests.post(
+            "https://api.openai.com/v1/responses",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=90,
+        )
+        if response.status_code >= 400:
+            return None, f"OpenAI API error {response.status_code}: {response.text[:1000]}"
+
+        data = response.json()
+        record_audit_event(
+            "external_ai_request",
+            "ai_request",
+            "",
+            {
+                "model": jobhub_ai_model(),
+                "context_characters": len(str(context_text or "")),
+                "web_search": bool(include_web),
+            },
+        )
+        if data.get("output_text"):
+            return data["output_text"], None
+
+        parts = []
+        for item in data.get("output", []) or []:
+            for content in item.get("content", []) or []:
+                if isinstance(content, dict) and content.get("text"):
+                    parts.append(str(content["text"]))
+
+        return "\n".join(parts) if parts else json.dumps(data)[:3000], None
+    except Exception as e:
+        return None, f"OpenAI request failed: {e}"
+
+
+def jobhub_ai_answer(question, context_text):
+    system = (
+        "You are JobHub AI for Premier Brushworks, a painting and decorating business. "
+        "Use only the JobHub context provided. Give practical, direct advice for quoting, job costs, scheduling, "
+        "materials, staffing, risks and next actions. If data is missing, say what is missing. Do not invent details."
+    )
+
+    provider = ai_provider()
+    if provider == "none":
+        return None, ai_disabled_message()
+
+    if provider == "openai":
+        return openai_responses_answer(question, context_text, include_web=False, require_web=False, system_text=system)
+
+    return ollama_generate(question, system=system, context=context_text)
+
+
+def app_builder_ai_call(question, include_web=False, require_web=False, selected_mode="Code Helper"):
+    file_tree = "\n".join(app_builder_file_tree())
+    reqs = app_builder_read_file("requirements.txt", max_chars=6000)
+    schema = app_builder_read_file("SUPABASE_SCHEMA_MANUAL_BACKUP.sql", max_chars=12000)
+    snippets = app_builder_relevant_code_snippets(question)
+    saved_notes = app_builder_notes_context()
+
+    system_prompt = f"""
+You are App Builder AI inside Premier Brushworks JobHub.
+You help improve and maintain this Streamlit + Supabase business app.
+
+Rules:
+- Be practical and direct.
+- Help design features, find likely bugs, improve speed, improve database structure, and plan safe changes.
+- If asked to change the app, provide a clear build plan and exact code/pseudocode sections.
+- Do not pretend you have already changed GitHub or deployed the app.
+- Do not expose or ask for secrets.
+- If internet/web content is provided in context, use it and mention source URLs.
+- If something is risky, say so and suggest the safest next step.
+- This AI learns by saving notes in app_builder_notes. It does not retrain model weights.
+Mode: {selected_mode}
+"""
+
+    context = f"""
+APP FILE TREE:
+{file_tree}
+
+REQUIREMENTS:
+{reqs}
+
+DATABASE SCHEMA EXCERPT:
+{schema}
+
+RELEVANT CURRENT APP CODE SNIPPETS:
+{snippets}
+
+SAVED APP BUILDER LEARNINGS:
+{saved_notes}
+"""
+
+    provider = ai_provider()
+    if provider == "none":
+        return None, ai_disabled_message()
+
+    if provider == "openai":
+        return openai_responses_answer(
+            question,
+            context,
+            include_web=include_web,
+            require_web=require_web,
+            system_text=system_prompt,
+        )
+
+    if include_web:
+        context += (
+            "\n\nNOTE: Local Ollama mode does not have paid live web_search. "
+            "Use the Internet Learning section with specific URLs to fetch pages for free and save notes."
+        )
+
+    return ollama_generate(question, system=system_prompt, context=context, timeout=ollama_timeout())
+
+
+def fetch_web_page_text(url, max_chars=18000):
+    """
+    Free URL fetcher for internet learning.
+    The user provides URLs. JobHub fetches the page and local Ollama summarises it.
+    """
+    current_url = str(url or "").strip()
+    if not current_url:
+        return "", "URL is blank."
+
+    try:
+        raw_content = b""
+        response_encoding = "utf-8"
+        for redirect_count in range(4):
+            valid, validation_error = validate_public_http_url(current_url)
+            if not valid:
+                return "", validation_error
+
+            with requests.get(
+                current_url,
+                timeout=(5, 20),
+                headers={"User-Agent": "PremierBrushworksJobHubLearningBot/2.0"},
+                allow_redirects=False,
+                stream=True,
+            ) as response:
+                if response.status_code in {301, 302, 303, 307, 308}:
+                    location = response.headers.get("Location", "")
+                    if not location:
+                        return "", "The URL redirected without a destination."
+                    current_url = urljoin(current_url, location)
+                    if redirect_count >= 3:
+                        return "", "The URL exceeded the redirect safety limit."
+                    continue
+                if response.status_code >= 400:
+                    return "", f"Could not fetch URL. Status {response.status_code}"
+
+                content_type = str(response.headers.get("Content-Type", "")).casefold()
+                if not any(
+                    allowed in content_type
+                    for allowed in ("text/", "application/json", "application/xml", "application/xhtml")
+                ):
+                    return "", "Only text, HTML, JSON and XML pages can be learned from."
+                content_length = int(response.headers.get("Content-Length", "0") or 0)
+                if content_length > 1_000_000:
+                    return "", "The web page exceeds the 1 MB safety limit."
+
+                chunks = []
+                bytes_read = 0
+                for chunk in response.iter_content(chunk_size=16_384):
+                    if not chunk:
+                        continue
+                    bytes_read += len(chunk)
+                    if bytes_read > 1_000_000:
+                        return "", "The web page exceeds the 1 MB safety limit."
+                    chunks.append(chunk)
+                raw_content = b"".join(chunks)
+                response_encoding = response.encoding or "utf-8"
+                break
+        else:
+            return "", "The URL could not be fetched safely."
+
+        text = raw_content.decode(response_encoding, errors="replace")
+        text = re.sub(r"(?is)<script.*?>.*?</script>", " ", text)
+        text = re.sub(r"(?is)<style.*?>.*?</style>", " ", text)
+        text = re.sub(r"(?is)<noscript.*?>.*?</noscript>", " ", text)
+        text = re.sub(r"(?s)<[^>]+>", " ", text)
+        text = re.sub(r"&nbsp;", " ", text)
+        text = re.sub(r"&amp;", "&", text)
+        text = re.sub(r"&lt;", "<", text)
+        text = re.sub(r"&gt;", ">", text)
+        text = re.sub(r"\s+", " ", text).strip()
+
+        if len(text) > max_chars:
+            text = text[:max_chars] + "\n...[trimmed]..."
+
+        record_audit_event(
+            "external_url_fetched",
+            "learning_source",
+            current_url,
+            {"bytes": len(raw_content)},
+        )
+        return text, None
+    except Exception as e:
+        return "", f"Fetch failed: {e}"
+
+
+def save_learning_source(topic, url, summary="", active=1):
+    execute("""
+        INSERT INTO app_learning_sources
+        (topic, url, active, last_checked, last_summary, notes, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (
+        topic,
+        url,
+        int(active),
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S") if summary else "",
+        summary,
+        "",
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    ))
+
+
+def summarise_url_into_learning(topic, url):
+    page_text, error = fetch_web_page_text(url)
+    if error:
+        return None, error
+
+    prompt = (
+        "Summarise this web page into practical JobHub learning notes for Premier Brushworks. "
+        "Focus on what should be saved for future app building, quoting, cost forecasting, Streamlit, Supabase, "
+        "Ollama/local AI, safety, or business operations. "
+        "Return concise notes and include the source URL.\n\n"
+        f"TOPIC: {topic}\nSOURCE URL: {url}\nPAGE TEXT:\n{page_text}"
+    )
+
+    answer, ai_error = app_builder_ai_call(
+        question=prompt,
+        include_web=False,
+        require_web=False,
+        selected_mode="Internet Learning Summariser",
+    )
+    if ai_error:
+        return None, ai_error
+
+    save_app_builder_note(topic, answer, source=f"URL: {url}")
+    save_learning_source(topic, url, summary=answer, active=1)
+    return answer, None
+
+
+def free_local_ai_setup_page():
+    st.header("Free Local AI Setup")
+    st.caption("Use OpenAI online on Render, or Ollama for free local AI when running JobHub on your own computer.")
+
+    status_ok, status_message = ai_backend_ready()
+
+    c1, c2 = st.columns(2)
+    c1.metric("AI Provider", ai_provider())
+    c2.metric("OpenAI Model", jobhub_ai_model() if ai_provider() == "openai" else ollama_model())
+
+    if status_ok:
+        pb_success(status_message)
+    else:
+        st.warning(status_message)
+
+    st.markdown("### Recommended Streamlit Secrets")
+    st.code(
+        'AI_PROVIDER = "ollama"\n'
+        'OLLAMA_BASE_URL = "http://localhost:11434"\n'
+        'OLLAMA_MODEL = "llama3.2:3b"\n'
+        'OLLAMA_TIMEOUT = "120"\n\n'
+        '# Optional external AI, only after privacy approval:\n'
+        '# JOBHUB_ALLOW_EXTERNAL_AI = "true"\n'
+        '# JOBHUB_AI_INCLUDE_PERSONAL_DATA = "false"\n'
+        '# OPENAI_API_KEY = "sk-..."\n'
+        '# OPENAI_MODEL = "gpt-5.5"\n',
+        language="toml",
+    )
+
+    st.markdown("### Test Local AI")
+    test_prompt = st.text_input("Test prompt", value="Say hello and confirm you are connected to JobHub.")
+    if st.button("Test Ollama Local AI", key="test_ollama_ai"):
+        answer, error = ollama_generate(test_prompt, system="You are a local AI test assistant.")
+        if error:
+            pb_error(error)
+        else:
+            pb_success("Local AI responded.")
+            st.write(answer)
+
+    st.markdown("### What free learning means")
+    st.info(
+        "The model learns by saving useful notes into JobHub's database. "
+        "It does not retrain the AI model weights. Saved notes are reused as context in future AI answers."
+    )
+
+
+def app_builder_ai_page():
+    st.header("App Builder AI")
+    st.caption("Build, improve and learn for JobHub using free local Ollama AI by default.")
+
+    status_ok, status_message = ai_backend_ready()
+    if status_ok:
+        pb_success(status_message)
+    else:
+        st.warning(status_message)
+        st.info("Open the Free Local AI Setup tab for install and connection steps.")
+
+    app_builder_sections = [
+        "Build / Fix the App",
+        "Internet Learning",
+        "Saved Learnings",
+        "Free Local AI Setup",
+    ]
+    if self_edit_enabled():
+        app_builder_sections.insert(1, "Self-Edit Code")
+    section = st.radio(
+        "Section",
+        app_builder_sections,
+        horizontal=True,
+        key="app_builder_section",
+    )
+
+    if section == "Build / Fix the App":
+        st.subheader("Build / Fix the App")
+        mode = st.selectbox(
+            "Mode",
+            ["Code Helper", "Bug Fixer", "Feature Planner", "Speed Optimiser", "Database / Supabase Helper", "Streamlit UI Helper"],
+            key="app_builder_mode",
+        )
+
+        include_web = False
+        require_web = False
+        app_builder_external_consent = True
+
+        if ai_provider() == "openai" or (ai_provider() == "auto" and openai_enabled()):
+            include_web = st.checkbox("Allow OpenAI live internet research", value=True, key="app_builder_include_web")
+            require_web = st.checkbox("Force OpenAI web search for this request", value=False, key="app_builder_require_web")
+            app_builder_external_consent = st.checkbox(
+                "I confirm the displayed code context may be sent to the configured external AI provider",
+                value=False,
+                key="app_builder_external_consent",
+            )
+        else:
+            st.info("Free local Ollama mode is active. For internet learning, use the Internet Learning tab with URLs.")
+
+        quick = st.selectbox(
+            "Quick request",
+            [
+                "Custom",
+                "Review this app and suggest the next 5 improvements",
+                "Help me make the app faster",
+                "Help me add a new feature safely",
+                "Review saved learning notes and suggest the best next JobHub upgrade",
+                "Tell me what code files need changing for this feature",
+            ],
+            key="app_builder_quick",
+        )
+        default_question = "" if quick == "Custom" else quick
+
+        question = st.text_area(
+            "What do you want to build or fix?",
+            value=default_question,
+            height=150,
+            placeholder="Example: Add a daily dashboard showing jobs starting this week, overdue invoices, missing timesheets and jobs at margin risk.",
+            key="app_builder_question",
+        )
+
+        if st.checkbox("Show app code context being sent", value=False, key="app_builder_show_context"):
+            st.markdown("### File tree")
+            st.code("\n".join(app_builder_file_tree()))
+            st.markdown("### Relevant snippets")
+            st.code(app_builder_relevant_code_snippets(question or "jobhub app"))
+
+        if st.button("Ask App Builder AI", key="ask_app_builder_ai"):
+            if not question.strip():
+                pb_error("Enter a build/fix request first.")
+            elif not app_builder_external_consent:
+                pb_error("Review the code context and confirm external AI data sharing first.")
+            else:
+                with st.spinner("App Builder AI is reviewing JobHub..."):
+                    answer, error = app_builder_ai_call(
+                        question=question,
+                        include_web=include_web,
+                        require_web=require_web,
+                        selected_mode=mode,
+                    )
+
+                if error:
+                    pb_error(error)
+                else:
+                    st.markdown("### App Builder AI")
+                    st.write(answer)
+
+                    with st.expander("Save this as a learning note"):
+                        note_topic = st.text_input("Topic", value=question[:80], key="save_ai_learning_topic")
+                        note_text = st.text_area("Note to save", value=answer[:4000], height=200, key="save_ai_learning_text")
+                        if st.button("Save Learning Note", key="save_ai_learning_button"):
+                            save_app_builder_note(note_topic, note_text, source="App Builder AI")
+                            pb_success("Learning note saved.")
+
+    elif section == "Self-Edit Code":
+        app_builder_self_edit_section()
+
+    elif section == "Internet Learning":
+        st.subheader("Free Internet Learning by URL")
+        st.caption("Paste useful URLs. JobHub fetches the page, local AI summarises it, and the learning is saved for future use.")
+
+        with st.form("url_learning_form"):
+            topic = st.text_input(
+                "Learning topic",
+                value="Streamlit / Supabase / JobHub app improvement",
+            )
+            urls_text = st.text_area(
+                "URLs to learn from, one per line",
+                height=140,
+                placeholder="https://docs.streamlit.io/...\nhttps://docs.ollama.com/...",
+            )
+            submitted = st.form_submit_button("Fetch URLs, Summarise and Save Learning")
+
+        if submitted:
+            urls = [u.strip() for u in urls_text.splitlines() if u.strip()]
+            if not urls:
+                pb_error("Paste at least one URL.")
+            else:
+                for url in urls:
+                    st.markdown(f"### Learning from: {url}")
+                    with st.spinner(f"Fetching and summarising {url}..."):
+                        summary, error = summarise_url_into_learning(topic, url)
+                    if error:
+                        pb_error(error)
+                    else:
+                        pb_success("Saved learning note.")
+                        st.write(summary)
+
+        st.markdown("### Saved Learning Sources")
+        sources = df_query("""
+            SELECT id AS 'ID',
+                   topic AS 'Topic',
+                   url AS 'URL',
+                   active AS 'Active',
+                   last_checked AS 'Last Checked',
+                   last_summary AS 'Last Summary'
+            FROM app_learning_sources
+            ORDER BY id DESC
+            LIMIT 100
+        """)
+        if sources.empty:
+            st.info("No learning sources saved yet.")
+        else:
+            st.dataframe(sources[["ID", "Topic", "URL", "Active", "Last Checked"]], width="stretch", hide_index=True)
+
+            if st.button("Refresh All Active Learning Sources", key="refresh_learning_sources"):
+                active_sources = sources[sources["Active"].astype(int) == 1]
+                if active_sources.empty:
+                    st.info("No active sources to refresh.")
+                else:
+                    for _, row in active_sources.iterrows():
+                        st.markdown(f"Refreshing: {row['URL']}")
+                        summary, error = summarise_url_into_learning(row["Topic"], row["URL"])
+                        if error:
+                            pb_error(error)
+                        else:
+                            execute(
+                                "UPDATE app_learning_sources SET last_checked = ?, last_summary = ? WHERE id = ?",
+                                (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), summary, int(row["ID"]))
+                            )
+                            pb_success("Refreshed and saved.")
+
+    elif section == "Saved Learnings":
+        st.subheader("Saved Learnings")
+        notes = df_query("""
+            SELECT id AS 'ID',
+                   topic AS 'Topic',
+                   source AS 'Source',
+                   created_at AS 'Created',
+                   note AS 'Note'
+            FROM app_builder_notes
+            ORDER BY id DESC
+        """)
+
+        if notes.empty:
+            st.info("No saved learnings yet.")
+        else:
+            st.dataframe(notes[["ID", "Topic", "Source", "Created"]], width="stretch", hide_index=True)
+
+            note_options = {f"{row['Topic']} | {row['Source']} | ID {row['ID']}": int(row["ID"]) for _, row in notes.iterrows()}
+            selected = st.selectbox("Open learning note", list(note_options.keys()), key="open_learning_note")
+            selected_id = note_options[selected]
+            row = notes[notes["ID"].astype(int) == selected_id].iloc[0]
+            st.markdown(f"### {row['Topic']}")
+            st.caption(f"{row['Source']} • {row['Created']}")
+            st.write(row["Note"])
+
+            col1, col2 = st.columns(2)
+            if col1.button("Delete This Learning Note", key="delete_learning_note"):
+                execute("DELETE FROM app_builder_notes WHERE id = ?", (selected_id,))
+                pb_success("Learning note deleted.")
+                refresh()
+
+        with st.expander("Add manual learning note"):
+            with st.form("manual_learning_note_form"):
+                topic = st.text_input("Topic")
+                source = st.text_input("Source", value="Manual")
+                note = st.text_area("Note", height=180)
+                submitted = st.form_submit_button("Save Manual Learning")
+                if submitted:
+                    if not topic.strip() or not note.strip():
+                        pb_error("Topic and note are required.")
+                    else:
+                        save_app_builder_note(topic, note, source=source)
+                        pb_success("Learning note saved.")
+                        refresh()
+
+    else:
+        free_local_ai_setup_page()
+
+
+def jobhub_ai_assistant_page():
+    st.header("JobHub AI Assistant")
+    st.caption("Ask an AI assistant about your JobHub data, job costs, quotes, scheduling and risks.")
+
+    status_ok, status_message = ai_backend_ready()
+    if status_ok:
+        pb_success(status_message)
+    else:
+        st.warning(status_message)
+        st.info("For free mode, install Ollama and use App Builder AI > Free Local AI Setup.")
+        return
+
+    job_options = get_job_options()
+    mode = st.radio("Context", ["All Jobs Overview", "Selected Job"], horizontal=True, key="ai_context_mode")
+    selected_job_id = None
+
+    if mode == "Selected Job":
+        if not job_options:
+            st.info("Create a job first.")
+            return
+        selected_job = st.selectbox("Select Job", list(job_options.keys()), key="ai_selected_job")
+        selected_job_id = job_options[selected_job]
+
+    quick = st.selectbox(
+        "Quick Question",
+        [
+            "Custom",
+            "Which jobs are at risk of running over budget?",
+            "What should I check before quoting this job?",
+            "How many painters do I need to finish this job on time?",
+            "What materials or timesheets look unusual?",
+            "Give me a director-level summary for this week.",
+        ],
+        key="ai_quick_question",
+    )
+    default_question = "" if quick == "Custom" else quick
+
+    question = st.text_area(
+        "Ask JobHub AI",
+        value=default_question,
+        height=120,
+        placeholder="Example: Review this job and tell me the margin risk, labour pressure and next actions.",
+        key="ai_question",
+    )
+
+    context_text = jobhub_ai_context(selected_job_id)
+    learning_context = app_builder_notes_context(limit=20)
+    if learning_context:
+        context_text += "\n\nSAVED JOBHUB LEARNINGS:\n" + learning_context
+
+    if st.checkbox("Show data being sent to AI", value=False, key="ai_show_context"):
+        st.text_area("Context Preview", value=context_text, height=300)
+
+    external_consent = True
+    if ai_provider() == "openai":
+        external_consent = st.checkbox(
+            "I confirm this reviewed context may be sent to the configured external AI provider",
+            value=False,
+            key="ai_external_data_consent",
+        )
+
+    if st.button("Ask JobHub AI", key="ask_jobhub_ai"):
+        if not question.strip():
+            pb_error("Enter a question first.")
+        elif not external_consent:
+            pb_error("Review the context and confirm external AI data sharing first.")
+        else:
+            with st.spinner("JobHub AI is reviewing your data..."):
+                answer, error = jobhub_ai_answer(question, context_text)
+            if error:
+                pb_error(error)
+            else:
+                st.markdown("### Answer")
+                st.write(answer)
+
+
+
+# =============================
+# PB CONTROL CENTRE
+# =============================
+def pb_float(value, default=0.0):
+    try:
+        if value is None or value == "" or pd.isna(value):
+            return float(default)
+        return float(value)
+    except Exception:
+        return float(default)
+
+
+def pb_date(value):
+    if value is None or str(value).strip() == "":
+        return None
+    text = str(value).strip()[:10]
+    for fmt in ["%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%Y/%m/%d"]:
+        try:
+            return datetime.strptime(text, fmt).date()
+        except Exception:
+            pass
+    return None
+
+
+def pb_percent(numerator, denominator):
+    denominator = pb_float(denominator)
+    if denominator == 0:
+        return 0.0
+    return round((pb_float(numerator) / denominator) * 100, 2)
+
+
+def pb_business_days(start_value, end_value):
+    start = pb_date(start_value)
+    end = pb_date(end_value)
+    if not start or not end or end < start:
+        return 0
+    total = 0
+    current = start
+    while current <= end:
+        if current.weekday() < 5:
+            total += 1
+        current += timedelta(days=1)
+    return total
+
+
+def pb_next_variation_no(job_id):
+    df = df_query(
+        "SELECT variation_no FROM job_variations WHERE job_id = ?",
+        (job_id,),
+    )
+    return next_scoped_number(
+        df["variation_no"].tolist() if not df.empty else [],
+        "VAR",
+    )
+
+
+def pb_next_claim_no(job_id):
+    df = df_query(
+        "SELECT claim_no FROM invoice_claims WHERE job_id = ?",
+        (job_id,),
+    )
+    return next_scoped_number(
+        df["claim_no"].tolist() if not df.empty else [],
+        "CLAIM",
+    )
+
+
+def pb_job_cost_frame():
+    jobs = df_query("""
+        SELECT j.id AS job_id,
+               j.job_no AS 'Job No',
+               j.job_name AS 'Job Name',
+               COALESCE(bc.name, '') AS 'Builder / Client',
+               j.site_address AS 'Site Address',
+               j.status AS 'Status',
+               j.leading_hand AS 'Leading Hand',
+               j.start_date AS 'Start Date',
+               j.end_date AS 'End Date',
+               COALESCE(j.contract_value, 0) AS 'Contract Value',
+               j.notes AS 'Notes'
+        FROM jobs j
+        LEFT JOIN builders_clients bc ON bc.id = j.builder_client_id
+        ORDER BY j.job_no
+    """)
+    if jobs.empty:
+        return jobs
+
+    materials = df_query("""
+        SELECT m.job_id,
+               COALESCE(SUM(COALESCE(m.qty_required, 0) * COALESCE(m.custom_unit_price, p.price_ex_gst, 0)), 0) AS 'Committed Material Cost',
+               COALESCE(SUM(COALESCE(m.qty_received, 0) * COALESCE(m.custom_unit_price, p.price_ex_gst, 0)), 0) AS 'Material Cost',
+               COALESCE(SUM(COALESCE(m.qty_required, 0)), 0) AS 'Material Qty Required',
+               COALESCE(SUM(COALESCE(m.qty_received, 0)), 0) AS 'Material Qty Received',
+               COUNT(*) AS 'Material Lines'
+        FROM material_entries m
+        LEFT JOIN products p ON p.id = m.product_id
+        GROUP BY m.job_id
+    """)
+
+    wages = df_query("""
+        SELECT w.job_id,
+               COALESCE(SUM(COALESCE(w.hours, 0)), 0) AS 'Wage Hours',
+               COALESCE(SUM(
+                   COALESCE(w.hours, 0) *
+                   COALESCE(NULLIF(w.hourly_rate_snapshot, 0), e.rate_plus_10, e.base_hourly_rate, 0)
+               ), 0) AS 'Labour Cost'
+        FROM wage_entries w
+        LEFT JOIN employees e ON e.id = w.employee_id
+        GROUP BY w.job_id
+    """)
+
+    timesheets = df_query("""
+        SELECT job_id,
+               COALESCE(SUM(COALESCE(total_hours, 0)), 0) AS 'Timesheet Hours',
+               COUNT(*) AS 'Timesheet Lines'
+        FROM timesheet_entries
+        WHERE COALESCE(status, 'Submitted') <> 'Rejected'
+        GROUP BY job_id
+    """)
+
+    budgets = df_query("""
+        SELECT job_id,
+               COALESCE(quoted_labour_hours, 0) AS 'Budget Labour Hours',
+               COALESCE(quoted_labour_cost, 0) AS 'Budget Labour Cost',
+               COALESCE(quoted_materials, 0) AS 'Budget Materials',
+               COALESCE(quoted_access_equipment, 0) AS 'Budget Access',
+               COALESCE(quoted_subcontractors, 0) AS 'Budget Subcontractors',
+               COALESCE(quoted_sundries, 0) AS 'Budget Sundries',
+               COALESCE(target_gp_percent, 35) AS 'Target GP %',
+               locked_at AS 'Budget Locked'
+        FROM job_budgets
+    """)
+
+    variations = df_query("""
+        SELECT job_id,
+               COALESCE(SUM(CASE WHEN status IN ('Approved', 'Sent') THEN COALESCE(amount_ex_gst, 0) ELSE 0 END), 0) AS 'Variation Value',
+               COALESCE(SUM(CASE WHEN status = 'Approved' THEN COALESCE(amount_ex_gst, 0) ELSE 0 END), 0) AS 'Approved Variation Value',
+               COUNT(*) AS 'Variation Count'
+        FROM job_variations
+        GROUP BY job_id
+    """)
+
+    claims = df_query("""
+        SELECT job_id,
+               COALESCE(SUM(
+                   CASE
+                       WHEN status NOT IN ('Draft', 'Void', 'Cancelled')
+                       THEN COALESCE(amount_ex_gst, 0)
+                       ELSE 0
+                   END
+               ), 0) AS 'Claimed Amount',
+               COALESCE(SUM(CASE WHEN status = 'Paid' THEN COALESCE(amount_ex_gst, 0) ELSE 0 END), 0) AS 'Paid Amount',
+               COUNT(*) AS 'Claim Count'
+        FROM invoice_claims
+        GROUP BY job_id
+    """)
+
+    df = jobs.copy()
+    for extra in [materials, wages, timesheets, budgets, variations, claims]:
+        if extra is not None and not extra.empty:
+            df = df.merge(extra, on="job_id", how="left")
+
+    numeric_cols = [
+        "Contract Value", "Committed Material Cost", "Material Cost", "Material Qty Required", "Material Qty Received", "Material Lines",
+        "Wage Hours", "Labour Cost", "Timesheet Hours", "Timesheet Lines", "Budget Labour Hours",
+        "Budget Labour Cost", "Budget Materials", "Budget Access", "Budget Subcontractors", "Budget Sundries",
+        "Target GP %", "Variation Value", "Approved Variation Value", "Variation Count", "Claimed Amount",
+        "Paid Amount", "Claim Count"
+    ]
+    for col in numeric_cols:
+        if col not in df.columns:
+            df[col] = 0.0
+        df[col] = df[col].fillna(0)
+
+    for col in ["Budget Locked"]:
+        if col not in df.columns:
+            df[col] = ""
+        df[col] = df[col].fillna("")
+
+    df["Adjusted Contract Value"] = df["Contract Value"] + df["Approved Variation Value"]
+    df["Total Budget Cost"] = df["Budget Labour Cost"] + df["Budget Materials"] + df["Budget Access"] + df["Budget Subcontractors"] + df["Budget Sundries"]
+    df["Total Actual Cost"] = df["Material Cost"] + df["Labour Cost"]
+    df["Gross Profit"] = df["Adjusted Contract Value"] - df["Total Actual Cost"]
+    df["Gross Profit %"] = df.apply(lambda r: pb_percent(r["Gross Profit"], r["Adjusted Contract Value"]), axis=1)
+    df["Cost to Date %"] = df.apply(lambda r: pb_percent(r["Total Actual Cost"], r["Adjusted Contract Value"]), axis=1)
+    df["Remaining Budget"] = (df["Adjusted Contract Value"] - df["Total Actual Cost"]).clip(lower=0)
+    df["Budget Variance"] = df["Total Budget Cost"] - df["Total Actual Cost"]
+    df["Remaining Labour Hours"] = (df["Budget Labour Hours"] - df["Timesheet Hours"]).clip(lower=0)
+    df["Working Days"] = df.apply(lambda r: pb_business_days(r["Start Date"], r["End Date"]), axis=1)
+    df["Unclaimed Amount"] = (df["Adjusted Contract Value"] - df["Claimed Amount"]).clip(lower=0)
+    df["Unpaid Claimed"] = (df["Claimed Amount"] - df["Paid Amount"]).clip(lower=0)
+
+    def health(row):
+        today = date.today()
+        issues = []
+        gp = pb_float(row["Gross Profit %"])
+        cost_pct = pb_float(row["Cost to Date %"])
+        target_gp = pb_float(row["Target GP %"], 35)
+        end = pb_date(row["End Date"])
+
+        if pb_float(row["Adjusted Contract Value"]) <= 0:
+            issues.append("No contract value")
+        if row["Budget Locked"] in [None, ""]:
+            issues.append("Budget not locked")
+        if gp < target_gp:
+            issues.append("GP below target")
+        if cost_pct > 85 and str(row["Status"]).lower() not in ["complete", "completed", "closed", "archived"]:
+            issues.append("Cost high")
+        if end and end < today and str(row["Status"]).lower() not in ["complete", "completed", "closed", "archived"]:
+            issues.append("Past end date")
+        if pb_float(row["Material Qty Required"]) > 0 and pb_float(row["Material Qty Received"]) < pb_float(row["Material Qty Required"]):
+            issues.append("Materials short")
+
+        if len(issues) >= 2:
+            return "Red", "; ".join(issues)
+        if len(issues) == 1:
+            return "Orange", "; ".join(issues)
+        return "Green", "On track"
+
+    health_data = df.apply(health, axis=1)
+    df["Health"] = [x[0] for x in health_data]
+    df["Health Notes"] = [x[1] for x in health_data]
+    return df
+
+
+def pb_control_daily_dashboard(df):
+    st.subheader("Daily Dashboard")
+
+    today = date.today()
+    week_end = today + timedelta(days=7)
+
+    active = df[~df["Status"].astype(str).str.lower().isin(["complete", "completed", "closed", "archived"])]
+    red = df[df["Health"] == "Red"]
+    orange = df[df["Health"] == "Orange"]
+
+    pending_timesheets = df_query("""
+        SELECT COUNT(*) AS c
+        FROM timesheet_entries
+        WHERE COALESCE(status, 'Submitted') = 'Submitted'
+    """)
+    pending_count = int(pending_timesheets.iloc[0]["c"]) if not pending_timesheets.empty else 0
+
+    overdue_claims = df_query("""
+        SELECT COUNT(*) AS c,
+               COALESCE(SUM(COALESCE(amount_ex_gst, 0)), 0) AS total
+        FROM invoice_claims
+        WHERE status <> 'Paid'
+          AND due_date IS NOT NULL
+          AND due_date <> ''
+          AND due_date < ?
+    """, (str(today),))
+    overdue_count = int(overdue_claims.iloc[0]["c"]) if not overdue_claims.empty else 0
+    overdue_total = pb_float(overdue_claims.iloc[0]["total"]) if not overdue_claims.empty else 0
+
+    cols = st.columns(6)
+    cols[0].metric("Active Jobs", len(active))
+    cols[1].metric("Red Jobs", len(red))
+    cols[2].metric("Orange Jobs", len(orange))
+    cols[3].metric("Timesheets Pending", pending_count)
+    cols[4].metric("Overdue Claims", overdue_count)
+    cols[5].metric("Overdue $", f"${overdue_total:,.0f}")
+
+    st.markdown("### Jobs Needing Attention")
+    risk_cols = ["Job No", "Job Name", "Status", "Health", "Health Notes", "Adjusted Contract Value", "Total Actual Cost", "Gross Profit %", "End Date"]
+    risks = df[df["Health"].isin(["Red", "Orange"])][risk_cols]
+    if risks.empty:
+        pb_success("No red or orange jobs found.")
+    else:
+        st.dataframe(risks, width="stretch", hide_index=True)
+
+    st.markdown("### Jobs Starting / Finishing This Week")
+    week_rows = []
+    for _, row in df.iterrows():
+        start = pb_date(row["Start Date"])
+        end = pb_date(row["End Date"])
+        if (start and today <= start <= week_end) or (end and today <= end <= week_end):
+            week_rows.append(row)
+    if week_rows:
+        week_df = pd.DataFrame(week_rows)
+        st.dataframe(week_df[["Job No", "Job Name", "Status", "Leading Hand", "Start Date", "End Date", "Health"]], width="stretch", hide_index=True)
+    else:
+        st.info("No jobs starting or finishing in the next 7 days.")
+
+
+def pb_control_job_health(df):
+    st.subheader("Job Health Score")
+    st.caption("Green = on track, Orange = needs attention, Red = margin/schedule/data risk.")
+
+    status_filter = st.selectbox("Status Filter", ["All"] + sorted([str(x) for x in df["Status"].fillna("").unique() if str(x).strip()]), key="health_status_filter")
+    filtered = df.copy()
+    if status_filter != "All":
+        filtered = filtered[filtered["Status"].astype(str) == status_filter]
+
+    health_filter = st.multiselect("Health Filter", ["Green", "Orange", "Red"], default=["Green", "Orange", "Red"], key="health_filter")
+    filtered = filtered[filtered["Health"].isin(health_filter)]
+
+    cols = ["Job No", "Job Name", "Builder / Client", "Status", "Health", "Health Notes", "Adjusted Contract Value", "Total Actual Cost", "Gross Profit %", "Cost to Date %", "Remaining Labour Hours", "End Date"]
+    st.dataframe(filtered[cols], width="stretch", hide_index=True)
+
+
+def pb_control_budget_lock(df):
+    st.subheader("Job Budget Lock-In")
+    st.caption("Lock in accepted quote budgets so actual labour/materials can be compared against the allowed budget.")
+
+    job_options = get_job_options()
+    if not job_options:
+        st.info("Create a job first.")
+        return
+
+    selected_job = st.selectbox("Job", list(job_options.keys()), key="budget_lock_job")
+    job_id = job_options[selected_job]
+
+    existing = df_query("SELECT * FROM job_budgets WHERE job_id = ?", (job_id,))
+    current = existing.iloc[0].to_dict() if not existing.empty else {}
+
+    with st.form("job_budget_form"):
+        c1, c2, c3 = st.columns(3)
+        quoted_labour_hours = c1.number_input("Quoted Labour Hours", min_value=0.0, value=pb_float(current.get("quoted_labour_hours", 0)), step=1.0)
+        quoted_labour_cost = c2.number_input("Quoted Labour Cost", min_value=0.0, value=pb_float(current.get("quoted_labour_cost", 0)), step=100.0)
+        quoted_materials = c3.number_input("Quoted Materials", min_value=0.0, value=pb_float(current.get("quoted_materials", 0)), step=100.0)
+
+        c4, c5, c6 = st.columns(3)
+        quoted_access = c4.number_input("Access / Equipment Allowance", min_value=0.0, value=pb_float(current.get("quoted_access_equipment", 0)), step=100.0)
+        quoted_subbies = c5.number_input("Subcontractor Allowance", min_value=0.0, value=pb_float(current.get("quoted_subcontractors", 0)), step=100.0)
+        quoted_sundries = c6.number_input("Sundries / Consumables", min_value=0.0, value=pb_float(current.get("quoted_sundries", 0)), step=50.0)
+
+        target_gp = st.number_input("Target GP %", min_value=0.0, max_value=100.0, value=pb_float(current.get("target_gp_percent", 35), 35), step=1.0)
+        notes = st.text_area("Budget Notes", value=str(current.get("notes", "") or ""))
+        submitted = st.form_submit_button("Save / Lock Job Budget")
+
+    if submitted:
+        if existing.empty:
+            execute("""
+                INSERT INTO job_budgets
+                (job_id, quoted_labour_hours, quoted_labour_cost, quoted_materials, quoted_access_equipment,
+                 quoted_subcontractors, quoted_sundries, target_gp_percent, locked_at, locked_by, notes)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (job_id, quoted_labour_hours, quoted_labour_cost, quoted_materials, quoted_access, quoted_subbies, quoted_sundries, target_gp, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), current_username(), notes))
+        else:
+            execute("""
+                UPDATE job_budgets
+                SET quoted_labour_hours = ?, quoted_labour_cost = ?, quoted_materials = ?, quoted_access_equipment = ?,
+                    quoted_subcontractors = ?, quoted_sundries = ?, target_gp_percent = ?, locked_at = ?, locked_by = ?, notes = ?
+                WHERE job_id = ?
+            """, (quoted_labour_hours, quoted_labour_cost, quoted_materials, quoted_access, quoted_subbies, quoted_sundries, target_gp, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), current_username(), notes, job_id))
+        pb_success("Job budget saved.")
+        refresh()
+
+    budget_df = df_query("""
+        SELECT j.job_no AS 'Job No',
+               j.job_name AS 'Job Name',
+               b.quoted_labour_hours AS 'Labour Hours',
+               b.quoted_labour_cost AS 'Labour Cost',
+               b.quoted_materials AS 'Materials',
+               b.quoted_access_equipment AS 'Access',
+               b.quoted_subcontractors AS 'Subcontractors',
+               b.quoted_sundries AS 'Sundries',
+               b.target_gp_percent AS 'Target GP %',
+               b.locked_at AS 'Locked At',
+               b.locked_by AS 'Locked By'
+        FROM job_budgets b
+        JOIN jobs j ON j.id = b.job_id
+        ORDER BY j.job_no
+    """)
+    st.markdown("### Locked Budgets")
+    st.dataframe(budget_df, width="stretch", hide_index=True)
+
+
+def pb_control_variations():
+    st.subheader("Variations Register")
+    job_options = get_job_options()
+    if not job_options:
+        st.info("Create a job first.")
+        return
+
+    with st.expander("Add Variation", expanded=True):
+        selected_job = st.selectbox("Job", list(job_options.keys()), key="variation_job")
+        job_id = job_options[selected_job]
+        with st.form("variation_form"):
+            c1, c2, c3 = st.columns(3)
+            variation_no = c1.text_input("Variation No", value=pb_next_variation_no(job_id))
+            amount = c2.number_input("Amount Ex GST", min_value=0.0, step=100.0)
+            status = c3.selectbox("Status", ["Draft", "Sent", "Approved", "Rejected"])
+            description = st.text_area("Description")
+            reason = st.text_area("Reason")
+            c4, c5, c6 = st.columns(3)
+            sent_date = c4.text_input("Sent Date", value=str(date.today()) if status in ["Sent", "Approved"] else "")
+            approved_date = c5.text_input("Approved Date", value=str(date.today()) if status == "Approved" else "")
+            approved_by = c6.text_input("Approved By")
+            notes = st.text_area("Notes")
+            submitted = st.form_submit_button("Save Variation")
+        if submitted:
+            execute("""
+                INSERT INTO job_variations
+                (job_id, variation_no, description, reason, amount_ex_gst, status, sent_date, approved_date, approved_by, notes, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (job_id, variation_no, description, reason, amount, status, sent_date, approved_date, approved_by, notes, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+            pb_success("Variation saved.")
+            refresh()
+
+    variations = df_query("""
+        SELECT v.id AS 'ID',
+               j.job_no AS 'Job No',
+               j.job_name AS 'Job Name',
+               v.variation_no AS 'Variation',
+               v.description AS 'Description',
+               v.amount_ex_gst AS 'Amount Ex GST',
+               v.status AS 'Status',
+               v.sent_date AS 'Sent',
+               v.approved_date AS 'Approved',
+               v.approved_by AS 'Approved By'
+        FROM job_variations v
+        JOIN jobs j ON j.id = v.job_id
+        ORDER BY v.id DESC
+    """)
+    st.dataframe(variations, width="stretch", hide_index=True)
+
+
+def pb_control_invoice_claims():
+    st.subheader("Invoice / Claim Tracker")
+    job_options = get_job_options()
+    if not job_options:
+        st.info("Create a job first.")
+        return
+
+    with st.expander("Add Invoice / Claim", expanded=True):
+        selected_job = st.selectbox("Job", list(job_options.keys()), key="claim_job")
+        job_id = job_options[selected_job]
+        with st.form("claim_form"):
+            c1, c2, c3 = st.columns(3)
+            claim_no = c1.text_input("Claim / Invoice No", value=pb_next_claim_no(job_id))
+            amount = c2.number_input("Amount Ex GST", min_value=0.0, step=100.0)
+            status = c3.selectbox("Status", ["Draft", "Sent", "Approved", "Paid", "Overdue", "Void"])
+            description = st.text_area("Description")
+            c4, c5, c6 = st.columns(3)
+            invoice_date = c4.text_input("Invoice Date", value=str(date.today()))
+            due_date = c5.text_input("Due Date")
+            paid_date = c6.text_input("Paid Date")
+            notes = st.text_area("Notes")
+            submitted = st.form_submit_button("Save Claim")
+        if submitted:
+            execute("""
+                INSERT INTO invoice_claims
+                (job_id, claim_no, description, amount_ex_gst, invoice_date, due_date, paid_date, status, notes, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (job_id, claim_no, description, amount, invoice_date, due_date, paid_date, status, notes, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+            pb_success("Invoice / claim saved.")
+            refresh()
+
+    claims = df_query("""
+        SELECT c.id AS 'ID',
+               j.job_no AS 'Job No',
+               j.job_name AS 'Job Name',
+               c.claim_no AS 'Claim',
+               c.description AS 'Description',
+               c.amount_ex_gst AS 'Amount Ex GST',
+               c.invoice_date AS 'Invoice Date',
+               c.due_date AS 'Due Date',
+               c.paid_date AS 'Paid Date',
+               c.status AS 'Status'
+        FROM invoice_claims c
+        JOIN jobs j ON j.id = c.job_id
+        ORDER BY c.id DESC
+    """)
+    st.dataframe(claims, width="stretch", hide_index=True)
+
+
+def pb_control_staff_schedule():
+    st.subheader("Staff Scheduling Board")
+    job_options = get_job_options()
+    employee_options = get_employee_options(active_only=True)
+    if not job_options or not employee_options:
+        st.info("Create jobs and active employees first.")
+        return
+
+    with st.expander("Add Staff Schedule Entry", expanded=True):
+        with st.form("staff_schedule_form"):
+            c1, c2 = st.columns(2)
+            selected_job = c1.selectbox("Job", list(job_options.keys()), key="schedule_job")
+            selected_employee = c2.selectbox("Employee", list(employee_options.keys()), key="schedule_employee")
             c3, c4, c5 = st.columns(3)
             schedule_date = c3.text_input("Date", value=str(date.today()))
             start_time = c4.text_input("Start Time", value="07:00")
