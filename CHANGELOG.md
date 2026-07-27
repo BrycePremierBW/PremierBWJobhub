@@ -1,5 +1,18 @@
 # JobHub secured release
 
+## 2026-07-28 - Performance and Deployment Cleanup
+
+- Stopped estimator-linked progress from rewriting unchanged external rows.
+- Batched changed progress rows and linked scheduler date moves into single
+  database transactions.
+- Cached idempotent progress and scheduler schema setup per server process.
+- Added linked-sync indexes and enabled SQLite WAL with normal synchronous mode.
+- Disabled Streamlit's production file watcher and simplified Render's build
+  command so dependency caching can be reused.
+- Removed the unused duplicate app template, one-off patch installers, obsolete
+  audit reports, old packaging notes and the temporary GitHub connection test.
+- Added focused regression tests for no-op and batched progress syncing.
+
 ## 2026-07-28 - Linked Progress and Smart Scheduling
 
 - Added an estimator-linked Job Progress Tracker with a fixed dwelling count for each job.
