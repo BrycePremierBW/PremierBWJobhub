@@ -502,7 +502,7 @@ def pb_control_staff_schedule():
                 schedule_day = c1.date_input("Date", value=date.today(), key="schedule_single_day")
                 start_time = c2.text_input("Start Time", value="07:00", key="schedule_single_start")
                 finish_time = c3.text_input("Finish Time", value="15:00", key="schedule_single_finish")
-                planned_hours = c4.number_input("Planned Hours", min_value=0.0, step=0.25, value=7.5, key="schedule_single_hours")
+                planned_hours = c4.number_input("Planned Hours", min_value=0.0, step=0.25, value=8.0, key="schedule_single_hours")
                 schedule_date = str(schedule_day)
                 period_start = str(schedule_day)
                 period_end = str(schedule_day)
@@ -786,4 +786,3 @@ def control_centre_page():
 def current_username():
     user = get_current_user() or {}
     return str(user.get("username", "unknown"))
-
