@@ -61,7 +61,7 @@ MAX_TAKEOFF_PACK_FILES = 300
 MAX_IMAGE_PIXELS = 25_000_000
 Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 
-PB_JOBHUB_BUILD = "2026.07.28-linked-progress-smart-scheduler-v1"
+PB_JOBHUB_BUILD = "2026.07.28-selectable-tables-v1"
 PLANNING_LABOUR_RATE = 60.0
 
 
@@ -15111,41 +15111,137 @@ elif menu == "Material Costs":
         LEFT JOIN products p ON p.id = m.product_id
         ORDER BY m.id DESC
     """)
-    st.dataframe(df, width="stretch", hide_index=True)
+    st.markdown("### Material Cost Entries")
+    st.caption("Click any line to select it, then edit or delete it below.")
+    material_table_event = st.dataframe(
+        df,
+        width="stretch",
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row",
+        key="selectable_material_cost_entries",
+    )
 
-    st.markdown("### Delete Material Cost Entries")
-    st.caption("Use this for wrong, duplicate or accidental material cost entries. This deletes saved material cost rows only; it does not delete the product from the product list.")
+    selected_material_rows = []
+    material_selection = getattr(material_table_event, "selection", None)
+    if material_selection is None and isinstance(material_table_event, dict):
+        material_selection = material_table_event.get("selection")
+    if material_selection is not None:
+        selected_material_rows = getattr(material_selection, "rows", None)
+        if selected_material_rows is None and isinstance(material_selection, dict):
+            selected_material_rows = material_selection.get("rows", [])
 
     if df.empty:
-        st.info("No material cost entries to delete.")
+        st.info("No material cost entries saved.")
+    elif not selected_material_rows:
+        st.info("Select a material line in the table to open its Edit and Delete controls.")
     else:
-        material_options = {
-            f"ID {row['ID']} | {row['Job No']} - {row['Job Name']} | {row['Product Code']} | {row['Product Name']} | Qty {row['Qty Required']} | ${float(row['Total Cost'] or 0):,.2f}": int(row["ID"])
-            for _, row in df.iterrows()
-        }
+        selected_material_index = int(selected_material_rows[0])
+        if 0 <= selected_material_index < len(df):
+            selected_material = df.iloc[selected_material_index]
+            selected_material_id = int(selected_material["ID"])
+            st.markdown(
+                f"#### Selected: {selected_material['Product Code']} — "
+                f"{selected_material['Product Name']}"
+            )
+            st.caption(
+                f"{selected_material['Job No']} · {selected_material['Job Name']} · "
+                f"Material entry ID {selected_material_id}"
+            )
 
-        selected_material_labels = st.multiselect(
-            "Select material cost entries to delete",
-            list(material_options.keys()),
-            key="delete_material_entries_select"
-        )
-        selected_material_ids = [material_options[label] for label in selected_material_labels]
+            edit_tab, delete_tab = st.tabs(["Edit selected line", "Delete selected line"])
+            with edit_tab:
+                with st.form(f"edit_material_entry_{selected_material_id}"):
+                    e1, e2, e3 = st.columns(3)
+                    edit_qty_required = e1.number_input(
+                        "Qty Required",
+                        min_value=0.0,
+                        value=float(selected_material["Qty Required"] or 0),
+                        step=1.0,
+                    )
+                    edit_qty_received = e2.number_input(
+                        "Qty Received",
+                        min_value=0.0,
+                        value=float(selected_material["Qty Received"] or 0),
+                        step=1.0,
+                    )
+                    edit_date_ordered = e3.text_input(
+                        "Date Ordered",
+                        value=str(selected_material["Date Ordered"] or ""),
+                    )
+                    e4, e5 = st.columns(2)
+                    edit_supplier = e4.text_input(
+                        "Supplier",
+                        value=str(selected_material["Supplier"] or ""),
+                    )
+                    edit_colour = e5.text_input(
+                        "Colour / Finish",
+                        value=str(selected_material["Colour / Finish"] or ""),
+                    )
+                    edit_notes = st.text_area(
+                        "Notes",
+                        value=str(selected_material["Notes"] or ""),
+                    )
+                    if st.form_submit_button("Save Changes", type="primary"):
+                        execute("""
+                            UPDATE material_entries
+                            SET qty_required = ?,
+                                qty_received = ?,
+                                date_ordered = ?,
+                                supplier = ?,
+                                custom_colour = ?,
+                                notes = ?
+                            WHERE id = ?
+                        """, (
+                            edit_qty_required,
+                            edit_qty_received,
+                            edit_date_ordered,
+                            edit_supplier,
+                            edit_colour,
+                            edit_notes,
+                            selected_material_id,
+                        ))
+                        record_audit_event(
+                            "material_entry_updated",
+                            "material_entry",
+                            selected_material_id,
+                            {"job_no": str(selected_material["Job No"])},
+                        )
+                        pb_success("Material line updated.")
+                        refresh()
 
-        delete_materials_confirm = st.text_input(
-            "To delete selected material cost entries, type: DELETE MATERIALS",
-            key="delete_material_entries_confirm"
-        )
-
-        if st.button("Delete Selected Material Cost Entries", key="delete_material_entries_button"):
-            if not selected_material_ids:
-                pb_error("Select at least one material cost entry first.")
-            elif delete_materials_confirm.strip().upper() != "DELETE MATERIALS":
-                pb_error("Type DELETE MATERIALS exactly before deleting material entries.")
-            else:
-                for material_id in selected_material_ids:
-                    execute("DELETE FROM material_entries WHERE id = ?", (int(material_id),))
-                pb_success(f"Deleted {len(selected_material_ids)} material cost entr{'y' if len(selected_material_ids) == 1 else 'ies'}.")
-                refresh()
+            with delete_tab:
+                st.warning(
+                    "This permanently deletes the selected material cost line. "
+                    "It does not delete the product from the product list."
+                )
+                delete_selected_material_confirm = st.checkbox(
+                    "Yes, delete this selected material line",
+                    key=f"confirm_delete_material_{selected_material_id}",
+                )
+                if st.button(
+                    "Delete Selected Line",
+                    key=f"delete_material_{selected_material_id}",
+                    type="primary",
+                ):
+                    if not delete_selected_material_confirm:
+                        pb_error("Tick the confirmation box before deleting.")
+                    else:
+                        execute(
+                            "DELETE FROM material_entries WHERE id = ?",
+                            (selected_material_id,),
+                        )
+                        record_audit_event(
+                            "material_entry_deleted",
+                            "material_entry",
+                            selected_material_id,
+                            {
+                                "job_no": str(selected_material["Job No"]),
+                                "product": str(selected_material["Product Name"]),
+                            },
+                        )
+                        pb_success("Material line deleted.")
+                        refresh()
     imported_df = df_query("""
         SELECT im.id AS 'ID',
                j.job_no AS 'Job No',
