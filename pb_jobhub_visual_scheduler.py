@@ -1164,7 +1164,7 @@ def page_schedule(user: dict) -> None:
     display_days = c2.selectbox("Board range", [7, 14, 21, 28], index=1, format_func=lambda x: f"{x} days")
     start = week_start(to_date(selected))
     end = start + timedelta(days=display_days - 1)
-    tabs = st.tabs(["Clickable board", "Add assignment", "Allocate crew", "Edit / delete"])
+    tabs = st.tabs(["Clickable tile board", "Add assignment", "Allocate crew", "Edit / delete"])
     staff_names = staff["name"].tolist()
     job_labels = (jobs["job_no"].astype(str) + " · " + jobs["job_name"].astype(str)).tolist()
     role_options = ["Site Work", "Leading Hand", "Supervision", "Quote / Measure", "Office / Planning", "Training", "Touch-ups", "Other"]
@@ -1175,28 +1175,34 @@ def page_schedule(user: dict) -> None:
         alerts = conflict_report(assignments, leaves)
         if alerts:
             st.warning("Warnings: " + " | ".join(alerts[:4]) + (" …" if len(alerts) > 4 else ""))
-        chart = timeline_chart(assignments, f"JobHub schedule · {start.strftime('%d %b')} to {end.strftime('%d %b %Y')}")
-        if chart:
-            st.caption("Click any coloured booking box to open and edit or delete it.")
-            timeline_event = st.plotly_chart(
-                chart,
-                use_container_width=True,
-                on_select="rerun",
-                selection_mode="points",
-                key="clickable_schedule_timeline",
-            )
-            selected_assignment_id = selected_timeline_assignment_id(timeline_event)
-            if selected_assignment_id is not None:
-                timeline_booking_editor(
-                    selected_assignment_id,
-                    assignments,
-                    staff,
-                    jobs,
-                    role_options,
-                )
-        else:
-            st.info("Nothing is scheduled in this date range.")
+        st.markdown("### Staff × Day tile board")
+        st.caption(
+            "Every day tile is selectable. Click an employee's tile to add a job, "
+            "view that day's bookings, or delete a booking."
+        )
         clickable_schedule_board(assignments, start, end, staff, jobs, role_options, user)
+        with st.expander("View coloured schedule timeline"):
+            chart = timeline_chart(assignments, f"JobHub schedule · {start.strftime('%d %b')} to {end.strftime('%d %b %Y')}")
+            if chart:
+                st.caption("Click any coloured booking box to open and edit or delete it.")
+                timeline_event = st.plotly_chart(
+                    chart,
+                    use_container_width=True,
+                    on_select="rerun",
+                    selection_mode="points",
+                    key="clickable_schedule_timeline",
+                )
+                selected_assignment_id = selected_timeline_assignment_id(timeline_event)
+                if selected_assignment_id is not None:
+                    timeline_booking_editor(
+                        selected_assignment_id,
+                        assignments,
+                        staff,
+                        jobs,
+                        role_options,
+                    )
+            else:
+                st.info("Nothing is scheduled in this date range.")
         b1, b2 = st.columns(2)
         with b1:
             if st.button("Copy first week to next week", use_container_width=True):
