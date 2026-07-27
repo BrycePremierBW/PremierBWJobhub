@@ -24,11 +24,22 @@ Branch: `operations-v3` (stacked on `operations-v2`)
 - Use idempotency keys and the sync-event register to prevent duplicates.
 - Test against a Xero demo organisation before enabling production.
 
-## Next milestone
+## Milestone 2 — accounting sync and commercial workflows
 
-1. Add encrypted token persistence and the admin connection screen.
-2. Connect approved builders/clients and suppliers to Xero contacts.
-3. Push approved JobHub claims as draft sales invoices.
-4. Push approved supplier invoices as draft bills.
-5. Pull payment status back into JobHub.
-6. Add retention, progress-claim and extension-of-time workflows.
+- Encrypted token persistence and administrator connection screen.
+- Refresh-token rotation before live API requests.
+- Idempotent builder/client and supplier contact synchronisation.
+- Approved JobHub claims mapped to draft Xero sales invoices.
+- Approved supplier invoices mapped to draft Xero bills.
+- Normalised payment-status retrieval.
+- Restart-safe contact, invoice, claim, bill, retention and EOT tables.
+- Progress-claim and retention-cap calculations.
+- Explicit progress-claim, supplier-bill and extension-of-time state transitions.
+
+## Remaining live validation
+
+1. Register the staging redirect URI in the Xero developer app.
+2. Connect a Xero demo organisation.
+3. Map the Premier Brushworks chart-of-accounts codes and tax types.
+4. Run contact, draft invoice, draft bill and payment-status smoke tests.
+5. Keep production Xero writes disabled until the staging evidence is approved.
