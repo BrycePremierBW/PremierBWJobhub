@@ -22,6 +22,7 @@ from psycopg2.pool import ThreadedConnectionPool
 from pypdf import PdfReader, PdfWriter
 import streamlit as st
 import streamlit.components.v1 as components
+from jobhub_feedback import error as pb_error, replay_pending as pb_replay_pending, rerun as pb_rerun, success as pb_success
 from pb_jobhub_visual_scheduler import render_jobhub_staff_scheduler
 from jobhub_core import (
     calculate_estimate_pricing,
@@ -46,7 +47,7 @@ MAX_TAKEOFF_PACK_FILES = 300
 MAX_IMAGE_PIXELS = 25_000_000
 Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 
-PB_JOBHUB_BUILD = "2026.07.27-audited-cleanup"
+PB_JOBHUB_BUILD = "2026.07.27-performance-feedback-v2"
 
 
 # =============================
@@ -126,6 +127,9 @@ st.set_page_config(
 )
 
 
+pb_replay_pending()
+
+
 @st.cache_resource(show_spinner=False)
 def ensure_runtime_storage():
     """Create and verify JobHub's persistent storage folders once at startup."""
@@ -146,7 +150,7 @@ def ensure_runtime_storage():
             failures.append(f"{label}: {folder_path} — {exc}")
 
     if failures:
-        st.error("JobHub cannot write to its configured persistent storage.")
+        pb_error("JobHub cannot write to its configured persistent storage.")
         st.code("\n".join(failures))
         st.info(
             "On Render, confirm the persistent disk is mounted at /var/data and "
@@ -422,15 +426,15 @@ def apply_pb_branding():
         /* PB_JOBHUB_SIDEBAR_SCROLL_GUARD_V2
            Keep the complete navigation readable and independently scrollable. */
         section[data-testid="stSidebar"] {
-            height: 100dvh !important;
-            max-height: 100dvh !important;
+            height: 100svh !important;
+            max-height: 100svh !important;
             overflow: hidden !important;
         }
 
         section[data-testid="stSidebar"] > div,
         section[data-testid="stSidebar"] [data-testid="stSidebarContent"] {
-            height: 100dvh !important;
-            max-height: 100dvh !important;
+            height: 100svh !important;
+            max-height: 100svh !important;
             overflow-y: auto !important;
             overflow-x: hidden !important;
             overscroll-behavior-y: contain !important;
@@ -453,11 +457,9 @@ def apply_pb_branding():
         }
 
         section[data-testid="stSidebar"] .pb-sidebar-logo {
-            position: sticky;
-            top: 0.35rem;
-            z-index: 100;
-            background: rgba(30, 27, 24, 0.96);
-            backdrop-filter: blur(10px);
+            position: relative;
+            z-index: 1;
+            background: rgba(255,255,255,0.08);
         }
 
         section[data-testid="stSidebar"] .pb-sidebar-build {
@@ -468,11 +470,9 @@ def apply_pb_branding():
         }
 
         section[data-testid="stSidebar"] .st-key-sidebar_reset_navigation {
-            position: sticky;
-            top: 9.8rem;
-            z-index: 99;
+            position: relative;
+            z-index: 1;
             padding: 0.25rem 0 0.5rem 0;
-            background: linear-gradient(180deg, rgba(31,27,24,0.98), rgba(31,27,24,0.90));
         }
 
         section[data-testid="stSidebar"] [role="radiogroup"] label,
@@ -787,12 +787,12 @@ if str(os.getenv("SHOW_STORAGE_CHECK", "")).strip().lower() in ["1", "true", "ye
         if st.button("Test Persistent Disk", key="storage_check_test_button"):
             with open(test_file_path, "a", encoding="utf-8") as test_file:
                 test_file.write(f"Test saved at {datetime.now()}\n")
-            st.success("Test file saved.")
+            pb_success("Test file saved.")
 
         if os.path.exists(test_file_path):
             with open(test_file_path, "r", encoding="utf-8") as test_file:
                 lines = test_file.readlines()
-            st.success(f"Persistent test file exists with {len(lines)} saved test line(s).")
+            pb_success(f"Persistent test file exists with {len(lines)} saved test line(s).")
         else:
             st.warning("No persistent test file found yet.")
 
@@ -809,7 +809,7 @@ def get_postgres_pool():
 
     return ThreadedConnectionPool(
         minconn=1,
-        maxconn=20,
+        maxconn=8,
         dsn=DATABASE_URL,
         sslmode="require",
     )
@@ -2083,7 +2083,7 @@ def execute_many(sql, rows):
 
 
 def refresh():
-    st.rerun()
+    pb_rerun()
 
 
 def get_builder_options():
@@ -3252,7 +3252,7 @@ def force_password_change():
             errors.append("The two passwords do not match.")
         if errors:
             for error in errors:
-                st.error(error)
+                pb_error(error)
         else:
             execute("""
                 UPDATE app_users
@@ -3266,8 +3266,8 @@ def force_password_change():
             ))
             st.session_state["user"]["must_change_password"] = False
             record_audit_event("password_changed", "app_user", user["id"])
-            st.success("Password updated.")
-            st.rerun()
+            pb_success("Password updated.")
+            pb_rerun()
 
 
 def require_login():
@@ -3304,19 +3304,19 @@ def require_login():
                 _login_audit(username, False, "unknown_username")
                 unknown_failures = int(st.session_state.get("unknown_login_failures", 0)) + 1
                 st.session_state["unknown_login_failures"] = unknown_failures
-                st.error("Invalid username or password.")
+                pb_error("Invalid username or password.")
             else:
                 row = user_df.iloc[0]
                 locked_until = _parse_timestamp(row["locked_until"])
                 if locked_until and locked_until > datetime.now():
                     _login_audit(username, False, "temporarily_locked")
-                    st.error("This account is temporarily locked. Try again later or contact an administrator.")
+                    pb_error("This account is temporarily locked. Try again later or contact an administrator.")
                 elif int(row["active"] or 0) != 1:
                     _login_audit(username, False, "inactive")
-                    st.error("This user account is inactive.")
+                    pb_error("This user account is inactive.")
                 elif is_known_default_password_hash(row["password_hash"]):
                     _login_audit(username, False, "disabled_default_password")
-                    st.error(
+                    pb_error(
                         "This historical default password has been disabled. "
                         "An administrator must reset the account securely."
                     )
@@ -3332,7 +3332,7 @@ def require_login():
                         WHERE id = ?
                     """, (failed_count, new_lock, int(row["id"])))
                     _login_audit(username, False, "invalid_password")
-                    st.error("Invalid username or password.")
+                    pb_error("Invalid username or password.")
                 else:
                     upgraded_hash = (
                         hash_password(password)
@@ -3359,8 +3359,8 @@ def require_login():
                     }
                     st.session_state["unknown_login_failures"] = 0
                     _login_audit(username, True, "success")
-                    st.success("Logged in.")
-                    st.rerun()
+                    pb_success("Logged in.")
+                    pb_rerun()
 
     user_count_df = df_query("SELECT COUNT(*) AS c FROM app_users")
     user_count = int(user_count_df.iloc[0]["c"] or 0) if not user_count_df.empty else 0
@@ -3380,7 +3380,7 @@ def logout_button():
         st.sidebar.caption(f"Role: {user['role']}")
         if st.sidebar.button("Logout"):
             st.session_state["user"] = None
-            st.rerun()
+            pb_rerun()
 
 
 def employee_portal():
@@ -3638,9 +3638,9 @@ def employee_portal():
 
                 if save_material_request:
                     if material_request_type == "Saved Product" and not employee_product_id:
-                        st.error("Select a saved product first.")
+                        pb_error("Select a saved product first.")
                     elif not str(request_product_name or "").strip() and material_request_type == "One-off / Not Listed":
-                        st.error("Enter a product/material name.")
+                        pb_error("Enter a product/material name.")
                     else:
                         execute("""
                             INSERT INTO material_entries
@@ -3675,7 +3675,7 @@ def employee_portal():
                             0 if material_request_type == "One-off / Not Listed" else None,
                             request_colour,
                         ))
-                        st.success("Material request saved to this job.")
+                        pb_success("Material request saved to this job.")
                         st.info("The Paint & Materials Order Form can now be generated with this material included.")
                         refresh()
 
@@ -3692,7 +3692,7 @@ def employee_portal():
             ):
                 try:
                     pdf_path = generate_day_labour_sheet_pdf(selected_job_id)
-                    st.success("Day Labour Sheet generated and attached to this job.")
+                    pb_success("Day Labour Sheet generated and attached to this job.")
                     with open(pdf_path, "rb") as f:
                         st.download_button(
                             "Download Day Labour Sheet",
@@ -3702,7 +3702,7 @@ def employee_portal():
                             key=f"employee_download_day_labour_{selected_job_id}",
                         )
                 except Exception as e:
-                    st.error(f"Could not generate Day Labour Sheet: {e}")
+                    pb_error(f"Could not generate Day Labour Sheet: {e}")
 
             st.divider()
 
@@ -3712,7 +3712,7 @@ def employee_portal():
             if st.button("Generate Paint & Materials Order Form", key=f"employee_generate_paint_order_{selected_job_id}"):
                 try:
                     pdf_path = generate_paint_order_pdf(selected_job_id)
-                    st.success("Paint & Materials Order Form generated and attached to this job.")
+                    pb_success("Paint & Materials Order Form generated and attached to this job.")
 
                     with open(pdf_path, "rb") as f:
                         st.download_button(
@@ -3724,7 +3724,7 @@ def employee_portal():
                         )
 
                 except Exception as e:
-                    st.error(f"Could not generate Paint & Materials Order Form: {e}")
+                    pb_error(f"Could not generate Paint & Materials Order Form: {e}")
 
             st.divider()
 
@@ -3734,7 +3734,7 @@ def employee_portal():
             if st.button("Generate Equipment Checklist", key=f"employee_generate_equipment_{selected_job_id}"):
                 try:
                     pdf_path = generate_equipment_checklist_pdf(selected_job_id)
-                    st.success("Equipment Checklist generated and attached to this job.")
+                    pb_success("Equipment Checklist generated and attached to this job.")
 
                     with open(pdf_path, "rb") as f:
                         st.download_button(
@@ -3746,7 +3746,7 @@ def employee_portal():
                         )
 
                 except Exception as e:
-                    st.error(f"Could not generate Equipment Checklist: {e}")
+                    pb_error(f"Could not generate Equipment Checklist: {e}")
 
             st.divider()
 
@@ -3776,14 +3776,14 @@ def employee_portal():
                             "variation_no": variation_no,
                         }
                     except Exception as e:
-                        st.error(f"Could not generate Variation Form: {e}")
+                        pb_error(f"Could not generate Variation Form: {e}")
 
             if variation_result_key in st.session_state:
                 variation_result = st.session_state[variation_result_key]
                 pdf_path = variation_result["pdf_path"]
                 variation_no = variation_result["variation_no"]
 
-                st.success(f"Variation Form {variation_no} generated and attached to this job.")
+                pb_success(f"Variation Form {variation_no} generated and attached to this job.")
 
                 with open(pdf_path, "rb") as f:
                     st.download_button(
@@ -3804,16 +3804,16 @@ def employee_portal():
             if submitted:
                 user_df = df_query("SELECT password_hash FROM app_users WHERE id = ?", (user["id"],))
                 if user_df.empty:
-                    st.error("User account not found.")
+                    pb_error("User account not found.")
                 elif not check_password(old_password, user_df.iloc[0]["password_hash"]):
-                    st.error("Current password is incorrect.")
+                    pb_error("Current password is incorrect.")
                 elif new_password != confirm_password:
-                    st.error("New passwords do not match.")
+                    pb_error("New passwords do not match.")
                 else:
                     errors = password_strength_errors(new_password, user.get("username", ""))
                     if errors:
                         for error in errors:
-                            st.error(error)
+                            pb_error(error)
                     else:
                         execute("""
                             UPDATE app_users
@@ -3826,7 +3826,7 @@ def employee_portal():
                             user["id"],
                         ))
                         record_audit_event("password_changed", "app_user", user["id"])
-                        st.success("Password changed.")
+                        pb_success("Password changed.")
 
 
 def import_protected_master_csv(uploaded_file, record_type):
@@ -3942,7 +3942,7 @@ def user_access_page():
     st.caption("Admin only. Create logins and control who can access the app.")
 
     if not is_admin():
-        st.error("Only admin users can access this page.")
+        pb_error("Only admin users can access this page.")
         return
 
     st.markdown("### Restore / Update Haymes & Taubmans Product Lists")
@@ -3960,10 +3960,10 @@ def user_access_page():
 
     if st.button("Restore / Update Haymes & Taubmans Product Lists", key="restore_haymes_taubmans_products_btn"):
         if paint_confirm.strip().upper() != "RESTORE PAINT LISTS":
-            st.error("Type RESTORE PAINT LISTS exactly before restoring.")
+            pb_error("Type RESTORE PAINT LISTS exactly before restoring.")
         else:
             restored = restore_haymes_and_taubmans_product_lists()
-            st.success(f"Restored/updated {restored} Haymes and Taubmans products.")
+            pb_success(f"Restored/updated {restored} Haymes and Taubmans products.")
             refresh()
 
 
@@ -4001,16 +4001,16 @@ def user_access_page():
     )
     if st.button("Validate and Import Master Data", key="protected_master_import_button"):
         if master_confirm.strip().upper() != "IMPORT MASTER DATA":
-            st.error("Type IMPORT MASTER DATA exactly before importing.")
+            pb_error("Type IMPORT MASTER DATA exactly before importing.")
         elif master_upload is None:
-            st.error("Choose a CSV file first.")
+            pb_error("Choose a CSV file first.")
         else:
             try:
                 imported_rows = import_protected_master_csv(master_upload, master_record_type)
-                st.success(f"Imported or updated {imported_rows} {master_record_type.lower()} record(s).")
+                pb_success(f"Imported or updated {imported_rows} {master_record_type.lower()} record(s).")
                 refresh()
             except Exception as exc:
-                st.error(f"Master-data import failed: {exc}")
+                pb_error(f"Master-data import failed: {exc}")
 
     st.divider()
 
@@ -4060,7 +4060,7 @@ def user_access_page():
                 selected_access_job_id,
                 {"employee_id": selected_access_employee_id},
             )
-            st.success("Additional job access granted.")
+            pb_success("Additional job access granted.")
             refresh()
         if revoke_col.button("Revoke Additional Access", key="revoke_explicit_job_access"):
             execute(
@@ -4073,7 +4073,7 @@ def user_access_page():
                 selected_access_job_id,
                 {"employee_id": selected_access_employee_id},
             )
-            st.success("Additional access removed. Schedule or leading-hand access may still apply.")
+            pb_success("Additional access removed. Schedule or leading-hand access may still apply.")
             refresh()
 
         explicit_access_df = df_query("""
@@ -4099,7 +4099,7 @@ def user_access_page():
     duplicates_df = user_duplicate_summary()
 
     if duplicates_df.empty:
-        st.success("No duplicate user accounts detected.")
+        pb_success("No duplicate user accounts detected.")
     else:
         st.warning(f"Found {len(duplicates_df)} duplicate/suspect user account rows.")
         st.dataframe(
@@ -4115,10 +4115,10 @@ def user_access_page():
 
         if st.button("Clean Duplicate User Accounts", key="clean_duplicate_users_button"):
             if clean_confirm.strip().upper() != "CLEAN USERS":
-                st.error("Type CLEAN USERS exactly before cleaning duplicate accounts.")
+                pb_error("Type CLEAN USERS exactly before cleaning duplicate accounts.")
             else:
                 result = clean_duplicate_user_accounts()
-                st.success(
+                pb_success(
                     f"Duplicate cleanup complete. Deleted {result['deleted']} duplicate login(s). "
                     f"Skipped/disabled {result['skipped']}."
                 )
@@ -4143,12 +4143,12 @@ def user_access_page():
 
             if submitted:
                 if not username or not password:
-                    st.error("Username and password are required.")
+                    pb_error("Username and password are required.")
                 else:
                     errors = password_strength_errors(password, username)
                     if errors:
                         for error in errors:
-                            st.error(error)
+                            pb_error(error)
                     else:
                         employee_id = employee_options.get(employee_label) if employee_label != "Not linked" else None
                         try:
@@ -4167,9 +4167,9 @@ def user_access_page():
                                 else pd.DataFrame()
                             )
                             if not username_match.empty:
-                                st.error("That username is already in use.")
+                                pb_error("That username is already in use.")
                             elif not employee_match.empty:
-                                st.error("That employee is already linked to another login.")
+                                pb_error("That employee is already linked to another login.")
                             else:
                                 execute("""
                                     INSERT INTO app_users
@@ -4192,10 +4192,10 @@ def user_access_page():
                                     username.strip(),
                                     {"role": role, "employee_id": employee_id},
                                 )
-                                st.success(f"Created user {username}. They must change the password at first login.")
+                                pb_success(f"Created user {username}. They must change the password at first login.")
                                 refresh()
                         except Exception as e:
-                            st.error(f"Could not create user: {e}")
+                            pb_error(f"Could not create user: {e}")
 
     with tab_edit:
         st.subheader("Edit / Disable User")
@@ -4242,7 +4242,7 @@ def user_access_page():
                     )
                     if password_errors:
                         for error in password_errors:
-                            st.error(error)
+                            pb_error(error)
                     else:
                         success, message = safe_update_user_account(
                             selected_user_id=selected_user_id,
@@ -4271,10 +4271,10 @@ def user_access_page():
                                     "app_user",
                                     selected_user_id,
                                 )
-                            st.success(message)
+                            pb_success(message)
                             refresh()
                         else:
-                            st.error(message)
+                            pb_error(message)
 
             st.markdown("### Delete User Account")
             st.warning(
@@ -4304,19 +4304,19 @@ def user_access_page():
 
             if st.button("Delete Selected User Account", key=f"delete_user_button_{selected_user_id}"):
                 if delete_confirm.strip().upper() != "DELETE USER":
-                    st.error("Type DELETE USER exactly before deleting this account.")
+                    pb_error("Type DELETE USER exactly before deleting this account.")
                 elif selected_is_current_user:
-                    st.error("You cannot delete the account you are currently logged in with.")
+                    pb_error("You cannot delete the account you are currently logged in with.")
                 elif selected_is_last_active_admin:
-                    st.error("You cannot delete the last active admin account. Create another admin first, then delete this one.")
+                    pb_error("You cannot delete the last active admin account. Create another admin first, then delete this one.")
                 else:
                     result = delete_user_and_linked_employee(selected_user_id)
 
                     if result["deleted_users"]:
-                        st.success(f"Deleted {result['deleted_users']} user login account(s).")
+                        pb_success(f"Deleted {result['deleted_users']} user login account(s).")
 
                     if result["deleted_employee"]:
-                        st.success(f"Deleted {result['deleted_employee']} linked employee record(s).")
+                        pb_success(f"Deleted {result['deleted_employee']} linked employee record(s).")
 
                     if result["deactivated_employee"]:
                         st.info(f"Marked {result['deactivated_employee']} linked employee(s) as Inactive because they had job history or other linked records.")
@@ -4334,7 +4334,7 @@ def user_access_page():
             st.caption("Use this if this login is incorrectly linked to the wrong employee.")
             if st.button("Unlink Employee From Selected User", key=f"unlink_employee_user_{selected_user_id}"):
                 execute("UPDATE app_users SET employee_id = NULL WHERE id = ?", (selected_user_id,))
-                st.success("Employee link removed from this user account.")
+                pb_success("Employee link removed from this user account.")
                 refresh()
 
     st.markdown("### Start Fresh / Clear All Jobs")
@@ -4346,10 +4346,10 @@ def user_access_page():
     clear_confirm = st.text_input("To clear all jobs, type: CLEAR JOBS", key="clear_jobs_confirm")
     if st.button("Clear All Jobs and Start at 0"):
         if clear_confirm.strip().upper() != "CLEAR JOBS":
-            st.error("Type CLEAR JOBS exactly before clearing the job register.")
+            pb_error("Type CLEAR JOBS exactly before clearing the job register.")
         else:
             clear_all_jobs_and_linked_data()
-            st.success("All jobs and job-linked data have been cleared. Job Register is now at 0.")
+            pb_success("All jobs and job-linked data have been cleared. Job Register is now at 0.")
             refresh()
 
 
@@ -4405,17 +4405,17 @@ def user_access_page():
 
             if st.button("Delete Selected User Accounts", key="bulk_user_delete_button"):
                 if not selected_delete_ids:
-                    st.error("Select at least one user account first.")
+                    pb_error("Select at least one user account first.")
                 elif bulk_confirm.strip().upper() != "DELETE SELECTED USERS":
-                    st.error("Type DELETE SELECTED USERS exactly before deleting multiple accounts.")
+                    pb_error("Type DELETE SELECTED USERS exactly before deleting multiple accounts.")
                 else:
                     result = delete_selected_user_accounts(selected_delete_ids)
 
                     if result["deleted_users"]:
-                        st.success(f"Deleted {result['deleted_users']} selected user login account(s).")
+                        pb_success(f"Deleted {result['deleted_users']} selected user login account(s).")
 
                     if result["deleted_employee"]:
-                        st.success(f"Deleted {result['deleted_employee']} linked employee record(s).")
+                        pb_success(f"Deleted {result['deleted_employee']} linked employee record(s).")
 
                     if result["deactivated_employee"]:
                         st.info(f"Marked {result['deactivated_employee']} linked employee(s) as Inactive because they had job history or other linked records.")
@@ -4734,7 +4734,7 @@ def job_photos_page(employee_restricted=False):
 
             if submitted:
                 if not uploaded_files:
-                    st.error("Please select at least one photo.")
+                    pb_error("Please select at least one photo.")
                 else:
                     saved_count = 0
                     for uploaded_file in uploaded_files:
@@ -4748,10 +4748,10 @@ def job_photos_page(employee_restricted=False):
                             )
                             saved_count += 1
                         except Exception as e:
-                            st.error(f"Could not save {uploaded_file.name}: {e}")
+                            pb_error(f"Could not save {uploaded_file.name}: {e}")
 
                     if saved_count:
-                        st.success(f"Saved {saved_count} photo(s) to {selected_job}.")
+                        pb_success(f"{saved_count} {'photo was' if saved_count == 1 else 'photos were'} successfully added to {selected_job}.")
                         refresh()
 
     with tab_view:
@@ -4792,10 +4792,10 @@ def job_photos_page(employee_restricted=False):
                     delete_confirm = st.checkbox(f"Delete this photo", key=f"delete_photo_confirm_{photo_id}")
                     if st.button("Delete Photo", key=f"delete_photo_{photo_id}"):
                         if not delete_confirm:
-                            st.error("Tick the delete checkbox first.")
+                            pb_error("Tick the delete checkbox first.")
                         else:
                             delete_job_photo(photo_id)
-                            st.success("Photo deleted.")
+                            pb_success("Photo deleted.")
                             refresh()
 
                 st.divider()
@@ -5019,7 +5019,7 @@ def render_timesheet_bulk_actions(timesheet_df, key_prefix, empty_message="No ti
 
     work = normalise_timesheet_statuses(timesheet_df)
     if "id" not in work.columns:
-        st.error("Timesheet IDs are unavailable, so bulk actions cannot be performed.")
+        pb_error("Timesheet IDs are unavailable, so bulk actions cannot be performed.")
         return []
 
     table_fingerprint = hashlib.sha256(
@@ -5104,7 +5104,7 @@ def render_timesheet_bulk_actions(timesheet_df, key_prefix, empty_message="No ti
     ):
         for timesheet_id in selected_ids:
             set_timesheet_status(timesheet_id, "Approved")
-        st.success(f"Approved {len(selected_ids)} selected timesheet(s).")
+        pb_success(f"Approved {len(selected_ids)} selected timesheet(s).")
         refresh()
 
     if paid_col.button(
@@ -5114,7 +5114,7 @@ def render_timesheet_bulk_actions(timesheet_df, key_prefix, empty_message="No ti
     ):
         for timesheet_id in selected_ids:
             set_timesheet_status(timesheet_id, "Paid")
-        st.success(f"Marked {len(selected_ids)} selected timesheet(s) as paid.")
+        pb_success(f"Marked {len(selected_ids)} selected timesheet(s) as paid.")
         refresh()
 
     if reject_col.button(
@@ -5134,7 +5134,7 @@ def render_timesheet_bulk_actions(timesheet_df, key_prefix, empty_message="No ti
     ):
         for timesheet_id in selected_ids:
             delete_timesheet_entry(timesheet_id)
-        st.success(f"Deleted {len(selected_ids)} selected timesheet(s).")
+        pb_success(f"Deleted {len(selected_ids)} selected timesheet(s).")
         refresh()
 
     return selected_ids
@@ -5239,7 +5239,7 @@ def timesheet_entry_form(employee_id=None, employee_restricted=False, key_prefix
         f"{break_minutes} break minutes. Total hours cannot be manually overwritten."
     )
     if calculation_error:
-        st.error(calculation_error)
+        pb_error(calculation_error)
 
     work_type = st.selectbox(
         "Work Type",
@@ -5304,7 +5304,7 @@ def timesheet_entry_form(employee_id=None, employee_restricted=False, key_prefix
             notes,
         )
         st.session_state[f"{key_prefix}_review_fingerprint"] = ""
-        st.success(f"Timesheet #{timesheet_id} submitted and linked to the selected job.")
+        pb_success(f"Timesheet #{timesheet_id} submitted and linked to the selected job.")
         refresh()
 
 
@@ -5685,7 +5685,7 @@ def estimating_rate_library_page():
 
     seeded = seed_packaged_estimating_rates_if_empty()
     if seeded:
-        st.success(f"Loaded {seeded['total']} packaged Premier Brushworks estimating rates.")
+        pb_success(f"Loaded {seeded['total']} packaged Premier Brushworks estimating rates.")
 
     full_df = estimating_rates_dataframe(active_only=False)
     active_count = int((full_df["Active"].fillna(0).astype(float) == 1).sum()) if not full_df.empty else 0
@@ -5721,13 +5721,13 @@ def estimating_rate_library_page():
                         preview_df,
                         replace_all=import_mode.startswith("Replace"),
                     )
-                    st.success(
+                    pb_success(
                         f"Rate library imported: {result['inserted']} inserted, "
                         f"{result['updated']} updated, {result['total']} processed."
                     )
-                    st.rerun()
+                    pb_rerun()
             except Exception as exc:
-                st.error(f"Could not read or import this CSV: {exc}")
+                pb_error(f"Could not read or import this CSV: {exc}")
 
         if os.path.exists(ESTIMATING_RATE_LIBRARY_PATH):
             with open(ESTIMATING_RATE_LIBRARY_PATH, "rb") as rate_file:
@@ -5794,7 +5794,7 @@ def estimating_rate_library_page():
             save_rate = st.form_submit_button("Save / Update Rate")
             if save_rate:
                 if not rate_code.strip() or not item_description.strip():
-                    st.error("Rate Code and Item Description are required.")
+                    pb_error("Rate Code and Item Description are required.")
                 else:
                     manual_df = pd.DataFrame([{
                         "Rate Code": rate_code,
@@ -5813,8 +5813,8 @@ def estimating_rate_library_page():
                         "Active": "Yes" if active else "No",
                     }])
                     result = import_estimating_rate_dataframe(manual_df, replace_all=False)
-                    st.success(f"Rate saved: {result['inserted']} inserted, {result['updated']} updated.")
-                    st.rerun()
+                    pb_success(f"Rate saved: {result['inserted']} inserted, {result['updated']} updated.")
+                    pb_rerun()
 
         if not existing.empty:
             st.divider()
@@ -5828,17 +5828,17 @@ def estimating_rate_library_page():
             b1, b2, b3 = st.columns(3)
             if b1.button("Set Active", key="set_rate_active"):
                 execute("UPDATE estimating_rates SET active = 1, updated_at = ? WHERE id = ?", (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), selected_id))
-                st.rerun()
+                pb_rerun()
             if b2.button("Set Inactive", key="set_rate_inactive"):
                 execute("UPDATE estimating_rates SET active = 0, updated_at = ? WHERE id = ?", (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), selected_id))
-                st.rerun()
+                pb_rerun()
             confirm_delete = st.checkbox("Confirm permanent deletion", key="confirm_rate_delete")
             if b3.button("Delete Rate", key="delete_rate_button"):
                 if not confirm_delete:
-                    st.error("Tick confirm permanent deletion first.")
+                    pb_error("Tick confirm permanent deletion first.")
                 else:
                     execute("DELETE FROM estimating_rates WHERE id = ?", (selected_id,))
-                    st.rerun()
+                    pb_rerun()
 
 
 def render_rate_library_estimate_adder(selected_estimate_id):
@@ -5932,7 +5932,7 @@ def render_rate_library_estimate_adder(selected_estimate_id):
 
         if st.button("Add Saved Rate to Estimate", type="primary", key=f"add_saved_rate_{selected_estimate_id}"):
             if float(qty or 0) <= 0:
-                st.error("Quantity must be greater than zero.")
+                pb_error("Quantity must be greater than zero.")
             else:
                 execute("""
                     INSERT INTO estimate_line_items
@@ -5949,8 +5949,8 @@ def render_rate_library_estimate_adder(selected_estimate_id):
                     line_notes,
                 ))
                 recalc_estimate_totals(selected_estimate_id)
-                st.success("Saved estimating rate added to the estimate.")
-                st.rerun()
+                pb_success("Saved estimating rate added to the estimate.")
+                pb_rerun()
 
 # PB_ESTIMATE_LINE_IMPORTER_V1
 def _normalise_estimate_import_header(value):
@@ -6063,7 +6063,7 @@ def render_estimate_line_item_csv_importer(selected_estimate_id):
                 key=f"estimate_line_import_button_{selected_estimate_id}",
             ):
                 if not confirm_replace:
-                    st.error("Tick the replacement confirmation box first.")
+                    pb_error("Tick the replacement confirmation box first.")
                     return
 
                 conn = connect()
@@ -6102,11 +6102,11 @@ def render_estimate_line_item_csv_importer(selected_estimate_id):
                     conn.close()
 
                 recalc_estimate_totals(selected_estimate_id)
-                st.success(f"Imported {len(prepared_df)} estimate line item(s).")
-                st.rerun()
+                pb_success(f"Imported {len(prepared_df)} estimate line item(s).")
+                pb_rerun()
 
         except Exception as exc:
-            st.error(f"Could not import this estimate working sheet: {exc}")
+            pb_error(f"Could not import this estimate working sheet: {exc}")
 
 
 # =============================
@@ -7131,7 +7131,7 @@ def takeoff_job_pack_import_page():
     try:
         parsed = parse_takeoff_job_pack(uploaded_pack)
     except Exception as exc:
-        st.error(f"Could not read this Take-off Job Pack: {exc}")
+        pb_error(f"Could not read this Take-off Job Pack: {exc}")
         return
 
     summary = parsed["summary"]
@@ -7237,7 +7237,7 @@ def takeoff_job_pack_import_page():
                 attach_documents=attach_documents,
                 use_imported_line_pricing=use_line_pricing,
             )
-            st.success(
+            pb_success(
                 f"Take-off pack imported: {result['line_count']} estimate line(s), "
                 f"{result['material_count']} material/colour row(s), and "
                 f"{result['document_count']} job document(s)."
@@ -7248,7 +7248,7 @@ def takeoff_job_pack_import_page():
             )
             st.caption(f"Saved pack folder: {result['pack_folder']}")
         except Exception as exc:
-            st.error(f"Take-off Job Pack was not imported: {exc}")
+            pb_error(f"Take-off Job Pack was not imported: {exc}")
 
 
 def estimate_totals(
@@ -7338,7 +7338,7 @@ def render_estimate_archive_delete_controls(selected_estimate_id, current):
                     SET archived = 0, archived_at = '', archived_by = ''
                     WHERE id = ?
                 """, (selected_estimate_id,))
-                st.success(f"{estimate_label} restored successfully.")
+                pb_success(f"{estimate_label} restored successfully.")
                 st.session_state.pop("estimate_select", None)
                 refresh()
         else:
@@ -7348,7 +7348,7 @@ def render_estimate_archive_delete_controls(selected_estimate_id, current):
             )
             if st.button("Archive Estimate Working Sheet", key=f"archive_estimate_{selected_estimate_id}"):
                 if not archive_confirmed:
-                    st.error("Tick the archive confirmation box first.")
+                    pb_error("Tick the archive confirmation box first.")
                 else:
                     user = get_current_user() or {}
                     archived_by = str(user.get("username") or user.get("employee_name") or current_role() or "manager")
@@ -7361,12 +7361,12 @@ def render_estimate_archive_delete_controls(selected_estimate_id, current):
                         archived_by,
                         selected_estimate_id,
                     ))
-                    st.success(f"{estimate_label} archived successfully.")
+                    pb_success(f"{estimate_label} archived successfully.")
                     st.session_state.pop("estimate_select", None)
                     refresh()
 
         st.divider()
-        st.error("Permanent deletion cannot be undone. It removes the estimate and every linked line item.")
+        pb_error("Permanent deletion cannot be undone. It removes the estimate and every linked line item.")
         delete_text = st.text_input(
             "Type DELETE to permanently remove this estimate",
             key=f"delete_estimate_text_{selected_estimate_id}",
@@ -7377,13 +7377,13 @@ def render_estimate_archive_delete_controls(selected_estimate_id, current):
         )
         if st.button("Delete Estimate Permanently", key=f"delete_estimate_permanently_{selected_estimate_id}"):
             if str(delete_text or "").strip().upper() != "DELETE":
-                st.error("Type DELETE exactly before permanently deleting the estimate.")
+                pb_error("Type DELETE exactly before permanently deleting the estimate.")
             elif not delete_confirmed:
-                st.error("Tick the permanent deletion confirmation box first.")
+                pb_error("Tick the permanent deletion confirmation box first.")
             else:
                 permanently_delete_estimate_working_sheet(selected_estimate_id)
                 st.session_state.pop("estimate_select", None)
-                st.success(f"{estimate_label} deleted permanently.")
+                pb_success(f"{estimate_label} deleted permanently.")
                 refresh()
 
 
@@ -7457,7 +7457,7 @@ def estimate_working_sheet_page():
                     0, 0, 0, now, now, notes,
                 ))
                 record_audit_event("estimate_created", "estimate", estimate_no, {"job_id": selected_job_id})
-                st.success("Estimate working sheet created.")
+                pb_success("Estimate working sheet created.")
                 refresh()
 
     estimates = df_query(f"""
@@ -7582,7 +7582,7 @@ def estimate_working_sheet_page():
                         "total_ex_gst": preview["total_ex_gst"],
                     },
                 )
-                st.success("Estimate summary saved.")
+                pb_success("Estimate summary saved.")
                 refresh()
 
     with tab_lines:
@@ -7609,7 +7609,7 @@ def estimate_working_sheet_page():
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """, (selected_estimate_id, section, item_description, qty, unit, unit_rate, line_total, line_notes))
                 recalc_estimate_totals(selected_estimate_id)
-                st.success("Line item added.")
+                pb_success("Line item added.")
                 refresh()
 
         lines_df = df_query("""
@@ -7632,11 +7632,11 @@ def estimate_working_sheet_page():
             confirm = st.checkbox("Confirm delete selected line item")
             if st.button("Delete Selected Line Item"):
                 if not confirm:
-                    st.error("Tick the confirm box first.")
+                    pb_error("Tick the confirm box first.")
                 else:
                     execute("DELETE FROM estimate_line_items WHERE id = ?", (delete_options[selected_delete],))
                     recalc_estimate_totals(selected_estimate_id)
-                    st.success("Line item deleted.")
+                    pb_success("Line item deleted.")
                     refresh()
 
     with tab_view:
@@ -8660,7 +8660,7 @@ def job_costs_forecasting_page():
         if forecast_gp < target_gp:
             st.warning("Forecast is below target. Check labour, materials, scope changes and variations.")
         else:
-            st.success("Forecast is at or above target based on these inputs.")
+            pb_success("Forecast is at or above target based on these inputs.")
 
         detail_cols = [
             "Job No", "Job Name", "Builder / Client", "Status", "Leading Hand", "Start Date", "End Date",
@@ -9223,7 +9223,7 @@ USER REQUEST:
 
 def app_builder_self_edit_section():
     if not self_edit_enabled():
-        st.error(
+        pb_error(
             "Runtime source editing is disabled in production. "
             "Use App Builder AI to prepare a patch, then review, test and deploy it through version control."
         )
@@ -9251,18 +9251,18 @@ def app_builder_self_edit_section():
 
     if st.button("Generate Self-Edit Patch", key="generate_self_edit_patch"):
         if not request.strip():
-            st.error("Enter a code change request first.")
+            pb_error("Enter a code change request first.")
         else:
             prompt = app_builder_self_edit_prompt(request)
             with st.spinner("Generating safe code replacement JSON..."):
                 answer, error = jobhub_ai_answer(prompt, "")
 
             if error:
-                st.error(error)
+                pb_error(error)
             else:
                 st.session_state["self_edit_ai_response"] = answer
                 st.session_state["self_edit_request"] = request
-                st.success("Patch proposal generated.")
+                pb_success("Patch proposal generated.")
 
     ai_response = st.session_state.get("self_edit_ai_response", "")
     stored_request = st.session_state.get("self_edit_request", request)
@@ -9275,11 +9275,11 @@ def app_builder_self_edit_section():
         issues = self_edit_validate_replacements(replacements)
 
         if issues:
-            st.error("Patch is not ready to apply:")
+            pb_error("Patch is not ready to apply:")
             for issue in issues:
                 st.write(f"- {issue}")
         else:
-            st.success(f"Patch validated. {len(replacements)} replacement(s) ready.")
+            pb_success(f"Patch validated. {len(replacements)} replacement(s) ready.")
             preview_rows = []
             for i, item in enumerate(replacements, start=1):
                 preview_rows.append({
@@ -9298,7 +9298,7 @@ def app_builder_self_edit_section():
 
             if st.button("Apply AI Code Change", key="apply_self_edit_patch"):
                 if confirm.strip().upper() != "APPLY CODE CHANGE":
-                    st.error("Type APPLY CODE CHANGE exactly before applying.")
+                    pb_error("Type APPLY CODE CHANGE exactly before applying.")
                 else:
                     result = self_edit_apply_replacements(replacements)
                     status = "Applied" if result["success"] else "Failed"
@@ -9313,10 +9313,10 @@ def app_builder_self_edit_section():
                     )
 
                     if result["success"]:
-                        st.success(f"Applied {result['applied']} code replacement(s).")
+                        pb_success(f"Applied {result['applied']} code replacement(s).")
                         st.info("Download the changed file below and upload it to GitHub so the change persists after redeploy.")
                     else:
-                        st.error("Patch was not applied or was rolled back.")
+                        pb_error("Patch was not applied or was rolled back.")
 
                     with st.expander("Self-edit result details", expanded=True):
                         for msg in result["messages"]:
@@ -9793,7 +9793,7 @@ def free_local_ai_setup_page():
     c2.metric("OpenAI Model", jobhub_ai_model() if ai_provider() == "openai" else ollama_model())
 
     if status_ok:
-        st.success(status_message)
+        pb_success(status_message)
     else:
         st.warning(status_message)
 
@@ -9816,9 +9816,9 @@ def free_local_ai_setup_page():
     if st.button("Test Ollama Local AI", key="test_ollama_ai"):
         answer, error = ollama_generate(test_prompt, system="You are a local AI test assistant.")
         if error:
-            st.error(error)
+            pb_error(error)
         else:
-            st.success("Local AI responded.")
+            pb_success("Local AI responded.")
             st.write(answer)
 
     st.markdown("### What free learning means")
@@ -9834,7 +9834,7 @@ def app_builder_ai_page():
 
     status_ok, status_message = ai_backend_ready()
     if status_ok:
-        st.success(status_message)
+        pb_success(status_message)
     else:
         st.warning(status_message)
         st.info("Open the Free Local AI Setup tab for install and connection steps.")
@@ -9907,9 +9907,9 @@ def app_builder_ai_page():
 
         if st.button("Ask App Builder AI", key="ask_app_builder_ai"):
             if not question.strip():
-                st.error("Enter a build/fix request first.")
+                pb_error("Enter a build/fix request first.")
             elif not app_builder_external_consent:
-                st.error("Review the code context and confirm external AI data sharing first.")
+                pb_error("Review the code context and confirm external AI data sharing first.")
             else:
                 with st.spinner("App Builder AI is reviewing JobHub..."):
                     answer, error = app_builder_ai_call(
@@ -9920,7 +9920,7 @@ def app_builder_ai_page():
                     )
 
                 if error:
-                    st.error(error)
+                    pb_error(error)
                 else:
                     st.markdown("### App Builder AI")
                     st.write(answer)
@@ -9930,7 +9930,7 @@ def app_builder_ai_page():
                         note_text = st.text_area("Note to save", value=answer[:4000], height=200, key="save_ai_learning_text")
                         if st.button("Save Learning Note", key="save_ai_learning_button"):
                             save_app_builder_note(note_topic, note_text, source="App Builder AI")
-                            st.success("Learning note saved.")
+                            pb_success("Learning note saved.")
 
     elif section == "Self-Edit Code":
         app_builder_self_edit_section()
@@ -9954,16 +9954,16 @@ def app_builder_ai_page():
         if submitted:
             urls = [u.strip() for u in urls_text.splitlines() if u.strip()]
             if not urls:
-                st.error("Paste at least one URL.")
+                pb_error("Paste at least one URL.")
             else:
                 for url in urls:
                     st.markdown(f"### Learning from: {url}")
                     with st.spinner(f"Fetching and summarising {url}..."):
                         summary, error = summarise_url_into_learning(topic, url)
                     if error:
-                        st.error(error)
+                        pb_error(error)
                     else:
-                        st.success("Saved learning note.")
+                        pb_success("Saved learning note.")
                         st.write(summary)
 
         st.markdown("### Saved Learning Sources")
@@ -9992,13 +9992,13 @@ def app_builder_ai_page():
                         st.markdown(f"Refreshing: {row['URL']}")
                         summary, error = summarise_url_into_learning(row["Topic"], row["URL"])
                         if error:
-                            st.error(error)
+                            pb_error(error)
                         else:
                             execute(
                                 "UPDATE app_learning_sources SET last_checked = ?, last_summary = ? WHERE id = ?",
                                 (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), summary, int(row["ID"]))
                             )
-                            st.success("Refreshed and saved.")
+                            pb_success("Refreshed and saved.")
 
     elif section == "Saved Learnings":
         st.subheader("Saved Learnings")
@@ -10028,7 +10028,7 @@ def app_builder_ai_page():
             col1, col2 = st.columns(2)
             if col1.button("Delete This Learning Note", key="delete_learning_note"):
                 execute("DELETE FROM app_builder_notes WHERE id = ?", (selected_id,))
-                st.success("Learning note deleted.")
+                pb_success("Learning note deleted.")
                 refresh()
 
         with st.expander("Add manual learning note"):
@@ -10039,10 +10039,10 @@ def app_builder_ai_page():
                 submitted = st.form_submit_button("Save Manual Learning")
                 if submitted:
                     if not topic.strip() or not note.strip():
-                        st.error("Topic and note are required.")
+                        pb_error("Topic and note are required.")
                     else:
                         save_app_builder_note(topic, note, source=source)
-                        st.success("Learning note saved.")
+                        pb_success("Learning note saved.")
                         refresh()
 
     else:
@@ -10055,7 +10055,7 @@ def jobhub_ai_assistant_page():
 
     status_ok, status_message = ai_backend_ready()
     if status_ok:
-        st.success(status_message)
+        pb_success(status_message)
     else:
         st.warning(status_message)
         st.info("For free mode, install Ollama and use App Builder AI > Free Local AI Setup.")
@@ -10112,14 +10112,14 @@ def jobhub_ai_assistant_page():
 
     if st.button("Ask JobHub AI", key="ask_jobhub_ai"):
         if not question.strip():
-            st.error("Enter a question first.")
+            pb_error("Enter a question first.")
         elif not external_consent:
-            st.error("Review the context and confirm external AI data sharing first.")
+            pb_error("Review the context and confirm external AI data sharing first.")
         else:
             with st.spinner("JobHub AI is reviewing your data..."):
                 answer, error = jobhub_ai_answer(question, context_text)
             if error:
-                st.error(error)
+                pb_error(error)
             else:
                 st.markdown("### Answer")
                 st.write(answer)
@@ -10392,7 +10392,7 @@ def pb_control_daily_dashboard(df):
     risk_cols = ["Job No", "Job Name", "Status", "Health", "Health Notes", "Adjusted Contract Value", "Total Actual Cost", "Gross Profit %", "End Date"]
     risks = df[df["Health"].isin(["Red", "Orange"])][risk_cols]
     if risks.empty:
-        st.success("No red or orange jobs found.")
+        pb_success("No red or orange jobs found.")
     else:
         st.dataframe(risks, width="stretch", hide_index=True)
 
@@ -10471,7 +10471,7 @@ def pb_control_budget_lock(df):
                     quoted_subcontractors = ?, quoted_sundries = ?, target_gp_percent = ?, locked_at = ?, locked_by = ?, notes = ?
                 WHERE job_id = ?
             """, (quoted_labour_hours, quoted_labour_cost, quoted_materials, quoted_access, quoted_subbies, quoted_sundries, target_gp, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), current_username(), notes, job_id))
-        st.success("Job budget saved.")
+        pb_success("Job budget saved.")
         refresh()
 
     budget_df = df_query("""
@@ -10523,7 +10523,7 @@ def pb_control_variations():
                 (job_id, variation_no, description, reason, amount_ex_gst, status, sent_date, approved_date, approved_by, notes, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (job_id, variation_no, description, reason, amount, status, sent_date, approved_date, approved_by, notes, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-            st.success("Variation saved.")
+            pb_success("Variation saved.")
             refresh()
 
     variations = df_query("""
@@ -10572,7 +10572,7 @@ def pb_control_invoice_claims():
                 (job_id, claim_no, description, amount_ex_gst, invoice_date, due_date, paid_date, status, notes, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (job_id, claim_no, description, amount, invoice_date, due_date, paid_date, status, notes, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-            st.success("Invoice / claim saved.")
+            pb_success("Invoice / claim saved.")
             refresh()
 
     claims = df_query("""
@@ -10619,7 +10619,7 @@ def pb_control_staff_schedule():
                 (job_id, employee_id, schedule_date, start_time, finish_time, site_role, notes, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, (job_options[selected_job], employee_options[selected_employee], schedule_date, start_time, finish_time, site_role, notes, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-            st.success("Schedule entry saved.")
+            pb_success("Schedule entry saved.")
             refresh()
 
     c1, c2 = st.columns(2)
@@ -10719,7 +10719,7 @@ def pb_control_ai_job_review(df):
         with st.spinner("AI reviewing job..."):
             answer, error = jobhub_ai_answer(prompt, context)
         if error:
-            st.error(error)
+            pb_error(error)
         else:
             st.markdown("### AI Review")
             st.write(answer)
@@ -10839,7 +10839,7 @@ def go_to_linked_job_view(job_id=None, builder_id=None, mode=None):
     # Defer navigation until the next rerun. The router applies both the
     # main menu and Control Centre section before their widgets are created.
     st.session_state["go_to_menu"] = "Job Lookup / Links"
-    st.rerun()
+    pb_rerun()
 
 
 def job_lookup_dataframe(include_archived=True):
@@ -11295,7 +11295,7 @@ def render_job_linked_info(job_id, expanded=True):
         ):
             try:
                 pdf_path = generate_day_labour_sheet_pdf(job_id)
-                st.success("Day Labour Sheet generated and attached to this job.")
+                pb_success("Day Labour Sheet generated and attached to this job.")
                 with open(pdf_path, "rb") as f:
                     st.download_button(
                         "Download Day Labour Sheet",
@@ -11305,7 +11305,7 @@ def render_job_linked_info(job_id, expanded=True):
                         key=f"download_day_labour_pdf_{job_id}",
                     )
             except Exception as e:
-                st.error(f"Could not generate Day Labour Sheet: {e}")
+                pb_error(f"Could not generate Day Labour Sheet: {e}")
 
         pdf_col1, pdf_col2, pdf_col3 = st.columns(3)
 
@@ -11313,7 +11313,7 @@ def render_job_linked_info(job_id, expanded=True):
             if st.button("Generate Paint & Materials Order PDF", key=f"generate_paint_order_{job_id}"):
                 try:
                     pdf_path = generate_paint_order_pdf(job_id)
-                    st.success("Paint & Materials Order PDF generated and attached to this job.")
+                    pb_success("Paint & Materials Order PDF generated and attached to this job.")
 
                     with open(pdf_path, "rb") as f:
                         st.download_button(
@@ -11325,13 +11325,13 @@ def render_job_linked_info(job_id, expanded=True):
                         )
 
                 except Exception as e:
-                    st.error(f"Could not generate paint order PDF: {e}")
+                    pb_error(f"Could not generate paint order PDF: {e}")
 
         with pdf_col2:
             if st.button("Generate Equipment Checklist PDF", key=f"generate_equipment_pdf_{job_id}"):
                 try:
                     pdf_path = generate_equipment_checklist_pdf(job_id)
-                    st.success("Equipment Checklist PDF generated and attached to this job.")
+                    pb_success("Equipment Checklist PDF generated and attached to this job.")
 
                     with open(pdf_path, "rb") as f:
                         st.download_button(
@@ -11343,7 +11343,7 @@ def render_job_linked_info(job_id, expanded=True):
                         )
 
                 except Exception as e:
-                    st.error(f"Could not generate equipment checklist PDF: {e}")
+                    pb_error(f"Could not generate equipment checklist PDF: {e}")
 
         with pdf_col3:
             st.caption("Variation form")
@@ -11369,13 +11369,13 @@ def render_job_linked_info(job_id, expanded=True):
                             "variation_no": variation_no,
                         }
                     except Exception as e:
-                        st.error(f"Could not generate variation form PDF: {e}")
+                        pb_error(f"Could not generate variation form PDF: {e}")
 
             if variation_result_key in st.session_state:
                 variation_result = st.session_state[variation_result_key]
                 pdf_path = variation_result["pdf_path"]
                 variation_no = variation_result["variation_no"]
-                st.success(f"Variation Form {variation_no} generated and attached to this job.")
+                pb_success(f"Variation Form {variation_no} generated and attached to this job.")
 
                 with open(pdf_path, "rb") as f:
                     st.download_button(
@@ -11698,16 +11698,16 @@ def job_folders_page():
     folder_action_cols = st.columns(4)
     if folder_action_cols[0].button("Go to Job Register", key="folder_go_job_register"):
         st.session_state["go_to_menu"] = "Jobs"
-        st.rerun()
+        pb_rerun()
     if folder_action_cols[1].button("Go to Materials", key="folder_go_materials"):
         st.session_state["go_to_menu"] = "Material Costs"
-        st.rerun()
+        pb_rerun()
     if folder_action_cols[2].button("Go to Timesheets", key="folder_go_timesheets"):
         st.session_state["go_to_menu"] = "Timesheets"
-        st.rerun()
+        pb_rerun()
     if folder_action_cols[3].button("Go to Photos", key="folder_go_photos"):
         st.session_state["go_to_menu"] = "Job Photos"
-        st.rerun()
+        pb_rerun()
 
     st.divider()
     render_job_linked_info(selected_job_id)
@@ -11734,7 +11734,7 @@ def initialise_jobhub_runtime(database_url, data_dir):
 try:
     initialise_jobhub_runtime(DATABASE_URL, DATA_DIR)
 except Exception as exc:
-    st.error("JobHub could not complete its database startup checks.")
+    pb_error("JobHub could not complete its database startup checks.")
     st.code(str(exc))
     st.info(
         "Check DATABASE_URL, the Render persistent disk, and the latest deployment logs. "
@@ -11852,7 +11852,7 @@ if st.sidebar.button(
     ):
         st.session_state.pop(navigation_key, None)
     st.session_state["go_to_menu"] = sidebar_reset_target
-    st.rerun()
+    pb_rerun()
 
 hidden_route_options = (
     list(management_menu_map.values()) +
@@ -12053,7 +12053,7 @@ def normalise_product_pricing_dataframe(source_df):
             raise ValueError(f"Product {product_code} is missing Unit.")
 
         price = _product_import_float(source_row.get(resolved["price_ex_gst"], ""))
-        records_by_code[product_code] = (
+        records_by_code[product_code.casefold()] = (
             product_code,
             product_name,
             supplier,
@@ -12071,38 +12071,35 @@ def normalise_product_pricing_dataframe(source_df):
 
 
 def import_product_pricing_dataframe(source_df, source_file_name=""):
+    """Import pricing with one existing-code lookup and batched writes."""
     rows = normalise_product_pricing_dataframe(source_df)
     conn = connect()
     inserted = 0
     updated = 0
     try:
         cur = conn.cursor()
+        cur.execute("SELECT product_code FROM products")
+        existing_codes = {
+            str(row[0] or "").strip().casefold(): str(row[0] or "").strip()
+            for row in cur.fetchall()
+            if str(row[0] or "").strip()
+        }
+
+        update_rows = []
+        insert_rows = []
         for product_code, product_name, supplier, unit, price_ex_gst, notes in rows:
-            cur.execute(
-                "SELECT id FROM products WHERE LOWER(TRIM(product_code)) = LOWER(TRIM(?)) LIMIT 1",
-                (product_code,),
-            )
-            existing = cur.fetchone()
-            if existing:
-                cur.execute("""
-                    UPDATE products
-                    SET product_name = ?, supplier = ?, unit = ?, price_ex_gst = ?, notes = ?
-                    WHERE LOWER(TRIM(product_code)) = LOWER(TRIM(?))
-                """, (
+            existing_code = existing_codes.get(product_code.casefold())
+            if existing_code:
+                update_rows.append((
                     product_name,
                     supplier,
                     unit,
                     price_ex_gst,
                     notes,
-                    product_code,
+                    existing_code,
                 ))
-                updated += 1
             else:
-                cur.execute("""
-                    INSERT INTO products
-                    (product_code, product_name, supplier, unit, price_ex_gst, notes)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                """, (
+                insert_rows.append((
                     product_code,
                     product_name,
                     supplier,
@@ -12110,7 +12107,24 @@ def import_product_pricing_dataframe(source_df, source_file_name=""):
                     price_ex_gst,
                     notes,
                 ))
-                inserted += 1
+                existing_codes[product_code.casefold()] = product_code
+
+        if update_rows:
+            cur.executemany("""
+                UPDATE products
+                SET product_name = ?, supplier = ?, unit = ?, price_ex_gst = ?, notes = ?
+                WHERE product_code = ?
+            """, update_rows)
+            updated = len(update_rows)
+
+        if insert_rows:
+            cur.executemany("""
+                INSERT INTO products
+                (product_code, product_name, supplier, unit, price_ex_gst, notes)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, insert_rows)
+            inserted = len(insert_rows)
+
         conn.commit()
     except Exception:
         try:
@@ -12162,11 +12176,19 @@ elif menu == "Job Folders":
 
 
 elif menu == "Dashboard":
+    dashboard_counts = df_query("""
+        SELECT
+            (SELECT COUNT(*) FROM jobs) AS jobs_count,
+            (SELECT COUNT(*) FROM builders_clients) AS contacts_count,
+            (SELECT COUNT(*) FROM employees) AS employees_count,
+            (SELECT COUNT(*) FROM products) AS products_count
+    """)
+    counts = dashboard_counts.iloc[0] if not dashboard_counts.empty else {}
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Jobs", int(df_query("SELECT COUNT(*) AS c FROM jobs").iloc[0]["c"]))
-    c2.metric("Builders / Clients", int(df_query("SELECT COUNT(*) AS c FROM builders_clients").iloc[0]["c"]))
-    c3.metric("Employees", int(df_query("SELECT COUNT(*) AS c FROM employees").iloc[0]["c"]))
-    c4.metric("Products", int(df_query("SELECT COUNT(*) AS c FROM products").iloc[0]["c"]))
+    c1.metric("Jobs", int(counts.get("jobs_count", 0) or 0))
+    c2.metric("Builders / Clients", int(counts.get("contacts_count", 0) or 0))
+    c3.metric("Employees", int(counts.get("employees_count", 0) or 0))
+    c4.metric("Products", int(counts.get("products_count", 0) or 0))
 
     st.subheader("Open Jobs")
     active = df_query("""
@@ -12224,7 +12246,7 @@ elif menu == "Jobs":
             if submitted and job_no:
                 builder_id = builder_options.get(builder_label) if builder_label else None
                 if start_date_value and end_date_value and end_date_value < start_date_value:
-                    st.error("End Date cannot be before Start Date.")
+                    pb_error("End Date cannot be before Start Date.")
                 else:
                     try:
                         execute("""
@@ -12233,10 +12255,10 @@ elif menu == "Jobs":
                             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """, (job_no.strip(), job_name, builder_id, site_address, status, leading_hand, start_date, end_date, contract_value, notes))
                         record_audit_event("job_created", "job", job_no.strip())
-                        st.success(f"Saved job {job_no}")
+                        pb_success(f"Saved job {job_no}")
                         refresh()
                     except Exception:
-                        st.error("That job number already exists or the job could not be saved. Use Edit Existing Job for updates.")
+                        pb_error("That job number already exists or the job could not be saved. Use Edit Existing Job for updates.")
 
     with tab_edit:
         st.subheader("Edit Existing Job")
@@ -12301,7 +12323,7 @@ elif menu == "Jobs":
                         selected_id, current_version,
                     ))
                     if updated_rows == 0:
-                        st.error(
+                        pb_error(
                             "This job changed after you opened the form. Reload it and review the latest values "
                             "before saving again."
                         )
@@ -12312,7 +12334,7 @@ elif menu == "Jobs":
                             selected_id,
                             {"previous_row_version": current_version},
                         )
-                        st.success(f"Updated job {edit_job_no}")
+                        pb_success(f"Updated job {edit_job_no}")
                         refresh()
 
     with tab_remove:
@@ -12340,7 +12362,7 @@ elif menu == "Jobs":
                     selected_id,
                 ))
                 record_audit_event("job_archived", "job", selected_id)
-                st.success("Job archived.")
+                pb_success("Job archived.")
                 refresh()
 
             if col2.button("Delete Job"):
@@ -12362,7 +12384,7 @@ elif menu == "Jobs":
                 else:
                     execute("DELETE FROM jobs WHERE id = ?", (selected_id,))
                     record_audit_event("empty_job_deleted", "job", selected_id)
-                    st.success("Job deleted.")
+                    pb_success("Job deleted.")
                 refresh()
 
     with tab_archived:
@@ -12480,7 +12502,7 @@ elif menu == "Jobs":
                     ))
 
                     if updated_rows == 0:
-                        st.error(
+                        pb_error(
                             "This job changed after you opened the form. Reload it and review the latest values "
                             "before saving again."
                         )
@@ -12492,9 +12514,9 @@ elif menu == "Jobs":
                             {"previous_row_version": current_version},
                         )
                         if edit_status != "Archived":
-                            st.success(f"Updated and restored job {edit_job_no}.")
+                            pb_success(f"Updated and restored job {edit_job_no}.")
                         else:
-                            st.success(f"Updated archived job {edit_job_no}.")
+                            pb_success(f"Updated archived job {edit_job_no}.")
                         refresh()
 
             st.markdown("### Restore or Permanently Delete")
@@ -12508,7 +12530,7 @@ elif menu == "Jobs":
                     WHERE id = ?
                 """, (selected_archived_id,))
                 record_audit_event("job_restored", "job", selected_archived_id)
-                st.success("Job restored to Active.")
+                pb_success("Job restored to Active.")
                 refresh()
 
             with col_delete:
@@ -12520,10 +12542,10 @@ elif menu == "Jobs":
 
                 if st.button("Permanently Delete Archived Job"):
                     if not confirm_delete:
-                        st.error("Tick the confirmation box before permanently deleting.")
+                        pb_error("Tick the confirmation box before permanently deleting.")
                     else:
                         permanently_delete_job_and_linked_data(selected_archived_id)
-                        st.success("Archived job and linked data permanently deleted.")
+                        pb_success("Archived job and linked data permanently deleted.")
                         refresh()
 
 
@@ -12642,7 +12664,7 @@ elif menu == "Builders & Clients":
                     (normalised_name,),
                 )
                 if not duplicate.empty:
-                    st.error("A builder/client with that name already exists. Edit or merge the existing record.")
+                    pb_error("A builder/client with that name already exists. Edit or merge the existing record.")
                 else:
                     try:
                         execute("""
@@ -12651,10 +12673,10 @@ elif menu == "Builders & Clients":
                             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """, (typ, name.strip(), contact, phone, email, address, qbcc, abn, terms, notes, normalised_name))
                         record_audit_event("builder_client_created", "builder_client", name.strip())
-                        st.success(f"Saved {name}")
+                        pb_success(f"Saved {name}")
                         refresh()
                     except Exception:
-                        st.error("The builder/client could not be saved. Check for an existing duplicate.")
+                        pb_error("The builder/client could not be saved. Check for an existing duplicate.")
 
     with tab_edit:
         st.subheader("Edit Builder / Client")
@@ -12694,7 +12716,7 @@ elif menu == "Builders & Clients":
                         notes, name, selected_id,
                     ))
                     record_audit_event("builder_client_updated", "builder_client", selected_id)
-                    st.success(f"Updated {name}")
+                    pb_success(f"Updated {name}")
                     refresh()
 
     with tab_remove:
@@ -12714,10 +12736,10 @@ elif menu == "Builders & Clients":
 
             if st.button("Delete Builder / Client"):
                 if job_count > 0:
-                    st.error("Cannot delete this builder/client because jobs are linked to them. Edit those jobs first or leave the builder in the database.")
+                    pb_error("Cannot delete this builder/client because jobs are linked to them. Edit those jobs first or leave the builder in the database.")
                 else:
                     execute("DELETE FROM builders_clients WHERE id = ?", (selected_id,))
-                    st.success("Builder/client deleted.")
+                    pb_success("Builder/client deleted.")
                     refresh()
 
     with tab_merge:
@@ -12834,7 +12856,7 @@ elif menu == "Builders & Clients":
 
                     if merge_submitted:
                         if not merge_confirmed:
-                            st.error("Tick the confirmation box before merging contacts.")
+                            pb_error("Tick the confirmation box before merging contacts.")
                         else:
                             try:
                                 merge_result = merge_builder_client_records(
@@ -12853,14 +12875,14 @@ elif menu == "Builders & Clients":
                                         "notes": merged_notes,
                                     },
                                 )
-                                st.success(
+                                pb_success(
                                     f'Merged into "{merge_result["primary_name"]}". '
                                     f'{merge_result["duplicates_removed"]} duplicate record(s) removed and '
                                     f'{merge_result["jobs_moved"]} linked job(s) transferred.'
                                 )
                                 refresh()
                             except Exception as exc:
-                                st.error(f"Contacts were not merged: {exc}")
+                                pb_error(f"Contacts were not merged: {exc}")
             else:
                 st.info("Choose one or more duplicate contacts to preview and merge.")
 
@@ -12946,10 +12968,10 @@ elif menu == "Employees":
                         VALUES (?, ?, ?, ?, ?, ?, ?)
                     """, (name.strip(), role, phone, base_rate, rate_plus, status, notes))
                     record_audit_event("employee_created", "employee", name.strip())
-                    st.success(f"Saved {name}")
+                    pb_success(f"Saved {name}")
                     refresh()
                 except Exception:
-                    st.error("An employee with that name already exists. Use Edit Employee for updates.")
+                    pb_error("An employee with that name already exists. Use Edit Employee for updates.")
 
     with tab_edit:
         st.subheader("Edit Employee")
@@ -12988,7 +13010,7 @@ elif menu == "Employees":
                         SET name = ?, role = ?, phone = ?, base_hourly_rate = ?, rate_plus_10 = ?, status = ?, notes = ?
                         WHERE id = ?
                     """, (name, role, phone, base_rate, rate_plus, status, notes, selected_id))
-                    st.success(f"Updated {name}")
+                    pb_success(f"Updated {name}")
                     refresh()
 
     with tab_remove:
@@ -13008,17 +13030,17 @@ elif menu == "Employees":
                 # If this employee has a login, disable that login as well.
                 if has_related_records("app_users", "employee_id", selected_id):
                     execute("UPDATE app_users SET active = 0 WHERE employee_id = ?", (selected_id,))
-                st.success("Employee marked Inactive.")
+                pb_success("Employee marked Inactive.")
                 refresh()
 
             if col2.button("Delete Employee"):
                 result = delete_employee_and_linked_users(selected_id)
 
                 if result["deleted_users"]:
-                    st.success(f"Deleted {result['deleted_users']} linked user login account(s).")
+                    pb_success(f"Deleted {result['deleted_users']} linked user login account(s).")
 
                 if result["deleted_employee"]:
-                    st.success(f"Deleted {result['deleted_employee']} employee record(s).")
+                    pb_success(f"Deleted {result['deleted_employee']} employee record(s).")
 
                 if result["deactivated_employee"]:
                     st.info(f"Marked {result['deactivated_employee']} employee(s) as Inactive because they had job history or protected linked records.")
@@ -13108,17 +13130,17 @@ elif menu == "Employees":
 
             if st.button("Delete / Deactivate Selected Employees", key="bulk_employee_delete_button"):
                 if not selected_employee_ids:
-                    st.error("Select at least one employee first.")
+                    pb_error("Select at least one employee first.")
                 elif employee_bulk_confirm.strip().upper() != "DELETE EMPLOYEES":
-                    st.error("Type DELETE EMPLOYEES exactly before continuing.")
+                    pb_error("Type DELETE EMPLOYEES exactly before continuing.")
                 else:
                     result = delete_or_deactivate_selected_employees(selected_employee_ids)
 
                     if result["deleted_users"]:
-                        st.success(f"Deleted {result['deleted_users']} linked user login account(s).")
+                        pb_success(f"Deleted {result['deleted_users']} linked user login account(s).")
 
                     if result["deleted_employee"]:
-                        st.success(f"Deleted {result['deleted_employee']} employee record(s).")
+                        pb_success(f"Deleted {result['deleted_employee']} employee record(s).")
 
                     if result["deactivated_employee"]:
                         st.info(f"Marked {result['deactivated_employee']} employee(s) as Inactive because they had job history or protected linked records.")
@@ -13191,19 +13213,19 @@ elif menu == "Products":
                     key="product_pricing_import_button",
                 ):
                     if not product_import_confirm:
-                        st.error("Review the pricing and tick the confirmation box before importing.")
+                        pb_error("Review the pricing and tick the confirmation box before importing.")
                     else:
                         result = import_product_pricing_dataframe(
                             product_preview_df,
                             source_file_name=product_pricing_upload.name,
                         )
-                        st.success(
+                        pb_success(
                             f"Product pricing imported: {result['inserted']} added, "
                             f"{result['updated']} updated, {result['total']} processed."
                         )
                         refresh()
             except Exception as exc:
-                st.error(f"Could not read or import this product-pricing CSV: {exc}")
+                pb_error(f"Could not read or import this product-pricing CSV: {exc}")
 
         current_products_export = df_query("""
             SELECT product_code AS 'Product Code',
@@ -13249,7 +13271,7 @@ elif menu == "Products":
                         notes = excluded.notes
                 """, (code, product_name, supplier, unit, price, notes))
                 record_audit_event("product_upserted", "product", code)
-                st.success(f"Saved product {code}")
+                pb_success(f"Saved product {code}")
                 refresh()
 
     product_search = st.text_input(
@@ -13357,7 +13379,7 @@ elif menu == "Material Costs":
                     matched_price = float(product_row["price_ex_gst"] or 0)
                     matched_notes = str(product_row["notes"] or "")
 
-                    st.success(f"Selected product matches: {matched_code} — {matched_name}")
+                    pb_success(f"Selected product matches: {matched_code} — {matched_name}")
 
                     match_cols = st.columns(5)
                     match_cols[0].metric("Code", matched_code)
@@ -13423,9 +13445,9 @@ elif menu == "Material Costs":
 
                 if submitted:
                     if entry_type == "Saved Product" and not product_id:
-                        st.error("Select a saved product first.")
+                        pb_error("Select a saved product first.")
                     elif entry_type == "One-off / Not Listed" and not custom_product_name.strip():
-                        st.error("Enter a product/material name.")
+                        pb_error("Enter a product/material name.")
                     else:
                         execute("""
                             INSERT INTO material_entries
@@ -13461,7 +13483,7 @@ elif menu == "Material Costs":
                             custom_colour,
                         ))
 
-                        st.success("Material entry saved.")
+                        pb_success("Material entry saved.")
                         refresh()
 
     df = df_query("""
@@ -13511,13 +13533,13 @@ elif menu == "Material Costs":
 
         if st.button("Delete Selected Material Cost Entries", key="delete_material_entries_button"):
             if not selected_material_ids:
-                st.error("Select at least one material cost entry first.")
+                pb_error("Select at least one material cost entry first.")
             elif delete_materials_confirm.strip().upper() != "DELETE MATERIALS":
-                st.error("Type DELETE MATERIALS exactly before deleting material entries.")
+                pb_error("Type DELETE MATERIALS exactly before deleting material entries.")
             else:
                 for material_id in selected_material_ids:
                     execute("DELETE FROM material_entries WHERE id = ?", (int(material_id),))
-                st.success(f"Deleted {len(selected_material_ids)} material cost entr{'y' if len(selected_material_ids) == 1 else 'ies'}.")
+                pb_success(f"Deleted {len(selected_material_ids)} material cost entr{'y' if len(selected_material_ids) == 1 else 'ies'}.")
                 refresh()
     imported_df = df_query("""
         SELECT im.id AS 'ID',
@@ -13563,13 +13585,13 @@ elif menu == "Material Costs":
 
         if st.button("Delete Selected Imported PDF Material Lines", key="delete_imported_material_entries_button"):
             if not selected_imported_ids:
-                st.error("Select at least one imported PDF material line first.")
+                pb_error("Select at least one imported PDF material line first.")
             elif delete_imported_confirm.strip().upper() != "DELETE IMPORTED MATERIALS":
-                st.error("Type DELETE IMPORTED MATERIALS exactly before deleting imported material lines.")
+                pb_error("Type DELETE IMPORTED MATERIALS exactly before deleting imported material lines.")
             else:
                 for imported_id in selected_imported_ids:
                     execute("DELETE FROM imported_material_entries WHERE id = ?", (int(imported_id),))
-                st.success(f"Deleted {len(selected_imported_ids)} imported PDF material line{'s' if len(selected_imported_ids) != 1 else ''}.")
+                pb_success(f"Deleted {len(selected_imported_ids)} imported PDF material line{'s' if len(selected_imported_ids) != 1 else ''}.")
                 refresh()
 
 
@@ -13610,7 +13632,7 @@ elif menu == "Wages":
                         (job_id, employee_id, work_date, hours, notes)
                         VALUES (?, ?, ?, ?, ?)
                     """, (job_options[job_label], employee_id, work_date, hours, notes))
-                    st.success("Wage entry saved.")
+                    pb_success("Wage entry saved.")
                     refresh()
 
     df = df_query("""
@@ -13656,13 +13678,13 @@ elif menu == "Wages":
 
         if st.button("Delete Selected Wage Entries", key="delete_wage_entries_button"):
             if not selected_wage_ids:
-                st.error("Select at least one wage entry first.")
+                pb_error("Select at least one wage entry first.")
             elif delete_wages_confirm.strip().upper() != "DELETE WAGES":
-                st.error("Type DELETE WAGES exactly before deleting wage entries.")
+                pb_error("Type DELETE WAGES exactly before deleting wage entries.")
             else:
                 for wage_id in selected_wage_ids:
                     execute("DELETE FROM wage_entries WHERE id = ?", (int(wage_id),))
-                st.success(f"Deleted {len(selected_wage_ids)} wage entr{'y' if len(selected_wage_ids) == 1 else 'ies'}.")
+                pb_success(f"Deleted {len(selected_wage_ids)} wage entr{'y' if len(selected_wage_ids) == 1 else 'ies'}.")
                 refresh()
 
 
@@ -13747,7 +13769,7 @@ elif menu == "Equipment":
                             replace_imported_materials=replace_materials,
                         )
 
-                        st.success(
+                        pb_success(
                             f"Imported checklist into {selected_import_job}. "
                             f"Equipment/consumable lines saved: {equipment_count}. "
                             f"Paint/material lines saved: {material_count}."
@@ -13756,7 +13778,7 @@ elif menu == "Equipment":
                         refresh()
 
                 except Exception as e:
-                    st.error(f"Could not import this PDF checklist: {e}")
+                    pb_error(f"Could not import this PDF checklist: {e}")
 
 
     with tab_checklist:
@@ -13894,7 +13916,7 @@ elif menu == "Equipment":
                                 for old_id in list(existing["id"]):
                                     execute("DELETE FROM equipment_checklist_records WHERE id = ?", (int(old_id),))
 
-                    st.success("Equipment checklist saved to the selected job.")
+                    pb_success("Equipment checklist saved to the selected job.")
                     refresh()
 
     with tab_master:
@@ -13989,7 +14011,7 @@ elif menu == "Equipment":
                 selected = st.selectbox("Select line to delete", list(delete_map.keys()))
                 if st.button("Delete Selected Equipment Line"):
                     execute("DELETE FROM equipment_checklist_records WHERE id = ?", (delete_map[selected],))
-                    st.success("Equipment line deleted.")
+                    pb_success("Equipment line deleted.")
                     refresh()
 
     with tab_items:
@@ -14013,7 +14035,7 @@ elif menu == "Equipment":
                         notes = excluded.notes
                 """, (category, item_name, default_qty, notes))
                 record_audit_event("equipment_item_upserted", "equipment_item", item_name)
-                st.success(f"Saved checklist item: {item_name}")
+                pb_success(f"Saved checklist item: {item_name}")
                 refresh()
 
         items_df = df_query("""
@@ -14649,3 +14671,5 @@ elif menu == "Reports / Export":
 
 
 # PB_JOBHUB_FULL_AUDIT_CLEANUP_20260727
+
+# PB_JOBHUB_PERFORMANCE_FEEDBACK_V2_20260727

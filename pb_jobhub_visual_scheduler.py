@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 import os
 import sqlite3
 from contextlib import contextmanager
@@ -11,21 +13,18 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
-from jobhub_core import (
-    hash_password,
-    is_known_default_password_hash,
-    password_needs_rehash,
-    verify_password as core_verify_password,
-)
+from jobhub_feedback import error as pb_error, replay_pending as pb_replay_pending, rerun as pb_rerun, success as pb_success
 
 try:
     import psycopg2
+    from psycopg2.pool import ThreadedConnectionPool
 except ImportError:  # pragma: no cover - only used for local SQLite installs
     psycopg2 = None
+    ThreadedConnectionPool = None
 
 
 APP_NAME = "Premier Brushworks Staff Scheduler"
-APP_VERSION = "2.0-linked"
+APP_VERSION = "2.2-linked-pooled-feedback"
 JOBHUB_URL = os.getenv("JOBHUB_URL", "https://premierbwjobhub.onrender.com/").strip()
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 USE_POSTGRES = bool(DATABASE_URL)
@@ -62,17 +61,33 @@ def sql_text(sql: str) -> str:
     return sql.replace("?", "%s") if USE_POSTGRES else sql
 
 
+@st.cache_resource(show_spinner=False)
+def scheduler_postgres_pool():
+    """Reuse Postgres connections instead of opening one for every scheduler query."""
+    if not USE_POSTGRES:
+        return None
+    if ThreadedConnectionPool is None:
+        raise RuntimeError("psycopg2-binary is required when DATABASE_URL is set.")
+    return ThreadedConnectionPool(
+        minconn=1,
+        maxconn=4,
+        dsn=DATABASE_URL,
+        sslmode="require",
+    )
+
+
 @contextmanager
 def db_conn():
+    pool = None
     if USE_POSTGRES:
-        if psycopg2 is None:
-            raise RuntimeError("psycopg2-binary is required when DATABASE_URL is set.")
-        conn = psycopg2.connect(DATABASE_URL, sslmode="require")
+        pool = scheduler_postgres_pool()
+        conn = pool.getconn()
     else:
         SQLITE_PATH.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(SQLITE_PATH, timeout=30, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA busy_timeout = 30000")
     try:
         yield conn
         conn.commit()
@@ -80,7 +95,13 @@ def db_conn():
         conn.rollback()
         raise
     finally:
-        conn.close()
+        if pool is not None:
+            try:
+                pool.putconn(conn)
+            except Exception:
+                pool.putconn(conn, close=True)
+        else:
+            conn.close()
 
 
 def execute(sql: str, params: Iterable | None = None) -> int:
@@ -268,25 +289,26 @@ def init_linked_schema() -> None:
 # Authentication shared with JobHub
 # -----------------------------------------------------------------------------
 
+def verify_password(password: str, stored_hash: str) -> bool:
+    try:
+        stored_hash = str(stored_hash or "")
+        if stored_hash.startswith("pbkdf2_sha256$"):
+            _, iterations_text, salt, expected = stored_hash.split("$", 3)
+            digest = hashlib.pbkdf2_hmac(
+                "sha256", password.encode("utf-8"), bytes.fromhex(salt), int(iterations_text)
+            ).hex()
+            return hmac.compare_digest(digest, expected)
+        jobhub_hash = hashlib.sha256(password.encode("utf-8")).hexdigest()
+        return hmac.compare_digest(jobhub_hash, stored_hash)
+    except (ValueError, TypeError):
+        return False
+
+
 def authenticate(username: str, password: str):
-    user_columns = table_columns("app_users")
-    security_columns = {
-        "failed_login_count",
-        "locked_until",
-        "must_change_password",
-        "last_login_at",
-    }
-    has_security_columns = security_columns.issubset(user_columns)
-    security_select = (
-        ", u.failed_login_count, u.locked_until, u.must_change_password, u.last_login_at"
-        if has_security_columns
-        else ""
-    )
     df = query_df(
-        f"""
+        """
         SELECT u.id, u.username, u.password_hash, u.role, u.employee_id, u.active,
                e.name AS employee_name
-               {security_select}
         FROM app_users u
         LEFT JOIN employees e ON e.id=u.employee_id
         WHERE LOWER(TRIM(u.username))=LOWER(TRIM(?)) AND COALESCE(u.active,1)=1
@@ -296,48 +318,7 @@ def authenticate(username: str, password: str):
     if df.empty:
         return None
     row = df.iloc[0].to_dict()
-    stored_hash = str(row.get("password_hash", "") or "")
-    if is_known_default_password_hash(stored_hash):
-        return None
-
-    if has_security_columns:
-        locked_until = str(row.get("locked_until", "") or "").strip()
-        if locked_until:
-            try:
-                if datetime.fromisoformat(locked_until) > datetime.now():
-                    return None
-            except ValueError:
-                pass
-
-    if not core_verify_password(password, stored_hash):
-        if has_security_columns:
-            failures = int(row.get("failed_login_count", 0) or 0) + 1
-            lock_value = (
-                (datetime.now() + timedelta(minutes=15)).strftime("%Y-%m-%d %H:%M:%S")
-                if failures >= 5
-                else ""
-            )
-            execute(
-                "UPDATE app_users SET failed_login_count=?, locked_until=? WHERE id=?",
-                (failures, lock_value, int(row["id"])),
-            )
-        return None
-
-    if has_security_columns and int(row.get("must_change_password", 0) or 0) == 1:
-        st.session_state["linked_login_reason"] = "password_change_required"
-        return None
-
-    if has_security_columns:
-        new_hash = hash_password(password) if password_needs_rehash(stored_hash) else stored_hash
-        execute(
-            """
-            UPDATE app_users
-            SET password_hash=?, failed_login_count=0, locked_until='', last_login_at=?
-            WHERE id=?
-            """,
-            (new_hash, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), int(row["id"])),
-        )
-    return row
+    return row if verify_password(password, row.get("password_hash", "")) else None
 
 
 def login_screen() -> None:
@@ -354,15 +335,12 @@ def login_screen() -> None:
             password = st.text_input("Password", type="password")
             submitted = st.form_submit_button("Sign in", type="primary", use_container_width=True)
         if submitted:
-            st.session_state.pop("linked_login_reason", None)
             user = authenticate(username, password)
             if user:
                 st.session_state["linked_user"] = user
-                st.rerun()
-            elif st.session_state.get("linked_login_reason") == "password_change_required":
-                st.error("Change the temporary password in JobHub before signing in to the scheduler.")
+                pb_rerun()
             else:
-                st.error("Incorrect JobHub username or password.")
+                pb_error("Incorrect JobHub username or password.")
         if JOBHUB_URL:
             st.link_button("Open JobHub", JOBHUB_URL, use_container_width=True)
     st.stop()
@@ -710,7 +688,7 @@ def sidebar(user: dict) -> str:
         st.sidebar.link_button("Open JobHub", JOBHUB_URL, use_container_width=True)
     if st.sidebar.button("Sign out", use_container_width=True):
         st.session_state.pop("linked_user", None)
-        st.rerun()
+        pb_rerun()
     st.sidebar.caption(f"Version {APP_VERSION}")
     st.sidebar.caption("Database: shared PostgreSQL" if USE_POSTGRES else f"Database: {SQLITE_PATH}")
     return page
@@ -737,12 +715,12 @@ def page_dashboard() -> None:
 
     alerts = conflict_report(assignments, leaves)
     if alerts:
-        st.error(f"{len(alerts)} scheduling warning{'s' if len(alerts) != 1 else ''}")
+        pb_error(f"{len(alerts)} scheduling warning{'s' if len(alerts) != 1 else ''}")
         with st.expander("Open warnings", expanded=True):
             for alert in alerts:
                 st.write(f"• {alert}")
     else:
-        st.success("No leave clashes, overlapping bookings or daily hour overloads were found.")
+        pb_success("No leave clashes, overlapping bookings or daily hour overloads were found.")
 
     chart = timeline_chart(assignments, f"Crew timeline · {start.strftime('%d %b')} to {end.strftime('%d %b %Y')}")
     if chart:
@@ -814,8 +792,8 @@ def page_schedule(user: dict) -> None:
                     )
                     added += int(ok)
                     skipped += int(not ok)
-                st.success(f"Copied {added} assignment(s); skipped {skipped} conflict(s).")
-                st.rerun()
+                pb_success(f"Copied {added} assignment(s); skipped {skipped} conflict(s).")
+                pb_rerun()
         with b2:
             csv = assignments.to_csv(index=False).encode("utf-8")
             st.download_button(
@@ -857,9 +835,9 @@ def page_schedule(user: dict) -> None:
                 notes,
                 str(user.get("username", "")),
             )
-            (st.success if ok else st.error)(message)
+            (pb_success if ok else pb_error)(message)
             if ok:
-                st.rerun()
+                pb_rerun()
 
     with tabs[2]:
         with st.form("bulk_linked_assignment"):
@@ -881,9 +859,9 @@ def page_schedule(user: dict) -> None:
             save_bulk = st.form_submit_button("Allocate crew", type="primary", use_container_width=True)
         if save_bulk:
             if not crew:
-                st.error("Select at least one employee.")
+                pb_error("Select at least one employee.")
             elif to_date(range_end) < to_date(range_start):
-                st.error("End date must be on or after start date.")
+                pb_error("End date must be on or after start date.")
             else:
                 day_numbers = {name: number for number, name in enumerate(["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"])}
                 selected_day_numbers = {day_numbers[name] for name in weekdays}
@@ -911,11 +889,11 @@ def page_schedule(user: dict) -> None:
                             added += 1
                         else:
                             skipped.append(f"{staff_name} {work_day.strftime('%d %b')}: {message}")
-                st.success(f"Added {added} JobHub schedule entries.")
+                pb_success(f"Added {added} JobHub schedule entries.")
                 if skipped:
                     st.warning("Skipped:\n\n" + "\n\n".join(f"• {item}" for item in skipped[:15]))
                 if added:
-                    st.rerun()
+                    pb_rerun()
 
     with tabs[3]:
         assignments = assignment_rows(start, end)
@@ -946,11 +924,11 @@ def page_schedule(user: dict) -> None:
                 job_no = edit_job.split(" · ", 1)[0]
                 job_id = int(jobs.loc[jobs["job_no"].astype(str) == job_no, "id"].iloc[0])
                 if edit_finish <= edit_start:
-                    st.error("Finish time must be after start time.")
+                    pb_error("Finish time must be after start time.")
                 elif has_approved_leave(employee_id, to_date(edit_date)):
-                    st.error("This staff member is on approved leave.")
+                    pb_error("This staff member is on approved leave.")
                 elif overlapping_assignment(employee_id, to_date(edit_date), edit_start, edit_finish, assignment_id):
-                    st.error("This would overlap another assignment.")
+                    pb_error("This would overlap another assignment.")
                 else:
                     execute(
                         """
@@ -973,12 +951,12 @@ def page_schedule(user: dict) -> None:
                             assignment_id,
                         ),
                     )
-                    st.success("JobHub schedule entry updated.")
-                    st.rerun()
+                    pb_success("JobHub schedule entry updated.")
+                    pb_rerun()
             if st.button("Delete selected assignment", use_container_width=True):
                 execute("DELETE FROM staff_schedule WHERE id=?", (assignment_id,))
-                st.success("JobHub schedule entry deleted.")
-                st.rerun()
+                pb_success("JobHub schedule entry deleted.")
+                pb_rerun()
 
 
 def page_leave(user: dict) -> None:
@@ -997,7 +975,7 @@ def page_leave(user: dict) -> None:
             save = st.form_submit_button("Save leave request", type="primary", use_container_width=True)
         if save:
             if to_date(end_date) < to_date(start_date):
-                st.error("End date must be on or after start date.")
+                pb_error("End date must be on or after start date.")
             else:
                 employee_id = int(staff.loc[staff["name"] == employee_name, "id"].iloc[0])
                 execute(
@@ -1018,8 +996,8 @@ def page_leave(user: dict) -> None:
                         datetime.now().isoformat(timespec="seconds"),
                     ),
                 )
-                st.success("Leave request saved.")
-                st.rerun()
+                pb_success("Leave request saved.")
+                pb_rerun()
 
     with tab_review:
         pending = query_df(
@@ -1045,15 +1023,15 @@ def page_leave(user: dict) -> None:
                     "UPDATE staff_leave_requests SET status='Approved',reviewed_by=?,reviewed_at=? WHERE id=?",
                     (str(user.get("username", "")), datetime.now().isoformat(timespec="seconds"), request_id),
                 )
-                st.success("Leave approved.")
-                st.rerun()
+                pb_success("Leave approved.")
+                pb_rerun()
             if c2.button("Reject", use_container_width=True):
                 execute(
                     "UPDATE staff_leave_requests SET status='Rejected',reviewed_by=?,reviewed_at=? WHERE id=?",
                     (str(user.get("username", "")), datetime.now().isoformat(timespec="seconds"), request_id),
                 )
-                st.success("Leave rejected.")
-                st.rerun()
+                pb_success("Leave rejected.")
+                pb_rerun()
 
     with tab_register:
         records = query_df(
@@ -1131,8 +1109,8 @@ def page_sync() -> None:
                         """,
                         (employee_id, target, notes.strip(), datetime.now().isoformat(timespec="seconds")),
                     )
-                st.success("Target hours saved.")
-                st.rerun()
+                pb_success("Target hours saved.")
+                pb_rerun()
 
 
 def page_export() -> None:
@@ -1140,7 +1118,7 @@ def page_export() -> None:
     start = st.date_input("Start date", value=week_start(date.today()))
     end = st.date_input("End date", value=week_start(date.today()) + timedelta(days=27))
     if to_date(end) < to_date(start):
-        st.error("End date must be on or after start date.")
+        pb_error("End date must be on or after start date.")
         return
     assignments = assignment_rows(to_date(start), to_date(end))
     leaves = leave_rows(to_date(start), to_date(end))
@@ -1196,7 +1174,7 @@ def page_my_leave(user: dict) -> None:
         submit = st.form_submit_button("Submit request", type="primary", use_container_width=True)
     if submit:
         if to_date(end_date) < to_date(start_date):
-            st.error("End date must be on or after start date.")
+            pb_error("End date must be on or after start date.")
         else:
             execute(
                 """
@@ -1216,8 +1194,8 @@ def page_my_leave(user: dict) -> None:
                     datetime.now().isoformat(timespec="seconds"),
                 ),
             )
-            st.success("Leave request submitted.")
-            st.rerun()
+            pb_success("Leave request submitted.")
+            pb_rerun()
     records = query_df(
         """
         SELECT start_date,end_date,leave_type,status,reason,reviewed_by,created_at
@@ -1232,11 +1210,11 @@ def main() -> None:
     try:
         valid, missing = validate_jobhub_schema()
     except Exception as exc:
-        st.error("Could not connect to the shared JobHub database.")
+        pb_error("Could not connect to the shared JobHub database.")
         st.exception(exc)
         st.stop()
     if not valid:
-        st.error("This database is not a JobHub database. Missing tables: " + ", ".join(missing))
+        pb_error("This database is not a JobHub database. Missing tables: " + ", ".join(missing))
         st.code(
             "For Render, set the scheduler's DATABASE_URL to the exact same PostgreSQL DATABASE_URL used by JobHub."
         )
@@ -1244,7 +1222,7 @@ def main() -> None:
     try:
         init_linked_schema()
     except Exception as exc:
-        st.error("Connected to JobHub, but the linked scheduling tables could not be initialised.")
+        pb_error("Connected to JobHub, but the linked scheduling tables could not be initialised.")
         st.exception(exc)
         st.stop()
 
@@ -1285,7 +1263,7 @@ def _scheduler_date_range(key_prefix: str, default_days: int = 13) -> tuple[date
     start_date = to_date(start)
     end_date = to_date(end)
     if end_date < start_date:
-        st.error("The end date must be on or after the start date.")
+        pb_error("The end date must be on or after the start date.")
         return start_date, start_date
     return start_date, end_date
 
@@ -1434,6 +1412,7 @@ def page_staff_to_jobs() -> None:
 
 def render_jobhub_staff_scheduler(user: dict | None = None) -> None:
     """Render the full native scheduler inside JobHub."""
+    pb_replay_pending()
     apply_embedded_scheduler_style()
     user = user or {}
     role = str(user.get("role", "employee") or "employee").lower()
@@ -1441,18 +1420,18 @@ def render_jobhub_staff_scheduler(user: dict | None = None) -> None:
     try:
         valid, missing = validate_jobhub_schema()
     except Exception as exc:
-        st.error("Could not connect the visual scheduler to the JobHub database.")
+        pb_error("Could not connect the visual scheduler to the JobHub database.")
         st.exception(exc)
         return
 
     if not valid:
-        st.error("The scheduler could not find the required JobHub tables: " + ", ".join(missing))
+        pb_error("The scheduler could not find the required JobHub tables: " + ", ".join(missing))
         return
 
     try:
         init_linked_schema()
     except Exception as exc:
-        st.error("The scheduling tables could not be initialised.")
+        pb_error("The scheduling tables could not be initialised.")
         st.exception(exc)
         return
 
@@ -1498,3 +1477,9 @@ def render_jobhub_staff_scheduler(user: dict | None = None) -> None:
             page_my_schedule(user)
         else:
             page_my_leave(user)
+
+
+
+# PB_JOBHUB_SCHEDULER_AUDIT_CLEANUP_20260727
+
+# PB_JOBHUB_SCHEDULER_FEEDBACK_V2_20260727
