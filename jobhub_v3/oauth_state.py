@@ -58,3 +58,85 @@ class OAuthStateSigner:
         if age < 0 or age > self.max_age_seconds:
             raise ValueError("OAuth state has expired.")
         return payload
+
+
+class OAuthNonceStore:
+    """One-use OAuth nonce register shared across Streamlit reruns."""
+
+    def __init__(self, connect, use_postgres: bool = False) -> None:
+        self.connect = connect
+        self.use_postgres = use_postgres
+
+    @staticmethod
+    def _hash(nonce: str) -> str:
+        return hashlib.sha256(nonce.encode("utf-8")).hexdigest()
+
+    def register(
+        self,
+        user_id: str,
+        nonce: str,
+        *,
+        created_at: str,
+        expires_at: str,
+    ) -> None:
+        placeholder = "%s" if self.use_postgres else "?"
+        conn = self.connect()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"""
+                INSERT INTO xero_oauth_nonces
+                (nonce_hash, user_id, expires_at, consumed_at, created_at)
+                VALUES ({placeholder},{placeholder},{placeholder},NULL,{placeholder})
+                """,
+                (self._hash(nonce), str(user_id), expires_at, created_at),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def consume(self, user_id: str, nonce: str, *, consumed_at: str) -> bool:
+        placeholder = "%s" if self.use_postgres else "?"
+        conn = self.connect()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"""
+                SELECT user_id, expires_at, consumed_at
+                FROM xero_oauth_nonces
+                WHERE nonce_hash = {placeholder}
+                """,
+                (self._hash(nonce),),
+            )
+            row = cursor.fetchone()
+            if not row or str(row[0]) != str(user_id) or row[2]:
+                return False
+            if datetime_from_iso(str(row[1])) < datetime_from_iso(consumed_at):
+                return False
+            cursor.execute(
+                f"""
+                UPDATE xero_oauth_nonces
+                SET consumed_at = {placeholder}
+                WHERE nonce_hash = {placeholder} AND consumed_at IS NULL
+                """,
+                (consumed_at, self._hash(nonce)),
+            )
+            if cursor.rowcount != 1:
+                conn.rollback()
+                return False
+            conn.commit()
+            return True
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+
+def datetime_from_iso(value: str):
+    from datetime import datetime
+
+    return datetime.fromisoformat(value)
