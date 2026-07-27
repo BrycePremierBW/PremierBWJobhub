@@ -4,11 +4,14 @@ on:
   pull_request:
     branches: [main]
   push:
-    branches: [operations-v2]
+    branches: [operations-v2, operations-v3, operations-v4]
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONPYCACHEPREFIX: /tmp/jobhub-pycache
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
