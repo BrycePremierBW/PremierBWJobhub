@@ -24,6 +24,12 @@ import streamlit as st
 import streamlit.components.v1 as components
 from jobhub_feedback import error as pb_error, replay_pending as pb_replay_pending, rerun as pb_rerun, success as pb_success
 from pb_jobhub_visual_scheduler import render_jobhub_staff_scheduler
+from jobhub_enterprise import (
+    ensure_enterprise_schema,
+    ensure_daily_backup,
+    render_field_mode,
+    render_operations_hub,
+)
 from jobhub_core import (
     calculate_estimate_pricing,
     calculate_shift_hours,
@@ -47,7 +53,7 @@ MAX_TAKEOFF_PACK_FILES = 300
 MAX_IMAGE_PIXELS = 25_000_000
 Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 
-PB_JOBHUB_BUILD = "2026.07.27-job-material-policy-management-notifications-v1"
+PB_JOBHUB_BUILD = "2026.07.27-enterprise-foundation-procurement-field-v1"
 
 
 # =============================
@@ -12912,6 +12918,28 @@ def job_folders_page():
 
 
 # =============================
+# ENTERPRISE OPERATIONS CONTEXT
+# =============================
+def jobhub_enterprise_context():
+    """Expose controlled existing JobHub services to the modular operations hub."""
+    return {
+        "connect": connect,
+        "df_query": df_query,
+        "execute": execute,
+        "record_audit_event": record_audit_event,
+        "create_management_notifications": create_management_notifications,
+        "get_current_user": get_current_user,
+        "save_job_photo": save_job_photo,
+        "pb_success": pb_success,
+        "pb_error": pb_error,
+        "pb_rerun": pb_rerun,
+        "DATA_DIR": DATA_DIR,
+        "JOB_FILES_DIR": JOB_FILES_DIR,
+        "USE_POSTGRES": USE_POSTGRES,
+    }
+
+
+# =============================
 # START APP
 # =============================
 @st.cache_resource(show_spinner=False)
@@ -12924,6 +12952,7 @@ def initialise_jobhub_runtime(database_url, data_dir):
     """
     init_db()
     apply_schema_migrations()
+    ensure_enterprise_schema(connect)
     seed_data()
     seed_app_users()
     return True
@@ -12942,6 +12971,15 @@ except Exception as exc:
 
 require_login()
 
+# Lightweight restart-safe daily database export.  The module checks for an
+# existing backup before doing any work, so normal page reruns remain fast.
+try:
+    ensure_daily_backup(jobhub_enterprise_context())
+except Exception as exc:
+    # Backup problems must never prevent staff from using JobHub.  They remain
+    # visible in Operations Hub > System / Backups for administrator follow-up.
+    pass
+
 pb_sidebar_header()
 pb_page_header(
     "Premier Brushworks JobHub",
@@ -12954,7 +12992,7 @@ render_sidebar_notifications()
 role = current_role()
 
 if role == "employee":
-    main_menu_options = ["Employee Portal"]
+    main_menu_options = ["Field Mode", "Employee Portal"]
     management_menu_map = {}
     estimating_menu_map = {}
     site_operations_menu_map = {}
@@ -12963,6 +13001,7 @@ elif role == "manager":
     main_menu_options = [
         "Dashboard",
         "Control Centre",
+        "Operations Hub",
         "Jobs",
         "Job Folders",
         "Estimating",
@@ -12998,6 +13037,7 @@ else:
     main_menu_options = [
         "Dashboard",
         "Control Centre",
+        "Operations Hub",
         "Jobs",
         "Job Folders",
         "Estimating",
@@ -13348,8 +13388,14 @@ def import_product_pricing_dataframe(source_df, source_file_name=""):
     return {"inserted": inserted, "updated": updated, "total": len(rows)}
 
 
-if menu == "Employee Portal":
+if menu == "Field Mode":
+    render_field_mode(jobhub_enterprise_context())
+
+elif menu == "Employee Portal":
     employee_portal()
+
+elif menu == "Operations Hub":
+    render_operations_hub(jobhub_enterprise_context())
 
 elif menu == "App Builder AI":
     app_builder_ai_page()
