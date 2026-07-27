@@ -61,7 +61,7 @@ MAX_TAKEOFF_PACK_FILES = 300
 MAX_IMAGE_PIXELS = 25_000_000
 Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 
-PB_JOBHUB_BUILD = "2026.07.28-bulk-timesheet-dates-v1"
+PB_JOBHUB_BUILD = "2026.07.28-edit-timesheets-v1"
 PLANNING_LABOUR_RATE = 60.0
 
 
@@ -5459,6 +5459,203 @@ def set_timesheet_status(timesheet_id, status):
     )
 
 
+def update_timesheet_entry(
+    timesheet_id,
+    job_id,
+    employee_id,
+    work_date,
+    start_time,
+    finish_time,
+    break_minutes,
+    total_hours,
+    work_type,
+    notes,
+):
+    """Edit a timesheet and transactionally keep its wage posting consistent."""
+    timesheet_id = int(timesheet_id)
+    job_id = int(job_id)
+    employee_id = int(employee_id)
+    work_date = str(work_date)
+    start_time = str(start_time)
+    finish_time = str(finish_time)
+    break_minutes = int(break_minutes)
+    total_hours = float(total_hours)
+    work_type = str(work_type or "")
+    notes = str(notes or "")
+
+    conn = connect()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT job_id, employee_id, work_date, start_time, finish_time,
+                   break_minutes, total_hours, work_type,
+                   COALESCE(status, 'Submitted'), notes
+            FROM timesheet_entries
+            WHERE id = ?
+        """, (timesheet_id,))
+        original = cur.fetchone()
+        if not original:
+            raise ValueError("Timesheet not found.")
+
+        (
+            original_job_id,
+            original_employee_id,
+            original_work_date,
+            original_start_time,
+            original_finish_time,
+            original_break_minutes,
+            original_total_hours,
+            original_work_type,
+            original_status,
+            original_notes,
+        ) = original
+
+        cur.execute("""
+            SELECT id
+            FROM timesheet_entries
+            WHERE job_id = ?
+              AND employee_id = ?
+              AND work_date = ?
+              AND start_time = ?
+              AND finish_time = ?
+              AND id <> ?
+              AND COALESCE(status, 'Submitted') <> 'Rejected'
+            LIMIT 1
+        """, (
+            job_id,
+            employee_id,
+            work_date,
+            start_time,
+            finish_time,
+            timesheet_id,
+        ))
+        if cur.fetchone():
+            raise ValueError(
+                "A matching timesheet already exists for this employee, job, date and shift."
+            )
+
+        status = str(original_status or "Submitted").title()
+        if status == "Processed":
+            status = "Paid"
+
+        cur.execute("""
+            UPDATE timesheet_entries
+            SET job_id = ?, employee_id = ?, work_date = ?,
+                start_time = ?, finish_time = ?, break_minutes = ?,
+                total_hours = ?, work_type = ?, notes = ?, status = ?
+            WHERE id = ?
+        """, (
+            job_id,
+            employee_id,
+            work_date,
+            start_time,
+            finish_time,
+            break_minutes,
+            total_hours,
+            work_type,
+            notes,
+            status,
+            timesheet_id,
+        ))
+
+        hourly_rate_snapshot = None
+        if status in {"Approved", "Paid"}:
+            cur.execute("""
+                SELECT hourly_rate_snapshot
+                FROM wage_entries
+                WHERE timesheet_id = ?
+                LIMIT 1
+            """, (timesheet_id,))
+            existing_wage = cur.fetchone()
+
+            if (
+                int(original_employee_id) == employee_id
+                and existing_wage
+                and existing_wage[0] is not None
+            ):
+                hourly_rate_snapshot = float(existing_wage[0])
+            else:
+                cur.execute("""
+                    SELECT COALESCE(rate_plus_10, base_hourly_rate, 0)
+                    FROM employees
+                    WHERE id = ?
+                """, (employee_id,))
+                employee_rate = cur.fetchone()
+                hourly_rate_snapshot = float(employee_rate[0] or 0) if employee_rate else 0.0
+
+            cur.execute("""
+                INSERT INTO wage_entries
+                (job_id, employee_id, work_date, hours, notes, timesheet_id,
+                 hourly_rate_snapshot, source)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(timesheet_id) DO UPDATE SET
+                    job_id = excluded.job_id,
+                    employee_id = excluded.employee_id,
+                    work_date = excluded.work_date,
+                    hours = excluded.hours,
+                    notes = excluded.notes,
+                    hourly_rate_snapshot = excluded.hourly_rate_snapshot,
+                    source = excluded.source
+            """, (
+                job_id,
+                employee_id,
+                work_date,
+                total_hours,
+                f"Edited {status.lower()} timesheet {timesheet_id}: "
+                f"{start_time}-{finish_time}, break {break_minutes} min. {notes}".strip(),
+                timesheet_id,
+                hourly_rate_snapshot,
+                "Edited Timesheet",
+            ))
+        else:
+            cur.execute(
+                "DELETE FROM wage_entries WHERE timesheet_id = ?",
+                (timesheet_id,),
+            )
+
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+
+    before = {
+        "job_id": original_job_id,
+        "employee_id": original_employee_id,
+        "work_date": original_work_date,
+        "start_time": original_start_time,
+        "finish_time": original_finish_time,
+        "break_minutes": original_break_minutes,
+        "total_hours": original_total_hours,
+        "work_type": original_work_type,
+        "notes": original_notes,
+        "status": original_status,
+    }
+    after = {
+        "job_id": job_id,
+        "employee_id": employee_id,
+        "work_date": work_date,
+        "start_time": start_time,
+        "finish_time": finish_time,
+        "break_minutes": break_minutes,
+        "total_hours": total_hours,
+        "work_type": work_type,
+        "notes": notes,
+        "status": status,
+        "hourly_rate_snapshot": hourly_rate_snapshot,
+    }
+    record_audit_event(
+        "timesheet_edited",
+        "timesheet",
+        timesheet_id,
+        {"before": before, "after": after},
+    )
+
+
 def delete_timesheet_entry(timesheet_id):
     conn = connect()
     try:
@@ -5517,6 +5714,211 @@ def timesheet_status_filter(label, key, default="All"):
         index=default_index,
         key=key,
     )
+
+
+def render_timesheet_edit_form(timesheet_id, key_prefix):
+    """Render a reviewed edit form for one existing timesheet."""
+    timesheet = df_query("""
+        SELECT t.id, t.job_id, t.employee_id, t.work_date, t.start_time,
+               t.finish_time, t.break_minutes, t.total_hours, t.work_type,
+               COALESCE(t.status, 'Submitted') AS status, t.notes,
+               j.job_no, j.job_name, e.name AS employee_name
+        FROM timesheet_entries t
+        JOIN jobs j ON j.id = t.job_id
+        JOIN employees e ON e.id = t.employee_id
+        WHERE t.id = ?
+    """, (int(timesheet_id),))
+    if timesheet.empty:
+        pb_error("The selected timesheet could not be found.")
+        return
+
+    row = timesheet.iloc[0]
+    job_options = get_job_options()
+    employee_options = get_employee_options(active_only=False)
+    if not job_options or not employee_options:
+        pb_error("Jobs and employees must be available before a timesheet can be edited.")
+        return
+
+    def option_index(options, selected_id):
+        labels = list(options.keys())
+        matching = [
+            index for index, label in enumerate(labels)
+            if int(options[label]) == int(selected_id)
+        ]
+        return matching[0] if matching else 0
+
+    def stored_time(value, fallback):
+        text_value = str(value or "").strip()
+        for time_format in ("%H:%M:%S", "%H:%M"):
+            try:
+                return datetime.strptime(text_value, time_format).time()
+            except ValueError:
+                continue
+        return fallback
+
+    parsed_date = pd.to_datetime(row["work_date"], errors="coerce")
+    current_date = date.today() if pd.isna(parsed_date) else parsed_date.date()
+    current_start = stored_time(row["start_time"], time(7, 0))
+    current_finish = stored_time(row["finish_time"], time(15, 0))
+    current_break = int(float(row["break_minutes"] or 0))
+    current_work_type = str(row["work_type"] or "Painting")
+    work_types = [
+        "Painting", "Prep", "Spraying", "Touch-ups",
+        "Travel", "Site Setup", "Other",
+    ]
+    if current_work_type not in work_types:
+        work_types.append(current_work_type)
+
+    st.markdown(f"### Edit Timesheet #{int(timesheet_id)}")
+    st.caption(
+        f"Current status: {row['status']}. Approved or paid edits automatically "
+        "update the linked actual labour-cost posting."
+    )
+
+    job_labels = list(job_options.keys())
+    employee_labels = list(employee_options.keys())
+    selected_job = st.selectbox(
+        "Job",
+        job_labels,
+        index=option_index(job_options, row["job_id"]),
+        key=f"{key_prefix}_edit_job_{timesheet_id}",
+    )
+    selected_employee = st.selectbox(
+        "Employee",
+        employee_labels,
+        index=option_index(employee_options, row["employee_id"]),
+        key=f"{key_prefix}_edit_employee_{timesheet_id}",
+    )
+
+    date_col, start_col, finish_col, break_col = st.columns(4)
+    edited_date = date_col.date_input(
+        "Date",
+        value=current_date,
+        key=f"{key_prefix}_edit_date_{timesheet_id}",
+    )
+    edited_start = start_col.time_input(
+        "Start Time",
+        value=current_start,
+        step=timedelta(minutes=15),
+        key=f"{key_prefix}_edit_start_{timesheet_id}",
+    )
+    edited_finish = finish_col.time_input(
+        "Finish Time",
+        value=current_finish,
+        step=timedelta(minutes=15),
+        key=f"{key_prefix}_edit_finish_{timesheet_id}",
+    )
+    edited_break = int(break_col.number_input(
+        "Break Minutes",
+        min_value=0,
+        max_value=300,
+        step=15,
+        value=current_break,
+        key=f"{key_prefix}_edit_break_{timesheet_id}",
+    ))
+
+    calculation_error = ""
+    try:
+        edited_hours = calculate_shift_hours(
+            edited_start,
+            edited_finish,
+            edited_break,
+        )
+    except ValueError as exc:
+        edited_hours = 0.0
+        calculation_error = str(exc)
+
+    work_type_index = work_types.index(current_work_type)
+    edited_work_type = st.selectbox(
+        "Work Type",
+        work_types,
+        index=work_type_index,
+        key=f"{key_prefix}_edit_work_type_{timesheet_id}",
+    )
+    edited_notes = st.text_area(
+        "Notes",
+        value=str(row["notes"] or ""),
+        key=f"{key_prefix}_edit_notes_{timesheet_id}",
+    )
+
+    st.metric("Recalculated Hours", f"{edited_hours:.2f}")
+    if calculation_error:
+        pb_error(calculation_error)
+
+    edit_payload = {
+        "timesheet_id": int(timesheet_id),
+        "job_id": int(job_options[selected_job]),
+        "employee_id": int(employee_options[selected_employee]),
+        "date": edited_date.isoformat(),
+        "start": edited_start.strftime("%H:%M"),
+        "finish": edited_finish.strftime("%H:%M"),
+        "break_minutes": edited_break,
+        "hours": edited_hours,
+        "work_type": edited_work_type,
+        "notes": edited_notes,
+        "status": str(row["status"]),
+    }
+
+    st.markdown("#### Review Changes")
+    st.dataframe(
+        pd.DataFrame([{
+            "Job": selected_job,
+            "Employee": selected_employee,
+            "Date": edited_date.isoformat(),
+            "Start": edited_start.strftime("%H:%M"),
+            "Finish": edited_finish.strftime("%H:%M"),
+            "Break": f"{edited_break} min",
+            "Hours": f"{edited_hours:.2f}",
+            "Work Type": edited_work_type,
+            "Status": str(row["status"]),
+            "Notes": edited_notes,
+        }]),
+        width="stretch",
+        hide_index=True,
+    )
+    accepted = review_acceptance_checkbox(
+        f"{key_prefix}_edit_{timesheet_id}",
+        edit_payload,
+        (
+            "I have reviewed these changes and accept that approved or paid "
+            "labour-cost postings will also be updated."
+        ),
+    )
+
+    save_col, cancel_col = st.columns(2)
+    if save_col.button(
+        "Save Timesheet Changes",
+        key=f"{key_prefix}_edit_save_{timesheet_id}",
+        type="primary",
+        disabled=not accepted or edited_hours <= 0 or bool(calculation_error),
+    ):
+        try:
+            update_timesheet_entry(
+                timesheet_id,
+                job_options[selected_job],
+                employee_options[selected_employee],
+                edited_date.isoformat(),
+                edited_start.strftime("%H:%M"),
+                edited_finish.strftime("%H:%M"),
+                edited_break,
+                edited_hours,
+                edited_work_type,
+                edited_notes,
+            )
+        except Exception as exc:
+            pb_error(str(exc))
+        else:
+            st.session_state.pop(f"{key_prefix}_active_edit_id", None)
+            st.session_state[f"{key_prefix}_review_fingerprint"] = ""
+            pb_success(f"Timesheet #{int(timesheet_id)} updated successfully.")
+            refresh()
+
+    if cancel_col.button(
+        "Cancel Editing",
+        key=f"{key_prefix}_edit_cancel_{timesheet_id}",
+    ):
+        st.session_state.pop(f"{key_prefix}_active_edit_id", None)
+        refresh()
 
 
 def render_timesheet_bulk_actions(timesheet_df, key_prefix, empty_message="No timesheets match this selection."):
@@ -5602,7 +6004,16 @@ def render_timesheet_bulk_actions(timesheet_df, key_prefix, empty_message="No ti
         key=delete_confirm_key,
     )
 
-    approve_col, paid_col, reject_col, delete_col = st.columns(4)
+    edit_col, approve_col, paid_col, reject_col, delete_col = st.columns(5)
+    active_edit_key = f"{key_prefix}_active_edit_id"
+
+    if edit_col.button(
+        "Edit Selected",
+        key=f"{key_prefix}_edit",
+        disabled=not accepted_action or len(selected_ids) != 1,
+        help="Select exactly one timesheet to edit it without deleting it.",
+    ):
+        st.session_state[active_edit_key] = int(selected_ids[0])
 
     if approve_col.button(
         "Approve Selected",
@@ -5644,6 +6055,16 @@ def render_timesheet_bulk_actions(timesheet_df, key_prefix, empty_message="No ti
             delete_timesheet_entry(timesheet_id)
         pb_success(f"Deleted {len(selected_ids)} selected timesheet(s).")
         refresh()
+
+    if len(selected_ids) != 1:
+        st.caption("Select exactly one timesheet to use Edit Selected.")
+
+    active_edit_id = st.session_state.get(active_edit_key)
+    if active_edit_id and int(active_edit_id) in selected_ids:
+        with st.container(border=True):
+            render_timesheet_edit_form(int(active_edit_id), key_prefix)
+    elif active_edit_id:
+        st.session_state.pop(active_edit_key, None)
 
     return selected_ids
 
