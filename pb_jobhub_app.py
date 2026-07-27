@@ -2406,7 +2406,7 @@ def get_employee_job_options(employee_id):
         )
           AND COALESCE(j.archived_at, '') = ''
           AND COALESCE(j.status, '') <> 'Archived'
-        ORDER BY j.job_no
+        ORDER BY label
     """, (int(employee_id),))
     return {str(row["label"]): int(row["id"]) for _, row in df.iterrows()}
 
@@ -2448,10 +2448,13 @@ def serialise_material_supplier_list(values):
 
 def get_product_supplier_options():
     df = df_query("""
-        SELECT DISTINCT TRIM(COALESCE(supplier, '')) AS supplier
-        FROM products
-        WHERE TRIM(COALESCE(supplier, '')) <> ''
-        ORDER BY LOWER(TRIM(supplier)), TRIM(supplier)
+        SELECT supplier
+        FROM (
+            SELECT DISTINCT TRIM(COALESCE(supplier, '')) AS supplier
+            FROM products
+            WHERE TRIM(COALESCE(supplier, '')) <> ''
+        ) AS supplier_list
+        ORDER BY LOWER(supplier), supplier
     """)
     return [normalise_supplier_name(value) for value in df.get("supplier", pd.Series(dtype=str)).tolist() if normalise_supplier_name(value)]
 
