@@ -8,6 +8,7 @@ from jobhub_v3.mappings import (
     build_sales_invoice_payload,
 )
 from jobhub_v3.oauth_state import OAuthNonceStore, OAuthStateSigner
+from jobhub_v3.schema import ensure_xero_schema
 from jobhub_v3.token_store import XeroTokenStore
 from jobhub_v3.xero_client import XeroClient, XeroOAuthConfig, XeroToken
 
@@ -222,6 +223,37 @@ class TokenStoreTests(unittest.TestCase):
         loaded = store.load("tenant-1")
         self.assertEqual(loaded.access_token, "access")
         self.assertEqual(loaded.refresh_token, "refresh")
+
+
+class XeroSchemaTests(unittest.TestCase):
+    def test_schema_accepts_connection_factory_and_is_restart_safe(self):
+        import sqlite3
+
+        connection = sqlite3.connect(":memory:")
+
+        class SharedConnection:
+            def cursor(self):
+                return connection.cursor()
+
+            def commit(self):
+                return connection.commit()
+
+            def rollback(self):
+                return connection.rollback()
+
+            def close(self):
+                pass
+
+        ensure_xero_schema(lambda: SharedConnection())
+        ensure_xero_schema(lambda: SharedConnection())
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        self.assertIn("xero_connections", tables)
+        self.assertIn("xero_oauth_nonces", tables)
 
 
 if __name__ == "__main__":
