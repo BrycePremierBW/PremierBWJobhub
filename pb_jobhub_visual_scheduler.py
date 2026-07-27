@@ -666,6 +666,53 @@ def schedule_grid(assignments: pd.DataFrame, start: date, end: date, staff: pd.D
     return grid
 
 
+def job_crew_grid(assignments: pd.DataFrame, start: date, end: date) -> pd.DataFrame:
+    """Visual matrix with jobs as rows and scheduled crew inside each day."""
+    days = list(daterange(start, end))
+    columns = [day.strftime("%a %d %b") for day in days]
+    if assignments.empty:
+        return pd.DataFrame(columns=["Job"] + columns)
+    jobs = (
+        assignments[["job_id", "job_no", "job_name"]]
+        .drop_duplicates()
+        .sort_values(["job_no", "job_name"])
+    )
+    rows = []
+    for _, job in jobs.iterrows():
+        row = {"Job": f"{job['job_no']} · {job['job_name']}"}
+        for day in days:
+            booked = assignments[
+                (assignments["job_id"].astype(int) == int(job["job_id"]))
+                & (assignments["schedule_date"].astype(str) == day.isoformat())
+            ]
+            row[day.strftime("%a %d %b")] = "\n".join(
+                f"{item['staff']} · {float(item['hours']):.1f}h"
+                for _, item in booked.iterrows()
+            )
+        rows.append(row)
+    return pd.DataFrame(rows, columns=["Job"] + columns)
+
+
+def staff_job_grid(assignments: pd.DataFrame, start: date, end: date, staff: pd.DataFrame) -> pd.DataFrame:
+    """Visual matrix with employees as rows and their jobs inside each day."""
+    days = list(daterange(start, end))
+    columns = [day.strftime("%a %d %b") for day in days]
+    rows = []
+    for _, employee in staff.iterrows():
+        row = {"Employee": employee["name"]}
+        for day in days:
+            booked = assignments[
+                (assignments["employee_id"].astype(int) == int(employee["id"]))
+                & (assignments["schedule_date"].astype(str) == day.isoformat())
+            ] if not assignments.empty else assignments
+            row[day.strftime("%a %d %b")] = "\n".join(
+                f"{item['job_no']} · {item['job_name']}\n{float(item['hours']):.1f}h"
+                for _, item in booked.iterrows()
+            )
+        rows.append(row)
+    return pd.DataFrame(rows, columns=["Employee"] + columns)
+
+
 def selected_board_cell(event, board: pd.DataFrame) -> tuple[str, str] | None:
     """Return the selected employee and date-column from a Streamlit dataframe event."""
     if event is None:
@@ -1585,6 +1632,17 @@ def page_crew_suggestions(user: dict) -> None:
         suggestion_df.drop(columns=["job_id"]),
         width="stretch",
         hide_index=True,
+        column_config={
+            "Progress %": st.column_config.ProgressColumn(
+                "Progress",
+                min_value=0,
+                max_value=100,
+                format="%.0f%%",
+            ),
+            "Estimator hours": st.column_config.NumberColumn(format="%.1f h"),
+            "Already scheduled": st.column_config.NumberColumn(format="%.1f h"),
+            "Suggested remaining hours": st.column_config.NumberColumn(format="%.1f h"),
+        },
     )
     st.subheader("Approve a suggestion")
     job_labels = suggestion_df["Job"].tolist()
@@ -1894,6 +1952,17 @@ def page_jobs_to_crew() -> None:
         "Job No", "Job", "Builder / Client", "Address", "Assigned Crew",
         "Crew Count", "Planned Hours", "First Date", "Last Date"
     ]
+    st.subheader("Visual jobs → crew table")
+    st.caption("Jobs are listed down the left. Each day shows the employees assigned to that job.")
+    st.dataframe(
+        job_crew_grid(assignments, start, end),
+        width="stretch",
+        hide_index=True,
+        height=max(300, 80 + len(summary) * 48),
+        key="visual_jobs_to_crew_grid",
+    )
+
+    st.subheader("Job allocation summary")
     st.dataframe(display, width="stretch", hide_index=True)
 
     st.subheader("Job-by-job detail")
@@ -1964,6 +2033,17 @@ def page_staff_to_jobs() -> None:
         "Staff", "Position", "Assigned Jobs", "Job Count", "Allocated Hours",
         "Target Hours", "Remaining Capacity", "First Date", "Last Date"
     ]
+    st.subheader("Visual staff → jobs table")
+    st.caption("Employees are listed down the left. Each day shows their job and planned hours.")
+    st.dataframe(
+        staff_job_grid(assignments, start, end, staff),
+        width="stretch",
+        hide_index=True,
+        height=max(300, 80 + len(staff) * 48),
+        key="visual_staff_to_jobs_grid",
+    )
+
+    st.subheader("Staff allocation summary")
     st.dataframe(display, width="stretch", hide_index=True)
 
     fig, capacity = workload_chart(assignments, staff, start, end)
