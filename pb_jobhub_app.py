@@ -30,6 +30,8 @@ from jobhub_enterprise import (
     render_field_mode,
     render_operations_hub,
 )
+from jobhub_v3.schema import ensure_xero_schema
+from jobhub_v3.streamlit_xero import render_xero_settings
 from jobhub_core import (
     calculate_estimate_pricing,
     calculate_shift_hours,
@@ -12953,6 +12955,7 @@ def initialise_jobhub_runtime(database_url, data_dir):
     init_db()
     apply_schema_migrations()
     ensure_enterprise_schema(connect)
+    ensure_xero_schema(connect)
     seed_data()
     seed_app_users()
     return True
@@ -13015,6 +13018,7 @@ elif role == "manager":
         "Employees": "Employees",
         "Products": "Products",
         "Equipment": "Equipment",
+        "Xero Integration": "Xero Integration",
     }
     estimating_menu_map = {
         "Import / Create Job Pack": "Import Take-off Job Pack",
@@ -13052,6 +13056,7 @@ else:
         "Employees": "Employees",
         "Products": "Products",
         "Equipment": "Equipment",
+        "Xero Integration": "Xero Integration",
     }
     estimating_menu_map = {
         "Import / Create Job Pack": "Import Take-off Job Pack",
@@ -13396,6 +13401,9 @@ elif menu == "Employee Portal":
 
 elif menu == "Operations Hub":
     render_operations_hub(jobhub_enterprise_context())
+
+elif menu == "Xero Integration":
+    render_xero_settings(jobhub_enterprise_context())
 
 elif menu == "App Builder AI":
     app_builder_ai_page()
