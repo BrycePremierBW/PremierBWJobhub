@@ -20,4 +20,13 @@ jobs:
       - name: Compile application modules
         run: python -m compileall -q pb_jobhub_app.py jobhub_enterprise.py pb_jobhub_visual_scheduler.py jobhub_feedback.py jobhub_v2 jobhub_v3 jobhub_v4
       - name: Run JobHub tests
-        run: python -m unittest discover -s tests -p "test_*.py" -v
+        run: |
+          set -o pipefail
+          python -m unittest discover -s tests -p "test_*.py" -v 2>&1 | tee test-results.txt
+      - name: Upload test output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v2-test-output
+          path: test-results.txt
+          if-no-files-found: warn
