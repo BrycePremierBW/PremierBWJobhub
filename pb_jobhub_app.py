@@ -59,6 +59,7 @@ MAX_IMAGE_PIXELS = 25_000_000
 Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 
 PB_JOBHUB_BUILD = "2026.07.28-linked-progress-smart-scheduler-v1"
+PLANNING_LABOUR_RATE = 60.0
 
 
 # =============================
@@ -5691,7 +5692,7 @@ def timesheet_entry_form(employee_id=None, employee_restricted=False, key_prefix
     )
     finish_time_value = col3.time_input(
         "Finish Time",
-        value=time(15, 30),
+        value=time(15, 0),
         step=timedelta(minutes=15),
         key=f"{key_prefix}_finish",
     )
@@ -5700,7 +5701,7 @@ def timesheet_entry_form(employee_id=None, employee_restricted=False, key_prefix
         min_value=0,
         max_value=300,
         step=15,
-        value=30,
+        value=0,
         key=f"{key_prefix}_break",
     ))
 
@@ -7372,11 +7373,7 @@ def parse_takeoff_job_pack(uploaded_file):
     )
     total_labour_hours = manifest_hours or line_hours or labour_file_hours
 
-    labour_rate_values = labour_df.loc[labour_df["Labour Rate"] > 0, "Labour Rate"] if not labour_df.empty else pd.Series(dtype=float)
-    labour_file_rate = float(labour_rate_values.iloc[0]) if not labour_rate_values.empty else 0.0
-    labour_rate = _takeoff_float(
-        _takeoff_value(estimate_manifest, "labour_rate", "labor_rate", default=_takeoff_value(budget_manifest, "labour_rate", "labor_rate", default=0))
-    ) or labour_file_rate or 60.0
+    labour_rate = PLANNING_LABOUR_RATE
 
     material_file_total = float(materials_df["Line Cost Ex GST"].sum()) if not materials_df.empty else 0.0
     line_material_total = float(lines_df["Material Allowance"].sum()) if not lines_df.empty else 0.0
@@ -7695,7 +7692,7 @@ def import_takeoff_job_pack(
                 extracted_paths[member] = target
 
         labour_hours = _takeoff_float(summary.get("labour_hours"))
-        labour_rate = _takeoff_float(summary.get("labour_rate"), 60.0)
+        labour_rate = PLANNING_LABOUR_RATE
         material_allowance = _takeoff_float(summary.get("material_allowance"))
         access_allowance = _takeoff_float(summary.get("access_equipment_allowance"))
         subcontractor_allowance = _takeoff_float(summary.get("subcontractor_allowance"))
@@ -8519,7 +8516,7 @@ def estimate_totals(
     return calculate_estimate_pricing(
         line_total=line_total,
         labour_hours=labour_hours,
-        labour_rate=labour_rate,
+        labour_rate=PLANNING_LABOUR_RATE,
         material_allowance=material_allowance,
         access_equipment_allowance=access_equipment_allowance,
         subcontractor_allowance=subcontractor_allowance,
@@ -8545,9 +8542,16 @@ def recalc_estimate_totals(estimate_id):
     )
     execute("""
         UPDATE estimate_working_sheets
-        SET total_ex_gst = ?, gst_amount = ?, total_inc_gst = ?, updated_at = ?
+        SET labour_rate = ?, total_ex_gst = ?, gst_amount = ?, total_inc_gst = ?, updated_at = ?
         WHERE id = ?
-    """, (totals["total_ex_gst"], totals["gst_amount"], totals["total_inc_gst"], datetime.now().strftime("%Y-%m-%d %H:%M:%S"), estimate_id))
+    """, (
+        PLANNING_LABOUR_RATE,
+        totals["total_ex_gst"],
+        totals["gst_amount"],
+        totals["total_inc_gst"],
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        estimate_id,
+    ))
 
 
 # PB_ESTIMATE_ARCHIVE_DELETE_V1
@@ -8703,7 +8707,7 @@ def estimate_working_sheet_page():
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     selected_job_id, estimate_no, estimate_date, revision, "Draft",
-                    0, 120, 0, 0, 0, 0, 35, 0, 10, "Target Gross Margin",
+                    0, PLANNING_LABOUR_RATE, 0, 0, 0, 0, 35, 0, 10, "Target Gross Margin",
                     0, 0, 0, now, now, notes,
                 ))
                 record_audit_event("estimate_created", "estimate", estimate_no, {"job_id": selected_job_id})
@@ -8757,7 +8761,14 @@ def estimate_working_sheet_page():
 
             col5, col6 = st.columns(2)
             labour_hours = col5.number_input("Labour Hours", min_value=0.0, step=1.0, value=float(current["labour_hours"] or 0))
-            labour_rate = col6.number_input("Labour Rate", min_value=0.0, step=5.0, value=float(current["labour_rate"] or 120))
+            labour_rate = col6.number_input(
+                "Planning Labour Rate",
+                min_value=0.0,
+                step=5.0,
+                value=PLANNING_LABOUR_RATE,
+                disabled=True,
+                help="Estimates use the fixed planning rate. Actual job costs use each employee's recorded wage cost.",
+            )
 
             col7, col8, col9, col10 = st.columns(4)
             material_allowance = col7.number_input("Material Allowance", min_value=0.0, step=100.0, value=float(current["material_allowance"] or 0))
@@ -9828,6 +9839,7 @@ def job_cost_summary_dataframe():
         if col not in df.columns:
             df[col] = 0.0
         df[col] = df[col].fillna(0)
+    df["Estimated Labour Rate"] = PLANNING_LABOUR_RATE
 
     for col in ["Latest Estimate", "Estimate Revision"]:
         if col not in df.columns:
@@ -9883,9 +9895,16 @@ def job_costs_forecasting_page():
         st.markdown("### Forecast Inputs")
         i1, i2, i3, i4 = st.columns(4)
         target_gp = i1.number_input("Target GP %", min_value=0.0, max_value=100.0, value=35.0, step=1.0)
-        labour_cost_hour = i2.number_input("Labour Cost / Hour", min_value=0.0, value=120.0, step=5.0)
+        labour_cost_hour = i2.number_input(
+            "Forecast Labour Cost / Hour",
+            min_value=0.0,
+            value=PLANNING_LABOUR_RATE,
+            step=5.0,
+            disabled=True,
+            help="Forecast labour uses $60/hour. Actual labour cost remains based on recorded employee wage costs.",
+        )
         crew_size = i3.number_input("Crew Size", min_value=1.0, value=3.0, step=1.0)
-        hours_day = i4.number_input("Hours / Person / Day", min_value=1.0, value=7.5, step=0.5)
+        hours_day = i4.number_input("Hours / Person / Day", min_value=1.0, value=8.0, step=0.5)
 
         target_cost = jc_float(row["Contract Value"]) * (1 - target_gp / 100)
         remaining_cost_budget = max(target_cost - jc_float(row["Total Actual Cost"]), 0)
