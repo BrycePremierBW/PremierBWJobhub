@@ -5909,7 +5909,14 @@ def render_timesheet_edit_form(timesheet_id, key_prefix):
             pb_error(str(exc))
         else:
             st.session_state.pop(f"{key_prefix}_active_edit_id", None)
-            st.session_state[f"{key_prefix}_review_fingerprint"] = ""
+            st.session_state.pop(
+                f"{key_prefix}_edit_{timesheet_id}_review_fingerprint",
+                None,
+            )
+            st.session_state.pop(
+                f"{key_prefix}_edit_{timesheet_id}_review_accepted",
+                None,
+            )
             pb_success(f"Timesheet #{int(timesheet_id)} updated successfully.")
             refresh()
 
@@ -5918,6 +5925,14 @@ def render_timesheet_edit_form(timesheet_id, key_prefix):
         key=f"{key_prefix}_edit_cancel_{timesheet_id}",
     ):
         st.session_state.pop(f"{key_prefix}_active_edit_id", None)
+        st.session_state.pop(
+            f"{key_prefix}_edit_{timesheet_id}_review_fingerprint",
+            None,
+        )
+        st.session_state.pop(
+            f"{key_prefix}_edit_{timesheet_id}_review_accepted",
+            None,
+        )
         refresh()
 
 
