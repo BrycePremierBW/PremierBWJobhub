@@ -5663,15 +5663,19 @@ def timesheet_entry_form(employee_id=None, employee_restricted=False, key_prefix
             disabled=True,
             key=f"{key_prefix}_employee_name",
         )
-        selected_employee_id = int(employee_id)
-        selected_employee_label = employee_name
+        selected_employee_ids = [int(employee_id)]
+        selected_employee_labels = [employee_name]
     else:
-        selected_employee_label = st.selectbox(
-            "Employee",
+        selected_employee_labels = st.multiselect(
+            "Employees",
             list(employee_options.keys()),
             key=f"{key_prefix}_employee",
+            help="Select one employee or a whole crew. The same job, date and hours will be applied to each person.",
         )
-        selected_employee_id = employee_options[selected_employee_label]
+        selected_employee_ids = [
+            int(employee_options[label])
+            for label in selected_employee_labels
+        ]
 
     col1, col2, col3, col4 = st.columns(4)
     work_date_value = col1.date_input(
@@ -5734,8 +5738,8 @@ def timesheet_entry_form(employee_id=None, employee_restricted=False, key_prefix
     review_payload = {
         "job_id": job_options[selected_job],
         "job": selected_job,
-        "employee_id": selected_employee_id,
-        "employee": selected_employee_label,
+        "employee_ids": selected_employee_ids,
+        "employees": selected_employee_labels,
         "date": work_date_value.isoformat(),
         "start": start_text,
         "finish": finish_text,
@@ -5747,10 +5751,10 @@ def timesheet_entry_form(employee_id=None, employee_restricted=False, key_prefix
 
     st.markdown("### Review Timesheet")
     with st.container(border=True):
-        st.dataframe(
-            pd.DataFrame([{
+        review_rows = [
+            {
                 "Job": selected_job,
-                "Employee": selected_employee_label,
+                "Employee": employee_label,
                 "Date": work_date_value.isoformat(),
                 "Start": start_text,
                 "Finish": finish_text,
@@ -5758,7 +5762,11 @@ def timesheet_entry_form(employee_id=None, employee_restricted=False, key_prefix
                 "Calculated Hours": f"{total_hours:.2f}",
                 "Work Type": work_type,
                 "Notes": notes,
-            }]),
+            }
+            for employee_label in selected_employee_labels
+        ]
+        st.dataframe(
+            pd.DataFrame(review_rows),
             width="stretch",
             hide_index=True,
         )
@@ -5769,26 +5777,67 @@ def timesheet_entry_form(employee_id=None, employee_restricted=False, key_prefix
         )
 
     submitted = st.button(
-        "Submit Timesheet",
+        "Submit Timesheet" if len(selected_employee_ids) == 1 else f"Submit {len(selected_employee_ids)} Timesheets",
         key=f"{key_prefix}_submit",
         type="primary",
-        disabled=not accepted or total_hours <= 0 or bool(calculation_error),
+        disabled=(
+            not selected_employee_ids
+            or not accepted
+            or total_hours <= 0
+            or bool(calculation_error)
+        ),
     )
     if submitted:
-        timesheet_id = save_timesheet_entry(
-            job_options[selected_job],
-            selected_employee_id,
-            work_date_value.isoformat(),
-            start_text,
-            finish_text,
-            break_minutes,
-            total_hours,
-            work_type,
-            notes,
-        )
+        created_ids = []
+        skipped = []
+        for employee_label, selected_employee_id in zip(
+            selected_employee_labels,
+            selected_employee_ids,
+        ):
+            duplicate = df_query("""
+                SELECT id
+                FROM timesheet_entries
+                WHERE job_id = ?
+                  AND employee_id = ?
+                  AND work_date = ?
+                  AND start_time = ?
+                  AND finish_time = ?
+                  AND COALESCE(status, 'Submitted') <> 'Rejected'
+                LIMIT 1
+            """, (
+                job_options[selected_job],
+                selected_employee_id,
+                work_date_value.isoformat(),
+                start_text,
+                finish_text,
+            ))
+            if not duplicate.empty:
+                skipped.append(f"{employee_label}: matching timesheet already exists")
+                continue
+            try:
+                created_ids.append(save_timesheet_entry(
+                    job_options[selected_job],
+                    selected_employee_id,
+                    work_date_value.isoformat(),
+                    start_text,
+                    finish_text,
+                    break_minutes,
+                    total_hours,
+                    work_type,
+                    notes,
+                ))
+            except Exception as exc:
+                skipped.append(f"{employee_label}: {exc}")
         st.session_state[f"{key_prefix}_review_fingerprint"] = ""
-        pb_success(f"Timesheet #{timesheet_id} submitted and linked to the selected job.")
-        refresh()
+        if created_ids:
+            pb_success(
+                f"Created {len(created_ids)} timesheet{'s' if len(created_ids) != 1 else ''} "
+                f"and linked {'them' if len(created_ids) != 1 else 'it'} to {selected_job}."
+            )
+        if skipped:
+            st.warning("Skipped:\n\n" + "\n\n".join(f"• {item}" for item in skipped))
+        if created_ids:
+            refresh()
 
 
 
