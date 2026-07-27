@@ -14650,6 +14650,142 @@ elif menu == "Material Costs":
     if not job_options:
         st.info("Create a job first.")
     else:
+        with st.expander("Material Order History & Deliveries", expanded=True):
+            st.caption("Review purchase orders already created and mark complete orders as delivered.")
+            order_history = df_query("""
+                SELECT po.id AS "ID",
+                       po.po_no AS "PO Number",
+                       j.job_no AS "Job No",
+                       j.job_name AS "Job Name",
+                       po.supplier AS "Supplier",
+                       po.status AS "Status",
+                       po.order_date AS "Order Date",
+                       po.expected_date AS "Expected Date",
+                       po.requested_by AS "Requested By",
+                       po.subtotal_ex_gst AS "Subtotal Ex GST",
+                       po.total_inc_gst AS "Total Inc GST",
+                       po.notes AS "Notes"
+                FROM purchase_orders po
+                JOIN jobs j ON j.id = po.job_id
+                ORDER BY po.id DESC
+            """)
+            if order_history.empty:
+                st.info("No material purchase orders have been created yet.")
+            else:
+                f1, f2 = st.columns(2)
+                job_filter_options = ["All jobs"] + sorted(order_history["Job No"].dropna().astype(str).unique().tolist())
+                status_filter_options = ["All statuses"] + sorted(order_history["Status"].dropna().astype(str).unique().tolist())
+                order_job_filter = f1.selectbox("Show job", job_filter_options, key="material_order_history_job")
+                order_status_filter = f2.selectbox("Show status", status_filter_options, key="material_order_history_status")
+                filtered_orders = order_history.copy()
+                if order_job_filter != "All jobs":
+                    filtered_orders = filtered_orders[filtered_orders["Job No"].astype(str) == order_job_filter]
+                if order_status_filter != "All statuses":
+                    filtered_orders = filtered_orders[filtered_orders["Status"].astype(str) == order_status_filter]
+
+                st.dataframe(
+                    filtered_orders.drop(columns=["ID"]),
+                    width="stretch",
+                    hide_index=True,
+                    column_config={
+                        "Subtotal Ex GST": st.column_config.NumberColumn(format="$%.2f"),
+                        "Total Inc GST": st.column_config.NumberColumn(format="$%.2f"),
+                    },
+                )
+                if filtered_orders.empty:
+                    st.info("No material orders match those filters.")
+                else:
+                    order_labels = {
+                        (
+                            f"{row['PO Number']} · {row['Job No']} {row['Job Name']} · "
+                            f"{row['Supplier']} · {row['Status']}"
+                        ): int(row["ID"])
+                        for _, row in filtered_orders.iterrows()
+                    }
+                    selected_order_label = st.selectbox(
+                        "Review material order",
+                        list(order_labels),
+                        key="material_order_history_select",
+                    )
+                    selected_order_id = order_labels[selected_order_label]
+                    selected_order = order_history[order_history["ID"] == selected_order_id].iloc[0]
+                    order_lines = df_query("""
+                        SELECT product_code AS "Product Code",
+                               description AS "Product / Material",
+                               colour AS "Colour",
+                               qty AS "Ordered Qty",
+                               received_qty AS "Received Qty",
+                               unit AS "Unit",
+                               unit_price_ex_gst AS "Unit Price Ex GST",
+                               line_total_ex_gst AS "Line Total Ex GST",
+                               notes AS "Notes"
+                        FROM purchase_order_lines
+                        WHERE purchase_order_id = ?
+                        ORDER BY id
+                    """, (selected_order_id,))
+                    st.markdown(f"#### {selected_order['PO Number']} · {selected_order['Supplier']}")
+                    st.dataframe(
+                        order_lines,
+                        width="stretch",
+                        hide_index=True,
+                        column_config={
+                            "Unit Price Ex GST": st.column_config.NumberColumn(format="$%.2f"),
+                            "Line Total Ex GST": st.column_config.NumberColumn(format="$%.2f"),
+                        },
+                    )
+                    delivered = str(selected_order["Status"] or "").strip().lower() in {"received", "closed", "delivered"}
+                    if delivered:
+                        pb_success("This material order is marked as delivered.")
+                    elif st.button(
+                        "Mark Entire Order as Delivered",
+                        key=f"material_order_delivered_{selected_order_id}",
+                        type="primary",
+                        use_container_width=True,
+                    ):
+                        execute(
+                            "UPDATE purchase_order_lines SET received_qty = qty WHERE purchase_order_id = ?",
+                            (selected_order_id,),
+                        )
+                        execute(
+                            """
+                            UPDATE material_entries
+                            SET qty_received = qty_required
+                            WHERE id IN (
+                                SELECT material_entry_id
+                                FROM purchase_order_lines
+                                WHERE purchase_order_id = ?
+                                  AND material_entry_id IS NOT NULL
+                            )
+                            """,
+                            (selected_order_id,),
+                        )
+                        execute(
+                            "UPDATE purchase_orders SET status = ?, updated_at = ? WHERE id = ?",
+                            ("Received", datetime.now().strftime("%Y-%m-%d %H:%M:%S"), selected_order_id),
+                        )
+                        record_audit_event(
+                            "purchase_order_marked_delivered",
+                            "purchase_order",
+                            selected_order_id,
+                            {
+                                "po_number": str(selected_order["PO Number"]),
+                                "job_no": str(selected_order["Job No"]),
+                                "marked_by": current_username(),
+                            },
+                        )
+                        create_management_notifications(
+                            "purchase_order_delivered",
+                            f"Material order {selected_order['PO Number']} delivered",
+                            (
+                                f"{current_username()} marked {selected_order['PO Number']} for "
+                                f"{selected_order['Job No']} {selected_order['Job Name']} as delivered."
+                            ),
+                            entity_type="purchase_order",
+                            entity_id=selected_order_id,
+                        )
+                        pb_success("Material order marked as delivered and received quantities updated.")
+                        refresh()
+
         with st.expander("Add Material Entry", expanded=True):
             job_label = st.selectbox("Job", list(job_options.keys()), key="material_job_select")
             selected_material_job_id = job_options[job_label]
