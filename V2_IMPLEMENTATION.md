@@ -17,9 +17,19 @@ Branch: `operations-v2`
 - A duplicate idempotency key must return the original result without repeating a write.
 - Email delivery remains disabled until a provider and sender address are configured.
 
-## Next milestone
+## Milestone 2 — offline and notification reliability
 
-1. Add the server-side sync event table and transaction-safe event processor.
-2. Connect clock, timesheet, photo and field-form handlers.
-3. Add the installable Field Mode PWA with IndexedDB queueing.
-4. Add provider-backed critical email delivery and retry logging.
+- Restart-safe offline sync-event and critical-email outbox tables.
+- Transaction-safe event processor with payload-bound idempotency keys.
+- Duplicate events return the original response without repeating the handler.
+- Failed events retain an error and may be retried safely.
+- IndexedDB Field Mode queue, offline fallback and service-worker assets.
+- Idempotent critical-email queue with exponential backoff and a terminal retry limit.
+- Provider credentials remain unconfigured and delivery remains disabled in staging.
+
+## Remaining live wiring
+
+1. Route the existing clock, timesheet, photo and field-form actions through the processor.
+2. Serve the PWA assets from the final JobHub application origin.
+3. Select the Premier Brushworks business email provider and configure its sender identity.
+4. Enable offline sync and email separately in staging after field-device testing.
