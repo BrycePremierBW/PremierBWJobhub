@@ -7,6 +7,8 @@ from jobhub_v3.mappings import (
     build_purchase_bill_payload,
     build_sales_invoice_payload,
 )
+from jobhub_v3.oauth_state import OAuthStateSigner
+from jobhub_v3.token_store import XeroTokenStore
 from jobhub_v3.xero_client import XeroClient, XeroOAuthConfig, XeroToken
 
 
@@ -57,7 +59,11 @@ class XeroOAuthTests(unittest.TestCase):
         url = client.authorisation_url("csrf-token")
         self.assertIn("state=csrf-token", url)
         self.assertIn("offline_access", url)
-        self.assertIn("accounting.transactions", url)
+        self.assertIn("app.connections", url)
+        self.assertIn("accounting.contacts", url)
+        self.assertIn("accounting.invoices", url)
+        self.assertIn("accounting.payments", url)
+        self.assertNotIn("accounting.transactions", url)
         self.assertNotIn("secret", url)
 
     def test_expiring_token_requires_refresh(self):
@@ -80,6 +86,91 @@ class XeroOAuthTests(unittest.TestCase):
         self.assertEqual(token.refresh_token, "new-refresh")
         request_data = session.post.call_args.kwargs["data"]
         self.assertEqual(request_data["refresh_token"], "old-refresh")
+
+
+class OAuthStateTests(unittest.TestCase):
+    def test_signed_state_round_trip(self):
+        signer = OAuthStateSigner("s" * 32)
+        state = signer.issue("admin-1", "nonce-1", now=1000)
+        payload = signer.verify(state, now=1050)
+        self.assertEqual(payload["user_id"], "admin-1")
+        self.assertEqual(payload["nonce"], "nonce-1")
+
+    def test_tampered_state_is_rejected(self):
+        signer = OAuthStateSigner("s" * 32)
+        state = signer.issue("admin-1", "nonce-1", now=1000)
+        with self.assertRaisesRegex(ValueError, "signature"):
+            signer.verify(state + "x", now=1050)
+
+    def test_expired_state_is_rejected(self):
+        signer = OAuthStateSigner("s" * 32, max_age_seconds=60)
+        state = signer.issue("admin-1", "nonce-1", now=1000)
+        with self.assertRaisesRegex(ValueError, "expired"):
+            signer.verify(state, now=1061)
+
+
+class PrefixCipher:
+    def encrypt(self, value):
+        return "encrypted:" + value
+
+    def decrypt(self, value):
+        if not value.startswith("encrypted:"):
+            raise ValueError("Token was not encrypted.")
+        return value.removeprefix("encrypted:")
+
+
+class TokenStoreTests(unittest.TestCase):
+    def test_tokens_are_encrypted_at_rest_and_can_be_loaded(self):
+        import sqlite3
+
+        connection = sqlite3.connect(":memory:")
+        connection.execute(
+            """
+            CREATE TABLE xero_connections (
+                id INTEGER PRIMARY KEY,
+                tenant_id TEXT NOT NULL UNIQUE,
+                tenant_name TEXT,
+                encrypted_access_token TEXT NOT NULL,
+                encrypted_refresh_token TEXT NOT NULL,
+                token_expires_at TEXT NOT NULL,
+                scopes TEXT,
+                connected_by TEXT,
+                connected_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+
+        class SharedConnection:
+            def cursor(self):
+                return connection.cursor()
+
+            def commit(self):
+                return connection.commit()
+
+            def rollback(self):
+                return connection.rollback()
+
+            def close(self):
+                pass
+
+        store = XeroTokenStore(lambda: SharedConnection(), PrefixCipher())
+        expires = datetime.now(timezone.utc) + timedelta(minutes=30)
+        store.save(
+            tenant_id="tenant-1",
+            tenant_name="Premier Brushworks",
+            token=XeroToken("access", "refresh", expires, scope="accounting.invoices"),
+            connected_by="admin",
+            now=datetime.now(timezone.utc),
+        )
+        raw = connection.execute(
+            "SELECT encrypted_access_token, encrypted_refresh_token FROM xero_connections"
+        ).fetchone()
+        self.assertEqual(raw[0], "encrypted:access")
+        self.assertEqual(raw[1], "encrypted:refresh")
+        loaded = store.load("tenant-1")
+        self.assertEqual(loaded.access_token, "access")
+        self.assertEqual(loaded.refresh_token, "refresh")
 
 
 if __name__ == "__main__":
