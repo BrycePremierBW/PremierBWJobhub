@@ -32,6 +32,7 @@ import pandas as pd
 import streamlit as st
 
 ENTERPRISE_BUILD = "2026.07.27-enterprise-foundation-v1"
+PLANNING_LABOUR_RATE = 60.0
 
 
 def _now() -> str:
@@ -477,7 +478,7 @@ def enterprise_job_cost_dataframe(ctx: dict[str, Any]) -> pd.DataFrame:
         """
         SELECT e.job_id,
                COALESCE(e.labour_hours, 0) AS estimate_labour_hours,
-               COALESCE(e.labour_hours, 0) * COALESCE(e.labour_rate, 0) AS estimate_labour_cost,
+               COALESCE(e.labour_hours, 0) * 60.0 AS estimate_labour_cost,
                COALESCE(e.material_allowance, 0) AS estimate_materials,
                COALESCE(e.access_equipment_allowance, 0) AS estimate_access,
                COALESCE(e.subcontractor_allowance, 0) AS estimate_subcontractors,
@@ -566,9 +567,7 @@ def enterprise_job_cost_dataframe(ctx: dict[str, Any]) -> pd.DataFrame:
     result["Budget Labour Hours"] = result["budget_labour_hours"].where(
         result["budget_labour_hours"] > 0, result["estimate_labour_hours"]
     )
-    result["Budget Labour Cost"] = result["budget_labour_cost"].where(
-        result["budget_labour_cost"] > 0, result["estimate_labour_cost"]
-    )
+    result["Budget Labour Cost"] = result["Budget Labour Hours"] * PLANNING_LABOUR_RATE
     result["Budget Materials"] = result["budget_materials"].where(
         result["budget_materials"] > 0, result["estimate_materials"]
     )
@@ -594,11 +593,9 @@ def enterprise_job_cost_dataframe(ctx: dict[str, Any]) -> pd.DataFrame:
         result["manual_remaining_hours"] > 0,
         remaining_budget_hours,
     )
-    labour_rate = result["Budget Labour Cost"] / result["Budget Labour Hours"].replace(0, float("nan"))
-    labour_rate = labour_rate.fillna(0)
-    progress_forecast_labour = result["actual_labour_cost"] / progress_fraction.replace(0, float("nan"))
-    result["Forecast Labour Cost"] = progress_forecast_labour.fillna(
-        result["actual_labour_cost"] + result["Forecast Remaining Labour Hours"] * labour_rate
+    result["Forecast Labour Cost"] = (
+        result["actual_labour_cost"]
+        + result["Forecast Remaining Labour Hours"] * PLANNING_LABOUR_RATE
     )
     progress_forecast_material = result["Actual Material Cost"] / progress_fraction.replace(0, float("nan"))
     result["Forecast Material Cost"] = progress_forecast_material.fillna(
@@ -1517,7 +1514,7 @@ def render_field_mode(ctx: dict[str, Any]) -> None:
         st.success(f"Clocked on: {row['job_no']} — {row['job_name']} at {started}")
         st.caption(_clean(row["site_address"]))
         with st.form("field_mode_clock_off_form"):
-            break_minutes = st.number_input("Unpaid break minutes", min_value=0.0, max_value=240.0, value=30.0, step=5.0)
+            break_minutes = st.number_input("Unpaid break minutes", min_value=0.0, max_value=240.0, value=0.0, step=5.0)
             travel_minutes = st.number_input("Travel minutes included", min_value=0.0, max_value=600.0, value=0.0, step=5.0)
             notes = st.text_area("Daily work completed / notes")
             submit_clock = st.form_submit_button("■ Clock Off & Submit Timesheet", use_container_width=True)
