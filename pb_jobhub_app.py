@@ -47,7 +47,7 @@ MAX_TAKEOFF_PACK_FILES = 300
 MAX_IMAGE_PIXELS = 25_000_000
 Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 
-PB_JOBHUB_BUILD = "2026.07.27-performance-feedback-v2"
+PB_JOBHUB_BUILD = "2026.07.27-job-material-policy-management-notifications-v1"
 
 
 # =============================
@@ -1131,6 +1131,8 @@ def init_db():
     ensure_column("material_entries", "custom_unit", "TEXT")
     ensure_column("material_entries", "custom_unit_price", "REAL")
     ensure_column("material_entries", "custom_colour", "TEXT")
+    ensure_column("jobs", "restrict_material_products", "INTEGER DEFAULT 0")
+    ensure_column("jobs", "allowed_material_suppliers", "TEXT")
     cur.execute("""
     CREATE TABLE IF NOT EXISTS wage_entries (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1457,6 +1459,24 @@ def init_db():
         note TEXT,
         source TEXT,
         created_at TEXT
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS app_notifications (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        recipient_user_id INTEGER NOT NULL,
+        event_type TEXT,
+        title TEXT,
+        message TEXT,
+        job_id INTEGER,
+        entity_type TEXT,
+        entity_id TEXT,
+        created_by TEXT,
+        created_at TEXT NOT NULL,
+        read_at TEXT,
+        FOREIGN KEY(recipient_user_id) REFERENCES app_users(id),
+        FOREIGN KEY(job_id) REFERENCES jobs(id)
     )
     """)
 
@@ -1801,6 +1821,50 @@ def apply_schema_migrations():
                 (takeoff_migration_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
             )
 
+        material_policy_migration_id = "20260727_job_material_policy_notifications_v1"
+        if material_policy_migration_id not in applied:
+            _migration_ensure_column(
+                cur,
+                "jobs",
+                "restrict_material_products",
+                "INTEGER DEFAULT 0",
+            )
+            _migration_ensure_column(
+                cur,
+                "jobs",
+                "allowed_material_suppliers",
+                "TEXT",
+            )
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS app_notifications (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    recipient_user_id INTEGER NOT NULL,
+                    event_type TEXT,
+                    title TEXT,
+                    message TEXT,
+                    job_id INTEGER,
+                    entity_type TEXT,
+                    entity_id TEXT,
+                    created_by TEXT,
+                    created_at TEXT NOT NULL,
+                    read_at TEXT,
+                    FOREIGN KEY(recipient_user_id) REFERENCES app_users(id),
+                    FOREIGN KEY(job_id) REFERENCES jobs(id)
+                )
+            """)
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_app_notifications_recipient_unread "
+                "ON app_notifications(recipient_user_id, read_at, created_at)"
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_app_notifications_job "
+                "ON app_notifications(job_id, created_at)"
+            )
+            cur.execute(
+                "INSERT INTO schema_migrations (migration_id, applied_at) VALUES (?, ?)",
+                (material_policy_migration_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+            )
+
         conn.commit()
         return True
     except Exception:
@@ -1891,6 +1955,222 @@ def record_audit_event(action, entity_type, entity_id="", details=None):
         # Auditing must not hide the original user action or error.
         pass
 
+
+MANAGEMENT_NOTIFICATION_TARGETS = {
+    "nick": {"nick", "nick martin"},
+    "bryce": {"bryce", "bryce curran"},
+}
+
+
+def normalise_notification_identity(value):
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", str(value or "").casefold()).split())
+
+
+def management_notification_recipients():
+    """Resolve Nick and Bryce's active JobHub accounts without hard-coding user IDs."""
+    users = df_query("""
+        SELECT u.id, u.username, u.role,
+               COALESCE(e.name, '') AS employee_name
+        FROM app_users u
+        LEFT JOIN employees e ON e.id = u.employee_id
+        WHERE COALESCE(u.active, 0) = 1
+        ORDER BY u.id
+    """)
+    if users.empty:
+        return []
+
+    selected = {}
+    for _, row in users.iterrows():
+        username = normalise_notification_identity(row["username"])
+        employee_name = normalise_notification_identity(row["employee_name"])
+        identities = {username, employee_name}
+        combined = f"{username} {employee_name}".strip()
+        for target, aliases in MANAGEMENT_NOTIFICATION_TARGETS.items():
+            if target in selected:
+                continue
+            if any(
+                identity in aliases
+                or any(alias and alias in identity.split() for alias in aliases if " " not in alias)
+                for identity in identities
+                if identity
+            ) or any(alias and alias in combined for alias in aliases):
+                selected[target] = {
+                    "id": int(row["id"]),
+                    "username": str(row["username"] or ""),
+                    "employee_name": str(row["employee_name"] or ""),
+                }
+
+    # Conservative role fallback for older databases where the accounts were
+    # created without linked employee names.
+    if "nick" not in selected:
+        admins = users[users["role"].astype(str).str.casefold() == "admin"]
+        if not admins.empty:
+            row = admins.iloc[0]
+            selected["nick"] = {
+                "id": int(row["id"]),
+                "username": str(row["username"] or ""),
+                "employee_name": str(row["employee_name"] or ""),
+            }
+    if "bryce" not in selected:
+        managers = users[users["role"].astype(str).str.casefold() == "manager"]
+        if not managers.empty:
+            row = managers.iloc[0]
+            selected["bryce"] = {
+                "id": int(row["id"]),
+                "username": str(row["username"] or ""),
+                "employee_name": str(row["employee_name"] or ""),
+            }
+
+    recipients = []
+    seen_ids = set()
+    for target in ("nick", "bryce"):
+        recipient = selected.get(target)
+        if recipient and recipient["id"] not in seen_ids:
+            recipients.append(recipient)
+            seen_ids.add(recipient["id"])
+    return recipients
+
+
+def create_management_notifications(
+    event_type,
+    title,
+    message,
+    job_id=None,
+    entity_type="",
+    entity_id="",
+):
+    """Create persistent in-app notifications for Nick and Bryce."""
+    try:
+        recipients = management_notification_recipients()
+        if not recipients:
+            return 0
+        user = get_current_user() or {}
+        created_by = str(user.get("employee_name") or user.get("username") or "JobHub")
+        created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        conn = connect()
+        try:
+            cur = conn.cursor()
+            rows = [
+                (
+                    recipient["id"],
+                    str(event_type or ""),
+                    str(title or "Notification")[:200],
+                    str(message or "")[:2000],
+                    int(job_id) if job_id is not None else None,
+                    str(entity_type or ""),
+                    str(entity_id or ""),
+                    created_by,
+                    created_at,
+                    "",
+                )
+                for recipient in recipients
+            ]
+            cur.executemany("""
+                INSERT INTO app_notifications
+                (recipient_user_id, event_type, title, message, job_id, entity_type,
+                 entity_id, created_by, created_at, read_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, rows)
+            conn.commit()
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            raise
+        finally:
+            conn.close()
+        return len(recipients)
+    except Exception:
+        # A notification problem must never prevent a timesheet or material
+        # request from being saved.
+        return 0
+
+
+def mark_notification_read(notification_id, user_id):
+    execute("""
+        UPDATE app_notifications
+        SET read_at = ?
+        WHERE id = ? AND recipient_user_id = ?
+    """, (
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        int(notification_id),
+        int(user_id),
+    ))
+
+
+def render_sidebar_notifications():
+    user = get_current_user() or {}
+    user_id = user.get("id")
+    if not user_id:
+        return
+
+    notifications = df_query("""
+        SELECT id, event_type, title, message, created_by, created_at
+        FROM app_notifications
+        WHERE recipient_user_id = ?
+          AND COALESCE(read_at, '') = ''
+        ORDER BY created_at DESC, id DESC
+        LIMIT 12
+    """, (int(user_id),))
+    unread_count_df = df_query("""
+        SELECT COUNT(*) AS c
+        FROM app_notifications
+        WHERE recipient_user_id = ?
+          AND COALESCE(read_at, '') = ''
+    """, (int(user_id),))
+    unread_count = int(unread_count_df.iloc[0]["c"] or 0) if not unread_count_df.empty else 0
+
+    if not notifications.empty:
+        newest = notifications.iloc[0]
+        toast_key = f"_pb_notification_toast_{user_id}"
+        newest_id = int(newest["id"])
+        if st.session_state.get(toast_key) != newest_id:
+            st.session_state[toast_key] = newest_id
+            try:
+                st.toast(
+                    f"{newest['title']}: {newest['message']}",
+                    icon="🔔",
+                    duration=8,
+                )
+            except Exception:
+                pass
+
+    with st.sidebar.expander(f"🔔 Notifications ({unread_count})", expanded=False):
+        if notifications.empty:
+            st.caption("No unread notifications.")
+            return
+
+        if st.button(
+            "Mark all as read",
+            key=f"notification_mark_all_{user_id}",
+            width="stretch",
+        ):
+            execute("""
+                UPDATE app_notifications
+                SET read_at = ?
+                WHERE recipient_user_id = ?
+                  AND COALESCE(read_at, '') = ''
+            """, (
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                int(user_id),
+            ))
+            pb_success("All notifications marked as read.")
+            pb_rerun()
+
+        for _, note in notifications.iterrows():
+            note_id = int(note["id"])
+            st.markdown(f"**{note['title']}**")
+            st.caption(str(note["message"] or ""))
+            st.caption(f"{note['created_at']} · {note['created_by'] or 'JobHub'}")
+            if st.button(
+                "Mark read",
+                key=f"notification_mark_read_{user_id}_{note_id}",
+                width="stretch",
+            ):
+                mark_notification_read(note_id, user_id)
+                pb_rerun()
+            st.divider()
 
 
 
@@ -2131,17 +2411,108 @@ def get_employee_job_options(employee_id):
     return {str(row["label"]): int(row["id"]) for _, row in df.iterrows()}
 
 
-def get_product_options():
-    df = df_query("SELECT id, product_code FROM products ORDER BY product_code")
+def normalise_supplier_name(value):
+    return " ".join(str(value or "").strip().split())
+
+
+def parse_material_supplier_list(value):
+    if isinstance(value, (list, tuple, set)):
+        values = list(value)
+    else:
+        text_value = str(value or "").strip()
+        if not text_value:
+            return []
+        try:
+            parsed = json.loads(text_value)
+            if isinstance(parsed, list):
+                values = parsed
+            else:
+                values = [parsed]
+        except Exception:
+            values = re.split(r"[,;|\n]+", text_value)
+
+    output = []
+    seen = set()
+    for value in values:
+        supplier = normalise_supplier_name(value)
+        key = supplier.casefold()
+        if supplier and key not in seen:
+            output.append(supplier)
+            seen.add(key)
+    return output
+
+
+def serialise_material_supplier_list(values):
+    return json.dumps(parse_material_supplier_list(values), ensure_ascii=False)
+
+
+def get_product_supplier_options():
+    df = df_query("""
+        SELECT DISTINCT TRIM(COALESCE(supplier, '')) AS supplier
+        FROM products
+        WHERE TRIM(COALESCE(supplier, '')) <> ''
+        ORDER BY LOWER(TRIM(supplier)), TRIM(supplier)
+    """)
+    return [normalise_supplier_name(value) for value in df.get("supplier", pd.Series(dtype=str)).tolist() if normalise_supplier_name(value)]
+
+
+def get_job_material_policy(job_id):
+    df = df_query("""
+        SELECT job_no, job_name,
+               COALESCE(restrict_material_products, 0) AS restrict_material_products,
+               COALESCE(allowed_material_suppliers, '') AS allowed_material_suppliers
+        FROM jobs
+        WHERE id = ?
+    """, (int(job_id),))
+    if df.empty:
+        return {
+            "restricted": False,
+            "suppliers": [],
+            "job_no": "",
+            "job_name": "",
+        }
+    row = df.iloc[0]
+    return {
+        "restricted": bool(int(row["restrict_material_products"] or 0)),
+        "suppliers": parse_material_supplier_list(row["allowed_material_suppliers"]),
+        "job_no": str(row["job_no"] or ""),
+        "job_name": str(row["job_name"] or ""),
+    }
+
+
+def _filtered_products_dataframe(allowed_suppliers=None):
+    if allowed_suppliers is None:
+        return df_query("""
+            SELECT id, product_code, product_name, supplier
+            FROM products
+            ORDER BY product_code
+        """)
+
+    suppliers = parse_material_supplier_list(allowed_suppliers)
+    if not suppliers:
+        return pd.DataFrame(columns=["id", "product_code", "product_name", "supplier"])
+
+    placeholders = ", ".join(["?"] * len(suppliers))
+    return df_query(
+        f"""
+        SELECT id, product_code, product_name, supplier
+        FROM products
+        WHERE LOWER(TRIM(COALESCE(supplier, ''))) IN ({placeholders})
+        ORDER BY product_code
+        """,
+        tuple(supplier.casefold() for supplier in suppliers),
+    )
+
+
+def get_product_options(allowed_suppliers=None):
+    df = _filtered_products_dataframe(allowed_suppliers)
     return {str(row["product_code"]): int(row["id"]) for _, row in df.iterrows()}
 
 
-def get_product_name_options():
-    df = df_query("""
-        SELECT id, product_name, product_code
-        FROM products
-        ORDER BY product_name
-    """)
+def get_product_name_options(allowed_suppliers=None):
+    df = _filtered_products_dataframe(allowed_suppliers)
+    if not df.empty:
+        df = df.sort_values(["product_name", "product_code"], kind="stable")
     return {f"{row['product_name']} ({row['product_code']})": int(row["id"]) for _, row in df.iterrows()}
 
 
@@ -3572,15 +3943,51 @@ def employee_portal():
             st.markdown("### Add Material Request to Job Register")
             st.caption("Employees can request materials without seeing pricing. Saved products apply their stored cost to the job material register automatically.")
 
-            employee_product_code_options = get_product_options()
-            employee_product_name_options = get_product_name_options()
-            material_request_type_options = ["Saved Product", "One-off / Not Listed"] if employee_product_code_options else ["One-off / Not Listed"]
-            material_request_type = st.radio(
-                "Material request type",
-                material_request_type_options,
-                horizontal=True,
-                key=f"employee_material_request_type_{selected_job_id}",
-            )
+            material_policy = get_job_material_policy(selected_job_id)
+            material_override = False
+            material_override_reason = ""
+            if material_policy["restricted"]:
+                supplier_text = ", ".join(material_policy["suppliers"]) or "No suppliers selected"
+                st.info(f"This job is restricted to: {supplier_text}.")
+                material_override = st.checkbox(
+                    "Override job product restriction",
+                    key=f"employee_material_override_{selected_job_id}",
+                    help="Use only when the required product is outside the job's approved brand list.",
+                )
+                if material_override:
+                    st.warning("Override enabled. All saved products and one-off materials are temporarily available for this request.")
+                    material_override_reason = st.text_input(
+                        "Override reason",
+                        key=f"employee_material_override_reason_{selected_job_id}",
+                        placeholder="Explain why a product outside the approved job brand is required.",
+                    )
+
+            allowed_suppliers = None
+            if material_policy["restricted"] and not material_override:
+                allowed_suppliers = material_policy["suppliers"]
+
+            employee_product_code_options = get_product_options(allowed_suppliers)
+            employee_product_name_options = get_product_name_options(allowed_suppliers)
+
+            material_request_type_options = []
+            if employee_product_code_options:
+                material_request_type_options.append("Saved Product")
+            if not material_policy["restricted"] or material_override:
+                material_request_type_options.append("One-off / Not Listed")
+
+            if not material_request_type_options:
+                st.warning(
+                    "No saved products match this job's approved suppliers. Use the override and enter a reason, "
+                    "or ask Nick/Bryce to update the job's supplier allocation."
+                )
+                material_request_type = None
+            else:
+                material_request_type = st.radio(
+                    "Material request type",
+                    material_request_type_options,
+                    horizontal=True,
+                    key=f"employee_material_request_type_{selected_job_id}",
+                )
 
             employee_product_id = None
             request_product_name = ""
@@ -3618,9 +4025,9 @@ def employee_portal():
                     request_product_name = str(selected_product_df.iloc[0]["product_name"] or "")
                     request_supplier = str(selected_product_df.iloc[0]["supplier"] or "")
                     request_unit = str(selected_product_df.iloc[0]["unit"] or "")
-                    st.info(f"Selected: {request_product_name}")
+                    st.info(f"Selected: {request_product_name} · {request_supplier}")
                 request_colour = st.text_input("Colour / Finish", key=f"employee_saved_product_colour_{selected_job_id}")
-            else:
+            elif material_request_type == "One-off / Not Listed":
                 c_req1, c_req2 = st.columns(2)
                 request_product_name = c_req1.text_input("Product / Material Name", key=f"employee_custom_product_name_{selected_job_id}")
                 request_colour = c_req2.text_input("Colour / Finish", key=f"employee_custom_colour_{selected_job_id}")
@@ -3637,11 +4044,18 @@ def employee_portal():
                 save_material_request = st.form_submit_button("Save Material Request to Job Register")
 
                 if save_material_request:
-                    if material_request_type == "Saved Product" and not employee_product_id:
+                    if material_request_type is None:
+                        pb_error("No product is available under this job's current supplier allocation.")
+                    elif material_override and not material_override_reason.strip():
+                        pb_error("Enter an override reason before requesting a product outside the approved job supplier list.")
+                    elif material_request_type == "Saved Product" and not employee_product_id:
                         pb_error("Select a saved product first.")
                     elif not str(request_product_name or "").strip() and material_request_type == "One-off / Not Listed":
                         pb_error("Enter a product/material name.")
                     else:
+                        override_note = ""
+                        if material_override:
+                            override_note = f" Product filter override: {material_override_reason.strip()}."
                         execute("""
                             INSERT INTO material_entries
                             (
@@ -3667,7 +4081,7 @@ def employee_portal():
                             qty_received,
                             date_ordered,
                             request_supplier,
-                            f"Employee material request by {employee_name}. {material_notes}",
+                            f"Employee material request by {employee_name}. {material_notes}{override_note}",
                             "CUSTOM" if material_request_type == "One-off / Not Listed" else "",
                             request_product_name if material_request_type == "One-off / Not Listed" else "",
                             request_supplier if material_request_type == "One-off / Not Listed" else "",
@@ -3675,7 +4089,31 @@ def employee_portal():
                             0 if material_request_type == "One-off / Not Listed" else None,
                             request_colour,
                         ))
-                        pb_success("Material request saved to this job.")
+                        if material_override:
+                            record_audit_event(
+                                "job_material_filter_overridden",
+                                "job",
+                                selected_job_id,
+                                {
+                                    "reason": material_override_reason.strip(),
+                                    "product": request_product_name,
+                                    "supplier": request_supplier,
+                                },
+                            )
+                        create_management_notifications(
+                            "paint_order_requested",
+                            "Paint/material request submitted",
+                            (
+                                f"{employee_name} requested {float(qty_required or 0):g} {request_unit or 'unit(s)'} "
+                                f"of {request_product_name or 'material'} for {selected_job}. "
+                                f"Supplier: {request_supplier or 'Unspecified'}."
+                                + (f" Override reason: {material_override_reason.strip()}." if material_override else "")
+                            ),
+                            job_id=selected_job_id,
+                            entity_type="material_request",
+                            entity_id="",
+                        )
+                        pb_success(f"Material request saved. Nick and Bryce were notified for {selected_job}.")
                         st.info("The Paint & Materials Order Form can now be generated with this material included.")
                         refresh()
 
@@ -3712,8 +4150,15 @@ def employee_portal():
             if st.button("Generate Paint & Materials Order Form", key=f"employee_generate_paint_order_{selected_job_id}"):
                 try:
                     pdf_path = generate_paint_order_pdf(selected_job_id)
-                    pb_success("Paint & Materials Order Form generated and attached to this job.")
-
+                    create_management_notifications(
+                        "paint_order_form_generated",
+                        "Paint order form generated",
+                        f"{employee_name} generated the Paint & Materials Order Form for {selected_job}.",
+                        job_id=selected_job_id,
+                        entity_type="job_document",
+                        entity_id=os.path.basename(pdf_path),
+                    )
+                    pb_success("Paint & Materials Order Form generated and Nick/Bryce were notified.")
                     with open(pdf_path, "rb") as f:
                         st.download_button(
                             "Download Paint & Materials Order Form",
@@ -4871,6 +5316,30 @@ def save_timesheet_entry(job_id, employee_id, work_date, start_time, finish_time
         timesheet_id,
         {"job_id": job_id, "employee_id": employee_id, "hours": total_hours},
     )
+    try:
+        summary = df_query("""
+            SELECT j.job_no, j.job_name, e.name AS employee_name
+            FROM jobs j
+            JOIN employees e ON e.id = ?
+            WHERE j.id = ?
+        """, (int(employee_id), int(job_id)))
+        if summary.empty:
+            employee_label = f"Employee #{employee_id}"
+            job_label = f"Job #{job_id}"
+        else:
+            row = summary.iloc[0]
+            employee_label = str(row["employee_name"] or f"Employee #{employee_id}")
+            job_label = f"{row['job_no']} - {row['job_name']}".strip(" -")
+        create_management_notifications(
+            "timesheet_submitted",
+            "New timesheet submitted",
+            f"{employee_label} submitted {float(total_hours or 0):g} hours for {job_label} on {work_date}.",
+            job_id=job_id,
+            entity_type="timesheet",
+            entity_id=timesheet_id,
+        )
+    except Exception:
+        pass
     return timesheet_id
 
 
@@ -11313,7 +11782,15 @@ def render_job_linked_info(job_id, expanded=True):
             if st.button("Generate Paint & Materials Order PDF", key=f"generate_paint_order_{job_id}"):
                 try:
                     pdf_path = generate_paint_order_pdf(job_id)
-                    pb_success("Paint & Materials Order PDF generated and attached to this job.")
+                    create_management_notifications(
+                        "paint_order_form_generated",
+                        "Paint order form generated",
+                        f"{current_username()} generated the Paint & Materials Order PDF for this job.",
+                        job_id=job_id,
+                        entity_type="job_document",
+                        entity_id=os.path.basename(pdf_path),
+                    )
+                    pb_success("Paint & Materials Order PDF generated and Nick/Bryce were notified.")
 
                     with open(pdf_path, "rb") as f:
                         st.download_button(
@@ -11751,6 +12228,7 @@ pb_page_header(
     "Commercial painting operations",
 )
 logout_button()
+render_sidebar_notifications()
 
 role = current_role()
 
@@ -12213,6 +12691,7 @@ elif menu == "Dashboard":
 elif menu == "Jobs":
     st.header("Job Register")
     builder_options = get_builder_options()
+    material_supplier_options = get_product_supplier_options()
 
     tab_add, tab_edit, tab_remove, tab_archived, tab_search, tab_list = st.tabs(
         ["Add Job", "Edit Job", "Remove / Archive", "Archived Jobs", "Search by Builder", "Job Register"]
@@ -12240,6 +12719,19 @@ elif menu == "Jobs":
             start_date = start_date_value.isoformat() if start_date_value else ""
             end_date = end_date_value.isoformat() if end_date_value else ""
 
+            st.markdown("#### Material supplier / brand allocation")
+            restrict_material_products = st.checkbox(
+                "Only show products from the approved suppliers/brands for this job",
+                value=False,
+                key="add_job_restrict_material_products",
+            )
+            allowed_material_suppliers = st.multiselect(
+                "Approved suppliers / brands",
+                material_supplier_options,
+                key="add_job_allowed_material_suppliers",
+                help="Example: select Haymes so staff only see Haymes products when requesting materials for this job.",
+            )
+
             notes = st.text_area("Notes")
             submitted = st.form_submit_button("Save Job")
 
@@ -12247,14 +12739,31 @@ elif menu == "Jobs":
                 builder_id = builder_options.get(builder_label) if builder_label else None
                 if start_date_value and end_date_value and end_date_value < start_date_value:
                     pb_error("End Date cannot be before Start Date.")
+                elif restrict_material_products and not allowed_material_suppliers:
+                    pb_error("Select at least one approved supplier/brand before restricting this job's products.")
                 else:
                     try:
                         execute("""
                             INSERT INTO jobs
-                            (job_no, job_name, builder_client_id, site_address, status, leading_hand, start_date, end_date, contract_value, notes)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """, (job_no.strip(), job_name, builder_id, site_address, status, leading_hand, start_date, end_date, contract_value, notes))
-                        record_audit_event("job_created", "job", job_no.strip())
+                            (job_no, job_name, builder_client_id, site_address, status, leading_hand,
+                             start_date, end_date, contract_value, notes,
+                             restrict_material_products, allowed_material_suppliers)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (
+                            job_no.strip(), job_name, builder_id, site_address, status, leading_hand,
+                            start_date, end_date, contract_value, notes,
+                            1 if restrict_material_products else 0,
+                            serialise_material_supplier_list(allowed_material_suppliers),
+                        ))
+                        record_audit_event(
+                            "job_created",
+                            "job",
+                            job_no.strip(),
+                            {
+                                "restrict_material_products": bool(restrict_material_products),
+                                "allowed_material_suppliers": allowed_material_suppliers,
+                            },
+                        )
                         pb_success(f"Saved job {job_no}")
                         refresh()
                     except Exception:
@@ -12279,6 +12788,11 @@ elif menu == "Jobs":
             builder_names = [""] + list(builder_options.keys())
             current_builder = str(current["builder_name"] or "")
             builder_index = builder_names.index(current_builder) if current_builder in builder_names else 0
+            current_allowed_suppliers = parse_material_supplier_list(current.get("allowed_material_suppliers", ""))
+            edit_supplier_options = list(material_supplier_options)
+            for supplier_name in current_allowed_suppliers:
+                if supplier_name not in edit_supplier_options:
+                    edit_supplier_options.append(supplier_name)
 
             with st.form("edit_job_form"):
                 col1, col2 = st.columns(2)
@@ -12305,37 +12819,61 @@ elif menu == "Jobs":
                 edit_start_date = col6.text_input("Start Date", value=str(current["start_date"] or ""))
                 edit_end_date = col7.text_input("End Date", value=str(current["end_date"] or ""))
 
+                st.markdown("#### Material supplier / brand allocation")
+                edit_restrict_material_products = st.checkbox(
+                    "Only show products from the approved suppliers/brands for this job",
+                    value=bool(int(current.get("restrict_material_products", 0) or 0)),
+                    key=f"edit_job_restrict_material_products_{selected_id}",
+                )
+                edit_allowed_material_suppliers = st.multiselect(
+                    "Approved suppliers / brands",
+                    edit_supplier_options,
+                    default=current_allowed_suppliers,
+                    key=f"edit_job_allowed_material_suppliers_{selected_id}",
+                    help="Staff see only these brands by default. They can use the override with a required reason.",
+                )
+
                 edit_notes = st.text_area("Notes", value=str(current["notes"] or ""))
                 submitted = st.form_submit_button("Update Job")
 
                 if submitted:
                     edit_builder_id = builder_options.get(edit_builder_label) if edit_builder_label else None
                     current_version = int(current["row_version"] or 1)
-                    updated_rows = execute_with_rowcount("""
-                        UPDATE jobs
-                        SET job_no = ?, job_name = ?, builder_client_id = ?, site_address = ?, status = ?,
-                            leading_hand = ?, start_date = ?, end_date = ?, contract_value = ?, notes = ?,
-                            row_version = COALESCE(row_version, 1) + 1
-                        WHERE id = ? AND COALESCE(row_version, 1) = ?
-                    """, (
-                        edit_job_no, edit_job_name, edit_builder_id, edit_site_address, edit_status,
-                        edit_leading_hand, edit_start_date, edit_end_date, edit_contract_value, edit_notes,
-                        selected_id, current_version,
-                    ))
-                    if updated_rows == 0:
-                        pb_error(
-                            "This job changed after you opened the form. Reload it and review the latest values "
-                            "before saving again."
-                        )
+                    if edit_restrict_material_products and not edit_allowed_material_suppliers:
+                        pb_error("Select at least one approved supplier/brand before restricting this job's products.")
                     else:
-                        record_audit_event(
-                            "job_updated",
-                            "job",
-                            selected_id,
-                            {"previous_row_version": current_version},
-                        )
-                        pb_success(f"Updated job {edit_job_no}")
-                        refresh()
+                        updated_rows = execute_with_rowcount("""
+                            UPDATE jobs
+                            SET job_no = ?, job_name = ?, builder_client_id = ?, site_address = ?, status = ?,
+                                leading_hand = ?, start_date = ?, end_date = ?, contract_value = ?, notes = ?,
+                                restrict_material_products = ?, allowed_material_suppliers = ?,
+                                row_version = COALESCE(row_version, 1) + 1
+                            WHERE id = ? AND COALESCE(row_version, 1) = ?
+                        """, (
+                            edit_job_no, edit_job_name, edit_builder_id, edit_site_address, edit_status,
+                            edit_leading_hand, edit_start_date, edit_end_date, edit_contract_value, edit_notes,
+                            1 if edit_restrict_material_products else 0,
+                            serialise_material_supplier_list(edit_allowed_material_suppliers),
+                            selected_id, current_version,
+                        ))
+                        if updated_rows == 0:
+                            pb_error(
+                                "This job changed after you opened the form. Reload it and review the latest values "
+                                "before saving again."
+                            )
+                        else:
+                            record_audit_event(
+                                "job_updated",
+                                "job",
+                                selected_id,
+                                {
+                                    "previous_row_version": current_version,
+                                    "restrict_material_products": bool(edit_restrict_material_products),
+                                    "allowed_material_suppliers": edit_allowed_material_suppliers,
+                                },
+                            )
+                            pb_success(f"Updated job {edit_job_no}")
+                            refresh()
 
     with tab_remove:
         st.subheader("Remove or Archive Job")
@@ -13315,23 +13853,52 @@ elif menu == "Material Costs":
     st.caption("Use saved products from the database, or add one-off materials that are not added to the master product list.")
 
     job_options = get_job_options()
-    product_code_options = get_product_options()
-    product_name_options = get_product_name_options()
 
     if not job_options:
         st.info("Create a job first.")
     else:
         with st.expander("Add Material Entry", expanded=True):
             job_label = st.selectbox("Job", list(job_options.keys()), key="material_job_select")
+            selected_material_job_id = job_options[job_label]
+            material_policy = get_job_material_policy(selected_material_job_id)
+            material_admin_override = False
+            material_admin_override_reason = ""
+            if material_policy["restricted"]:
+                supplier_text = ", ".join(material_policy["suppliers"]) or "No suppliers selected"
+                st.info(f"This job is restricted to: {supplier_text}.")
+                material_admin_override = st.checkbox(
+                    "Override this job's product restriction",
+                    key=f"material_admin_override_{selected_material_job_id}",
+                )
+                if material_admin_override:
+                    material_admin_override_reason = st.text_input(
+                        "Override reason",
+                        key=f"material_admin_override_reason_{selected_material_job_id}",
+                    )
 
-            entry_type_options = ["Saved Product", "One-off / Not Listed"] if product_code_options else ["One-off / Not Listed"]
+            allowed_suppliers = None
+            if material_policy["restricted"] and not material_admin_override:
+                allowed_suppliers = material_policy["suppliers"]
 
-            entry_type = st.radio(
-                "Material entry type",
-                entry_type_options,
-                horizontal=True,
-                key="material_entry_type",
-            )
+            product_code_options = get_product_options(allowed_suppliers)
+            product_name_options = get_product_name_options(allowed_suppliers)
+
+            entry_type_options = []
+            if product_code_options:
+                entry_type_options.append("Saved Product")
+            if not material_policy["restricted"] or material_admin_override:
+                entry_type_options.append("One-off / Not Listed")
+
+            if not entry_type_options:
+                st.warning("No saved products match this job's approved supplier list. Enable override or edit the job allocation.")
+                entry_type = None
+            else:
+                entry_type = st.radio(
+                    "Material entry type",
+                    entry_type_options,
+                    horizontal=True,
+                    key="material_entry_type",
+                )
 
             product_id = None
             matched_code = ""
@@ -13444,11 +14011,18 @@ elif menu == "Material Costs":
                 submitted = st.form_submit_button("Save Material Entry")
 
                 if submitted:
-                    if entry_type == "Saved Product" and not product_id:
+                    if entry_type is None:
+                        pb_error("No product is available under this job's current supplier allocation.")
+                    elif material_admin_override and not material_admin_override_reason.strip():
+                        pb_error("Enter an override reason before saving a product outside the approved job supplier list.")
+                    elif entry_type == "Saved Product" and not product_id:
                         pb_error("Select a saved product first.")
                     elif entry_type == "One-off / Not Listed" and not custom_product_name.strip():
                         pb_error("Enter a product/material name.")
                     else:
+                        override_note = ""
+                        if material_admin_override:
+                            override_note = f" Product filter override: {material_admin_override_reason.strip()}."
                         execute("""
                             INSERT INTO material_entries
                             (
@@ -13468,13 +14042,13 @@ elif menu == "Material Costs":
                             )
                             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """, (
-                            job_options[job_label],
+                            selected_material_job_id,
                             product_id,
                             qty_required,
                             qty_received,
                             date_ordered,
                             supplier,
-                            notes,
+                            f"{notes}{override_note}".strip(),
                             custom_product_code,
                             custom_product_name,
                             custom_supplier,
@@ -13483,7 +14057,31 @@ elif menu == "Material Costs":
                             custom_colour,
                         ))
 
-                        pb_success("Material entry saved.")
+                        if material_admin_override:
+                            record_audit_event(
+                                "job_material_filter_overridden",
+                                "job",
+                                selected_material_job_id,
+                                {
+                                    "reason": material_admin_override_reason.strip(),
+                                    "product": display_product_name,
+                                    "supplier": supplier,
+                                },
+                            )
+                        create_management_notifications(
+                            "paint_order_requested",
+                            "Paint/material entry added",
+                            (
+                                f"{current_username()} added {float(qty_required or 0):g} {matched_unit or custom_unit or 'unit(s)'} "
+                                f"of {display_product_name or 'material'} to {job_label}. "
+                                f"Supplier: {supplier or 'Unspecified'}."
+                                + (f" Override reason: {material_admin_override_reason.strip()}." if material_admin_override else "")
+                            ),
+                            job_id=selected_material_job_id,
+                            entity_type="material_request",
+                            entity_id="",
+                        )
+                        pb_success("Material entry saved. Nick and Bryce were notified.")
                         refresh()
 
     df = df_query("""
