@@ -18,6 +18,6 @@ jobs:
       - name: Install test dependencies
         run: pip install -r requirements-dev.txt
       - name: Compile application modules
-        run: python -m py_compile pb_jobhub_app.py jobhub_enterprise.py pb_jobhub_visual_scheduler.py jobhub_feedback.py jobhub_v2/*.py jobhub_v3/*.py
-      - name: Run V2 tests
+        run: python -m compileall -q pb_jobhub_app.py jobhub_enterprise.py pb_jobhub_visual_scheduler.py jobhub_feedback.py jobhub_v2 jobhub_v3 jobhub_v4
+      - name: Run JobHub tests
         run: python -m unittest discover -s tests -p "test_*.py" -v
