@@ -1,6 +1,16 @@
 PREMIER BRUSHWORKS JOBHUB — COMPLETE REPLACEMENT v5.1
 ===================================================
 
+LINKED PROGRESS AND SCHEDULER
+-----------------------------
+- JobHub is the master system for job dates, estimator quantities, progress and scheduling.
+- Estimating > Job Progress Tracker creates the exact dwelling count for a selected job.
+- Internal completion is weighted from floor m2 and the confirmed painting stages.
+- External completion is weighted from estimator substrate m2.
+- Staff Scheduler > Crew Suggestions explains recommended crews and waits for approval.
+- Schedule entries marked "Keep linked to job start date" move automatically when that job date changes.
+- Unticked/manual schedule dates remain fixed.
+
 This is a complete replacement app. It does not patch your existing Python file.
 
 WHAT IT KEEPS
