@@ -1,5 +1,16 @@
 # JobHub secured release
 
+## 2026-07-28 - Linked Progress and Smart Scheduling
+
+- Added an estimator-linked Job Progress Tracker with a fixed dwelling count for each job.
+- Added internal progress stages: Sealer, Spray Walls, Spray Ceilings, Spray Gloss, PC and Touch-ups.
+- Added external substrate progress using estimator m2, with Preparation, Primer / Sealer, First Coat, Final Coat and Touch-ups.
+- Added weighted completion, completed/remaining m2, earned value and remaining value.
+- Added automatic estimator quantity refresh across linked progress records.
+- Added explainable crew suggestions using job dates, estimator hours, current progress, staff roles, capacity, leave and existing allocations.
+- Suggestions require approval before staff are added to the schedule.
+- Linked schedule assignments now move automatically when the master job start date changes; fixed/manual dates remain unchanged.
+
 ## 2026-07-24
 
 - Replaced unsalted password storage with PBKDF2-SHA256 and automatic legacy
