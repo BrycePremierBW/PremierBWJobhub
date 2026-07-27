@@ -61,7 +61,14 @@ XERO_SCHEMA_STATEMENTS = (
 )
 
 
-def ensure_xero_schema(connection) -> None:
+def ensure_xero_schema(connection_or_factory) -> None:
+    """Create Xero tables using either a connection or connection factory."""
+    owns_connection = callable(connection_or_factory)
+    connection = (
+        connection_or_factory()
+        if owns_connection
+        else connection_or_factory
+    )
     cursor = connection.cursor()
     try:
         for statement in XERO_SCHEMA_STATEMENTS:
@@ -72,3 +79,5 @@ def ensure_xero_schema(connection) -> None:
         raise
     finally:
         cursor.close()
+        if owns_connection:
+            connection.close()
