@@ -61,7 +61,7 @@ MAX_TAKEOFF_PACK_FILES = 300
 MAX_IMAGE_PIXELS = 25_000_000
 Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 
-PB_JOBHUB_BUILD = "2026.07.28-selectable-tables-popup-v1"
+PB_JOBHUB_BUILD = "2026.07.28-bulk-timesheet-dates-v1"
 PLANNING_LABOUR_RATE = 60.0
 
 
@@ -5695,32 +5695,100 @@ def timesheet_entry_form(employee_id=None, employee_restricted=False, key_prefix
             "Employees",
             list(employee_options.keys()),
             key=f"{key_prefix}_employee",
-            help="Select one employee or a whole crew. The same job, date and hours will be applied to each person.",
+            help=(
+                "Select one employee or a whole crew. Each selected date and the "
+                "same shift details will be applied to every selected person."
+            ),
         )
         selected_employee_ids = [
             int(employee_options[label])
             for label in selected_employee_labels
         ]
 
-    col1, col2, col3, col4 = st.columns(4)
-    work_date_value = col1.date_input(
-        "Date",
-        value=date.today(),
-        key=f"{key_prefix}_date",
+    date_entry_mode = st.radio(
+        "Date Entry",
+        ["Single Date", "Multiple Dates"],
+        horizontal=True,
+        key=f"{key_prefix}_date_entry_mode",
+        help=(
+            "Choose Multiple Dates to create one timesheet for every selected "
+            "employee on every selected date."
+        ),
     )
-    start_time_value = col2.time_input(
+
+    selected_work_dates = []
+    if date_entry_mode == "Single Date":
+        selected_work_dates = [
+            st.date_input(
+                "Date",
+                value=date.today(),
+                key=f"{key_prefix}_date",
+            )
+        ]
+    else:
+        default_from = date.today() - timedelta(days=date.today().weekday())
+        default_to = default_from + timedelta(days=4)
+        date_window = st.date_input(
+            "Date Range",
+            value=(default_from, default_to),
+            key=f"{key_prefix}_date_window",
+            help="Choose the full range, then select the exact dates to submit below.",
+        )
+
+        if isinstance(date_window, (tuple, list)) and len(date_window) == 2:
+            range_start, range_end = date_window
+            if range_end < range_start:
+                range_start, range_end = range_end, range_start
+            available_dates = [
+                range_start + timedelta(days=offset)
+                for offset in range((range_end - range_start).days + 1)
+            ]
+            date_options = {
+                work_date.strftime("%a %d %b %Y"): work_date
+                for work_date in available_dates
+            }
+            weekday_defaults = [
+                label
+                for label, work_date in date_options.items()
+                if work_date.weekday() < 5
+            ]
+            if not weekday_defaults:
+                weekday_defaults = list(date_options.keys())
+
+            selected_date_labels = st.multiselect(
+                "Dates to Submit",
+                list(date_options.keys()),
+                default=weekday_defaults,
+                key=(
+                    f"{key_prefix}_selected_dates_"
+                    f"{range_start.isoformat()}_{range_end.isoformat()}"
+                ),
+                help=(
+                    "Weekdays are selected automatically. Add or remove any date "
+                    "before reviewing the batch."
+                ),
+            )
+            selected_work_dates = [
+                date_options[label]
+                for label in selected_date_labels
+            ]
+        else:
+            st.info("Select both the start and finish date to build the date collection.")
+
+    col1, col2, col3 = st.columns(3)
+    start_time_value = col1.time_input(
         "Start Time",
         value=time(7, 0),
         step=timedelta(minutes=15),
         key=f"{key_prefix}_start",
     )
-    finish_time_value = col3.time_input(
+    finish_time_value = col2.time_input(
         "Finish Time",
         value=time(15, 0),
         step=timedelta(minutes=15),
         key=f"{key_prefix}_finish",
     )
-    break_minutes = int(col4.number_input(
+    break_minutes = int(col3.number_input(
         "Break Minutes",
         min_value=0,
         max_value=300,
@@ -5743,9 +5811,11 @@ def timesheet_entry_form(employee_id=None, employee_restricted=False, key_prefix
         calculation_error = str(exc)
 
     overnight = finish_time_value < start_time_value
-    metric_col1, metric_col2 = st.columns(2)
-    metric_col1.metric("Calculated Total Hours", f"{total_hours:.2f}")
+    batch_timesheet_count = len(selected_employee_ids) * len(selected_work_dates)
+    metric_col1, metric_col2, metric_col3 = st.columns(3)
+    metric_col1.metric("Hours Per Timesheet", f"{total_hours:.2f}")
     metric_col2.metric("Shift Type", "Overnight" if overnight else "Same day")
+    metric_col3.metric("Timesheets in Batch", batch_timesheet_count)
     st.caption(
         f"Automatic calculation: {start_text} to {finish_text}, less "
         f"{break_minutes} break minutes. Total hours cannot be manually overwritten."
@@ -5765,7 +5835,7 @@ def timesheet_entry_form(employee_id=None, employee_restricted=False, key_prefix
         "job": selected_job,
         "employee_ids": selected_employee_ids,
         "employees": selected_employee_labels,
-        "date": work_date_value.isoformat(),
+        "dates": [work_date.isoformat() for work_date in selected_work_dates],
         "start": start_text,
         "finish": finish_text,
         "break_minutes": break_minutes,
@@ -5774,13 +5844,13 @@ def timesheet_entry_form(employee_id=None, employee_restricted=False, key_prefix
         "notes": notes,
     }
 
-    st.markdown("### Review Timesheet")
+    st.markdown("### Review Timesheet Batch")
     with st.container(border=True):
         review_rows = [
             {
                 "Job": selected_job,
                 "Employee": employee_label,
-                "Date": work_date_value.isoformat(),
+                "Date": work_date.isoformat(),
                 "Start": start_text,
                 "Finish": finish_text,
                 "Break": f"{break_minutes} min",
@@ -5788,25 +5858,43 @@ def timesheet_entry_form(employee_id=None, employee_restricted=False, key_prefix
                 "Work Type": work_type,
                 "Notes": notes,
             }
+            for work_date in selected_work_dates
             for employee_label in selected_employee_labels
         ]
-        st.dataframe(
-            pd.DataFrame(review_rows),
-            width="stretch",
-            hide_index=True,
-        )
+        if review_rows:
+            st.dataframe(
+                pd.DataFrame(review_rows),
+                width="stretch",
+                hide_index=True,
+            )
+            st.caption(
+                f"{len(selected_employee_ids)} staff × {len(selected_work_dates)} "
+                f"date(s) = {batch_timesheet_count} timesheet(s), "
+                f"{batch_timesheet_count * total_hours:.2f} total hours."
+            )
+        elif not selected_employee_ids:
+            st.info("Select at least one employee to build the batch.")
+        else:
+            st.info("Select at least one date to build the batch.")
+
         accepted = review_acceptance_checkbox(
             key_prefix,
             review_payload,
-            "I have reviewed these selections and accept that they are correct.",
+            "I have reviewed every employee and date and accept that this batch is correct.",
         )
 
+    submit_label = (
+        "Submit Timesheet"
+        if batch_timesheet_count == 1
+        else f"Submit {batch_timesheet_count} Timesheets"
+    )
     submitted = st.button(
-        "Submit Timesheet" if len(selected_employee_ids) == 1 else f"Submit {len(selected_employee_ids)} Timesheets",
+        submit_label,
         key=f"{key_prefix}_submit",
         type="primary",
         disabled=(
             not selected_employee_ids
+            or not selected_work_dates
             or not accepted
             or total_hours <= 0
             or bool(calculation_error)
@@ -5815,44 +5903,50 @@ def timesheet_entry_form(employee_id=None, employee_restricted=False, key_prefix
     if submitted:
         created_ids = []
         skipped = []
-        for employee_label, selected_employee_id in zip(
-            selected_employee_labels,
-            selected_employee_ids,
-        ):
-            duplicate = df_query("""
-                SELECT id
-                FROM timesheet_entries
-                WHERE job_id = ?
-                  AND employee_id = ?
-                  AND work_date = ?
-                  AND start_time = ?
-                  AND finish_time = ?
-                  AND COALESCE(status, 'Submitted') <> 'Rejected'
-                LIMIT 1
-            """, (
-                job_options[selected_job],
-                selected_employee_id,
-                work_date_value.isoformat(),
-                start_text,
-                finish_text,
-            ))
-            if not duplicate.empty:
-                skipped.append(f"{employee_label}: matching timesheet already exists")
-                continue
-            try:
-                created_ids.append(save_timesheet_entry(
+        for work_date_value in selected_work_dates:
+            for employee_label, selected_employee_id in zip(
+                selected_employee_labels,
+                selected_employee_ids,
+            ):
+                duplicate = df_query("""
+                    SELECT id
+                    FROM timesheet_entries
+                    WHERE job_id = ?
+                      AND employee_id = ?
+                      AND work_date = ?
+                      AND start_time = ?
+                      AND finish_time = ?
+                      AND COALESCE(status, 'Submitted') <> 'Rejected'
+                    LIMIT 1
+                """, (
                     job_options[selected_job],
                     selected_employee_id,
                     work_date_value.isoformat(),
                     start_text,
                     finish_text,
-                    break_minutes,
-                    total_hours,
-                    work_type,
-                    notes,
                 ))
-            except Exception as exc:
-                skipped.append(f"{employee_label}: {exc}")
+                if not duplicate.empty:
+                    skipped.append(
+                        f"{employee_label} on {work_date_value.isoformat()}: "
+                        "matching timesheet already exists"
+                    )
+                    continue
+                try:
+                    created_ids.append(save_timesheet_entry(
+                        job_options[selected_job],
+                        selected_employee_id,
+                        work_date_value.isoformat(),
+                        start_text,
+                        finish_text,
+                        break_minutes,
+                        total_hours,
+                        work_type,
+                        notes,
+                    ))
+                except Exception as exc:
+                    skipped.append(
+                        f"{employee_label} on {work_date_value.isoformat()}: {exc}"
+                    )
         st.session_state[f"{key_prefix}_review_fingerprint"] = ""
         if created_ids:
             pb_success(
@@ -5863,7 +5957,6 @@ def timesheet_entry_form(employee_id=None, employee_restricted=False, key_prefix
             st.warning("Skipped:\n\n" + "\n\n".join(f"• {item}" for item in skipped))
         if created_ids:
             refresh()
-
 
 
 def timesheets_page(employee_restricted=False):
