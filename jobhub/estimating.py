@@ -1200,7 +1200,7 @@ def job_costs_forecasting_page():
         target_gp = i1.number_input("Target GP %", min_value=0.0, max_value=100.0, value=35.0, step=1.0)
         labour_cost_hour = i2.number_input("Labour Cost / Hour", min_value=0.0, value=120.0, step=5.0)
         crew_size = i3.number_input("Crew Size", min_value=1.0, value=3.0, step=1.0)
-        hours_day = i4.number_input("Hours / Person / Day", min_value=1.0, value=7.5, step=0.5)
+        hours_day = i4.number_input("Hours / Person / Day", min_value=1.0, value=8.0, step=0.5)
 
         target_cost = jc_float(row["Contract Value"]) * (1 - target_gp / 100)
         remaining_cost_budget = max(target_cost - jc_float(row["Total Actual Cost"]), 0)
@@ -1274,7 +1274,7 @@ def job_costs_forecasting_page():
 
     elif section == "Scheduling Forecast":
         st.subheader("Scheduling / Labour Forecast")
-        hours_day = st.number_input("Default Hours / Person / Day", min_value=1.0, value=7.5, step=0.5)
+        hours_day = st.number_input("Default Hours / Person / Day", min_value=1.0, value=8.0, step=0.5)
         sched = df.copy()
         sched["Budget Labour Hours"] = sched["Estimated Labour Hours"]
         sched["Budget Labour Hours"] = sched.apply(
@@ -1330,4 +1330,3 @@ def job_costs_forecasting_page():
             file_name="PB_JobHub_Job_Cost_Forecast.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
-

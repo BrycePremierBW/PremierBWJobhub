@@ -315,8 +315,8 @@ def timesheet_entry_form(employee_id=None, employee_restricted=False, key_prefix
             col1, col2, col3, col4 = st.columns(4)
             work_day = col1.date_input("Date", value=date.today(), key=f"{key_prefix}_date")
             start_time = col2.text_input("Start Time", value="07:00", key=f"{key_prefix}_start")
-            finish_time = col3.text_input("Finish Time", value="15:30", key=f"{key_prefix}_finish")
-            break_minutes = col4.number_input("Break Minutes", min_value=0.0, step=15.0, value=30.0, key=f"{key_prefix}_break")
+            finish_time = col3.text_input("Finish Time", value="15:00", key=f"{key_prefix}_finish")
+            break_minutes = col4.number_input("Break Minutes", min_value=0.0, step=15.0, value=0.0, key=f"{key_prefix}_break")
             calculated_hours = calculate_hours_from_times(start_time, finish_time, break_minutes)
             total_hours = st.number_input("Total Hours", min_value=0.0, step=0.25, value=float(calculated_hours), key=f"{key_prefix}_hours")
             work_date = str(work_day)
@@ -465,4 +465,3 @@ def timesheets_page(employee_restricted=False):
             else:
                 st.metric("Total Hours for Job", f"{float(by_job['Hours'].fillna(0).sum()):.2f}")
                 st.dataframe(by_job, width="stretch", hide_index=True)
-

@@ -221,7 +221,7 @@ def init_linked_schema() -> None:
             """
             CREATE TABLE IF NOT EXISTS scheduler_employee_settings (
                 employee_id INTEGER PRIMARY KEY,
-                target_daily_hours REAL DEFAULT 7.6,
+                target_daily_hours REAL DEFAULT 8.0,
                 schedule_colour TEXT DEFAULT '',
                 notes TEXT DEFAULT '',
                 updated_at TEXT,
@@ -273,7 +273,7 @@ def init_linked_schema() -> None:
             """
             CREATE TABLE IF NOT EXISTS scheduler_employee_settings (
                 employee_id INTEGER PRIMARY KEY,
-                target_daily_hours REAL DEFAULT 7.6,
+                target_daily_hours REAL DEFAULT 8.0,
                 schedule_colour TEXT DEFAULT '',
                 notes TEXT DEFAULT '',
                 updated_at TEXT,
@@ -301,6 +301,13 @@ def init_linked_schema() -> None:
         "ON staff_schedule(linked_to_job_dates, job_id)"
     )
     execute("CREATE INDEX IF NOT EXISTS idx_staff_leave_dates ON staff_leave_requests(start_date, end_date)")
+    execute(
+        """
+        UPDATE scheduler_employee_settings
+        SET target_daily_hours = 8.0
+        WHERE ABS(COALESCE(target_daily_hours, 0) - 7.6) < 0.001
+        """
+    )
 
 
 # -----------------------------------------------------------------------------
@@ -412,7 +419,7 @@ def active_staff() -> pd.DataFrame:
         """
         SELECT e.id, e.name, COALESCE(e.role,'Painter') AS position,
                COALESCE(e.phone,'') AS phone, COALESCE(e.status,'Active') AS status,
-               COALESCE(s.target_daily_hours,7.6) AS target_daily_hours,
+               COALESCE(s.target_daily_hours,8.0) AS target_daily_hours,
                COALESCE(s.notes,'') AS scheduler_notes
         FROM employees e
         LEFT JOIN scheduler_employee_settings s ON s.employee_id=e.id
@@ -440,7 +447,7 @@ def schedulable_jobs() -> pd.DataFrame:
 def assignment_rows(start: date, end: date, employee_id: int | None = None) -> pd.DataFrame:
     sql = """
         SELECT s.id, s.employee_id, e.name AS staff, COALESCE(e.role,'Painter') AS position,
-               COALESCE(es.target_daily_hours,7.6) AS target_daily_hours,
+               COALESCE(es.target_daily_hours,8.0) AS target_daily_hours,
                s.job_id, j.job_no, j.job_name, COALESCE(bc.name,'') AS builder,
                COALESCE(j.site_address,'') AS address,
                s.schedule_date, COALESCE(s.start_time,'07:00') AS start_time,
@@ -760,6 +767,77 @@ def selected_board_cell(event, board: pd.DataFrame) -> tuple[str, str] | None:
     return str(board.iloc[row_index]["Employee"]), str(column_name)
 
 
+@st.dialog("Choose a job", dismissible=False)
+def schedule_tile_dialog(
+    employee_id: int,
+    staff_name: str,
+    work_day: date,
+    existing: pd.DataFrame,
+    jobs: pd.DataFrame,
+    user: dict,
+    cell_key: str,
+) -> None:
+    """Open the minimal employee/day job picker requested for the tile board."""
+    st.markdown(f"**{staff_name} · {work_day.strftime('%A %d %B')}**")
+    if not existing.empty:
+        st.caption("Already scheduled")
+        for _, booking in existing.iterrows():
+            details, remove = st.columns([4, 1])
+            details.write(
+                f"{booking['job_no']} · {booking['job_name']} "
+                f"({booking['start_time']}–{booking['finish_time']})"
+            )
+            if remove.button(
+                "Delete",
+                key=f"tile_popup_delete_{int(booking['id'])}",
+                use_container_width=True,
+            ):
+                execute("DELETE FROM staff_schedule WHERE id=?", (int(booking["id"]),))
+                st.session_state["scheduler_dismissed_cell"] = cell_key
+                pb_success(f"Deleted {staff_name}'s booking for {work_day.strftime('%d %b')}.")
+                pb_rerun()
+
+    job_labels = (jobs["job_no"].astype(str) + " · " + jobs["job_name"].astype(str)).tolist()
+    selected_job = st.selectbox(
+        "Select job",
+        job_labels,
+        key=f"tile_popup_job_{employee_id}_{work_day.isoformat()}",
+    )
+    st.caption("Standard shift: 7:00 am–3:00 pm, zero break, 8.0 hours.")
+    add_col, close_col = st.columns(2)
+    if add_col.button(
+        "Add to job",
+        key=f"tile_popup_add_{employee_id}_{work_day.isoformat()}",
+        type="primary",
+        use_container_width=True,
+    ):
+        job_no = selected_job.split(" · ", 1)[0]
+        job_id = int(jobs.loc[jobs["job_no"].astype(str) == job_no, "id"].iloc[0])
+        ok, message = add_assignment(
+            employee_id,
+            job_id,
+            work_day,
+            time(7, 0),
+            time(15, 0),
+            8.0,
+            "Site Work",
+            "",
+            str(user.get("username", "")),
+            True,
+        )
+        (pb_success if ok else pb_error)(message)
+        if ok:
+            st.session_state["scheduler_dismissed_cell"] = cell_key
+            pb_rerun()
+    if close_col.button(
+        "Close",
+        key=f"tile_popup_close_{employee_id}_{work_day.isoformat()}",
+        use_container_width=True,
+    ):
+        st.session_state["scheduler_dismissed_cell"] = cell_key
+        pb_rerun()
+
+
 def clickable_schedule_board(
     assignments: pd.DataFrame,
     start: date,
@@ -769,14 +847,14 @@ def clickable_schedule_board(
     role_options: list[str],
     user: dict,
 ) -> None:
-    """Render a cell-selectable board with quick add and delete controls."""
+    """Render a cell-selectable board whose tiles open a job picker popup."""
     days = list(daterange(start, end))
     day_lookup = {day.strftime("%a %d %b"): day for day in days}
     grid = schedule_grid(assignments, start, end, staff)
     grid.columns = [to_date(day).strftime("%a %d %b") for day in days]
     board = grid.reset_index().rename(columns={"index": "Employee"})
 
-    st.caption("Click a day beside an employee to add or remove their booking.")
+    st.caption("Click any employee/day tile, then choose the job in the popup.")
     event = st.dataframe(
         board,
         use_container_width=True,
@@ -796,78 +874,21 @@ def clickable_schedule_board(
     if work_day is None:
         return
     employee_id = int(staff.loc[staff["name"] == staff_name, "id"].iloc[0])
-    st.markdown(f"#### {staff_name} · {work_day.strftime('%A %d %B')}")
-
     existing = assignments[
         (assignments["employee_id"].astype(int) == employee_id)
         & (assignments["schedule_date"].astype(str) == work_day.isoformat())
     ]
-    if not existing.empty:
-        st.caption("Bookings already on this day")
-        for _, booking in existing.iterrows():
-            details, remove = st.columns([5, 1])
-            details.write(
-                f"**{booking['job_no']} · {booking['job_name']}** — "
-                f"{booking['start_time']}–{booking['finish_time']} · {float(booking['hours']):.1f}h"
-            )
-            if remove.button(
-                "Delete",
-                key=f"board_delete_{int(booking['id'])}",
-                type="secondary",
-                use_container_width=True,
-            ):
-                execute("DELETE FROM staff_schedule WHERE id=?", (int(booking["id"]),))
-                pb_success(f"Deleted {staff_name}'s booking for {work_day.strftime('%d %b')}.")
-                pb_rerun()
-
-    job_labels = (jobs["job_no"].astype(str) + " · " + jobs["job_name"].astype(str)).tolist()
-    with st.form(f"board_quick_add_{employee_id}_{work_day.isoformat()}"):
-        q1, q2, q3 = st.columns([2.2, 1.2, 1.2])
-        job_label = q1.selectbox("Job", job_labels, key=f"board_job_{employee_id}_{work_day}")
-        site_role = q1.selectbox("Role / type", role_options, key=f"board_role_{employee_id}_{work_day}")
-        start_time = q2.time_input("Start", value=time(7, 0), key=f"board_start_{employee_id}_{work_day}")
-        finish_time = q2.time_input("Finish", value=time(15, 0), key=f"board_finish_{employee_id}_{work_day}")
-        hours = q3.number_input(
-            "Hours",
-            min_value=0.25,
-            max_value=24.0,
-            value=7.6,
-            step=0.25,
-            key=f"board_hours_{employee_id}_{work_day}",
-        )
-        linked_dates = q3.checkbox(
-            "Link to job dates",
-            value=True,
-            key=f"board_linked_{employee_id}_{work_day}",
-            help="If the job start date changes, this booking moves with it.",
-        )
-        notes = st.text_input(
-            "Notes (optional)",
-            key=f"board_notes_{employee_id}_{work_day}",
-        )
-        save = st.form_submit_button(
-            f"Add {staff_name} to this job",
-            type="primary",
-            use_container_width=True,
-        )
-    if save:
-        job_no = job_label.split(" · ", 1)[0]
-        job_id = int(jobs.loc[jobs["job_no"].astype(str) == job_no, "id"].iloc[0])
-        ok, message = add_assignment(
+    cell_key = f"{employee_id}:{work_day.isoformat()}"
+    if st.session_state.get("scheduler_dismissed_cell") != cell_key:
+        schedule_tile_dialog(
             employee_id,
-            job_id,
+            staff_name,
             work_day,
-            start_time,
-            finish_time,
-            hours,
-            site_role,
-            notes,
-            str(user.get("username", "")),
-            linked_dates,
+            existing,
+            jobs,
+            user,
+            cell_key,
         )
-        (pb_success if ok else pb_error)(message)
-        if ok:
-            pb_rerun()
 
 
 def timeline_chart(assignments: pd.DataFrame, title: str):
@@ -1260,7 +1281,7 @@ def page_schedule(user: dict) -> None:
             site_role = a2.selectbox("Role / type", role_options)
             start_time = a3.time_input("Start", value=time(7, 0))
             finish_time = a3.time_input("Finish", value=time(15, 0))
-            hours = a3.number_input("Allocated hours", min_value=0.25, max_value=24.0, value=7.6, step=0.25)
+            hours = a3.number_input("Allocated hours", min_value=0.25, max_value=24.0, value=8.0, step=0.25)
             linked_dates = st.checkbox(
                 "Keep this assignment linked to the job start date",
                 value=True,
@@ -1303,7 +1324,7 @@ def page_schedule(user: dict) -> None:
             site_role = c2.selectbox("Role / type", role_options, key="bulk_role")
             start_time = c3.time_input("Start", value=time(7, 0), key="bulk_start_time")
             finish_time = c3.time_input("Finish", value=time(15, 0), key="bulk_finish_time")
-            hours = c3.number_input("Hours per person / day", min_value=0.25, max_value=24.0, value=7.6, step=0.25)
+            hours = c3.number_input("Hours per person / day", min_value=0.25, max_value=24.0, value=8.0, step=0.25)
             linked_dates = st.checkbox(
                 "Keep crew dates linked to the job start date",
                 value=True,
@@ -1610,7 +1631,7 @@ def page_crew_suggestions(user: dict) -> None:
         urgency = "Now" if overlaps else ("Upcoming" if job_start <= end + timedelta(days=14) else "Later")
         if not overlaps and urgency == "Later" and remaining_by_estimate <= 0:
             continue
-        required_hours = remaining_by_estimate if estimated > 0 else max(7.6, allocated)
+        required_hours = remaining_by_estimate if estimated > 0 else max(8.0, allocated)
         candidates = capacity[capacity["available_hours"] > 0.1].copy()
         if candidates.empty:
             crew_text = "No capacity"
@@ -1688,7 +1709,7 @@ def page_crew_suggestions(user: dict) -> None:
         default_start = max(start, to_date(job_row.get("start_date"), start))
         schedule_start = c1.date_input("Start date", value=default_start)
         schedule_end = c2.date_input("End date", value=min(end, default_start + timedelta(days=4)))
-        hours = c3.number_input("Hours per person/day", min_value=0.25, value=7.6, step=0.25)
+        hours = c3.number_input("Hours per person/day", min_value=0.25, value=8.0, step=0.25)
         approve = st.form_submit_button("Approve and add suggested crew", type="primary")
     if approve:
         if not crew:
