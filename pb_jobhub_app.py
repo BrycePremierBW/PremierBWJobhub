@@ -23,7 +23,12 @@ from pypdf import PdfReader, PdfWriter
 import streamlit as st
 import streamlit.components.v1 as components
 from jobhub_feedback import error as pb_error, replay_pending as pb_replay_pending, rerun as pb_rerun, success as pb_success
-from pb_jobhub_visual_scheduler import render_jobhub_staff_scheduler
+from pb_jobhub_visual_scheduler import (
+    init_linked_schema,
+    render_jobhub_staff_scheduler,
+    sync_linked_job_dates,
+)
+from jobhub_progress_tracker import render_progress_tracker, sync_all_linked_progress
 from jobhub_enterprise import (
     ensure_enterprise_schema,
     ensure_daily_backup,
@@ -53,7 +58,7 @@ MAX_TAKEOFF_PACK_FILES = 300
 MAX_IMAGE_PIXELS = 25_000_000
 Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 
-PB_JOBHUB_BUILD = "2026.07.27-enterprise-foundation-procurement-field-v1"
+PB_JOBHUB_BUILD = "2026.07.28-linked-progress-smart-scheduler-v1"
 
 
 # =============================
@@ -12953,6 +12958,7 @@ def initialise_jobhub_runtime(database_url, data_dir):
     init_db()
     apply_schema_migrations()
     ensure_enterprise_schema(connect)
+    init_linked_schema()
     seed_data()
     seed_app_users()
     return True
@@ -12970,6 +12976,20 @@ except Exception as exc:
     st.stop()
 
 require_login()
+
+# Keep linked modules talking on every JobHub rerun. Only records explicitly
+# linked to their source are updated; manual/fixed scheduler dates are preserved.
+try:
+    moved_schedule_rows = sync_linked_job_dates()
+    sync_all_linked_progress(jobhub_enterprise_context())
+    if moved_schedule_rows:
+        pb_success(
+            f"{moved_schedule_rows} linked schedule assignment(s) moved automatically "
+            "after a job date changed."
+        )
+except Exception as exc:
+    pb_error("JobHub could not refresh one or more linked records.")
+    st.caption(str(exc))
 
 # Lightweight restart-safe daily database export.  The module checks for an
 # existing backup before doing any work, so normal page reruns remain fast.
@@ -13019,6 +13039,7 @@ elif role == "manager":
     estimating_menu_map = {
         "Import / Create Job Pack": "Import Take-off Job Pack",
         "Estimate Working Sheet": "Estimate Working Sheet",
+        "Job Progress Tracker": "Job Progress Tracker",
         "Estimating Rate Library": "Estimating Rate Library",
         "Job Costs / Forecasting": "Job Costs / Forecasting",
     }
@@ -13056,6 +13077,7 @@ else:
     estimating_menu_map = {
         "Import / Create Job Pack": "Import Take-off Job Pack",
         "Estimate Working Sheet": "Estimate Working Sheet",
+        "Job Progress Tracker": "Job Progress Tracker",
         "Estimating Rate Library": "Estimating Rate Library",
         "Job Costs / Forecasting": "Job Costs / Forecasting",
     }
@@ -13926,6 +13948,10 @@ elif menu == "Estimating Rate Library":
 
 elif menu == "Estimate Working Sheet":
     estimate_working_sheet_page()
+
+
+elif menu == "Job Progress Tracker":
+    render_progress_tracker(jobhub_enterprise_context())
 
 
 # =============================
