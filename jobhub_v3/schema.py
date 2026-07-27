@@ -3,8 +3,7 @@
 XERO_SCHEMA_STATEMENTS = (
     """
     CREATE TABLE IF NOT EXISTS xero_connections (
-        id INTEGER PRIMARY KEY,
-        tenant_id TEXT NOT NULL UNIQUE,
+        tenant_id TEXT PRIMARY KEY,
         tenant_name TEXT,
         encrypted_access_token TEXT NOT NULL,
         encrypted_refresh_token TEXT NOT NULL,
@@ -13,6 +12,15 @@ XERO_SCHEMA_STATEMENTS = (
         connected_by TEXT,
         connected_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS xero_oauth_nonces (
+        nonce_hash TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        consumed_at TEXT,
+        created_at TEXT NOT NULL
     )
     """,
     """
