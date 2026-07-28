@@ -27,7 +27,6 @@ DEFAULT_SCOPES = (
     "profile",
     "email",
     "offline_access",
-    "app.connections",
     "accounting.contacts",
     "accounting.invoices",
     "accounting.payments",
