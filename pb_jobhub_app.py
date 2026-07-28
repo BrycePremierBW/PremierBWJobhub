@@ -3532,26 +3532,48 @@ def seed_app_users():
                 datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             ))
         elif bootstrap_password and not bootstrap_errors:
-            # A secure environment value can recover an existing admin account
-            # that still has one of the disabled historical default passwords.
+            # A secure environment value can recover a disabled historical
+            # default. A deliberate one-time override is also available only
+            # in staging, where free Render services do not provide shell
+            # access. The marker prevents reruns from reapplying the same
+            # temporary password after the administrator changes it.
+            force_staging_recovery = (
+                str(os.getenv("JOBHUB_ENV", "")).strip().casefold() == "staging"
+                and str(os.getenv("JOBHUB_FORCE_ADMIN_RECOVERY", ""))
+                .strip()
+                .casefold() in {"1", "true", "yes", "on"}
+            )
+            recovery_marker = (
+                "Staging admin recovery "
+                + hashlib.sha256(bootstrap_password.encode("utf-8")).hexdigest()[:16]
+            )
             cur.execute("""
-                SELECT id, password_hash
+                SELECT id, password_hash, COALESCE(notes, '')
                 FROM app_users
                 WHERE LOWER(TRIM(username)) = LOWER(TRIM(?))
                   AND role = 'admin'
                 LIMIT 1
             """, (bootstrap_username,))
             existing = cur.fetchone()
-            if existing and is_known_default_password_hash(existing[1]):
+            recover_default = bool(
+                existing and is_known_default_password_hash(existing[1])
+            )
+            recover_staging = bool(
+                existing
+                and force_staging_recovery
+                and str(existing[2] or "") != recovery_marker
+            )
+            if recover_default or recover_staging:
                 cur.execute("""
                     UPDATE app_users
                     SET password_hash = ?, active = 1, failed_login_count = 0,
                         locked_until = '', must_change_password = 1,
-                        password_changed_at = ?
+                        password_changed_at = ?, notes = ?
                     WHERE id = ?
                 """, (
                     hash_password(bootstrap_password),
                     datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    recovery_marker,
                     int(existing[0]),
                 ))
 
