@@ -159,6 +159,45 @@ class XeroClient:
         response.raise_for_status()
         return list(response.json())
 
+    def contacts(
+        self,
+        token: XeroToken,
+        tenant_id: str,
+        *,
+        page: int = 1,
+    ) -> list[dict[str, Any]]:
+        payload = self.accounting_request(
+            "GET",
+            "Contacts",
+            token,
+            tenant_id,
+            params={"page": max(1, int(page))},
+        )
+        return list(payload.get("Contacts") or [])
+
+    def create_draft_invoice(
+        self,
+        token: XeroToken,
+        tenant_id: str,
+        invoice: dict[str, Any],
+    ) -> dict[str, Any]:
+        if str(invoice.get("Status", "")).upper() != "DRAFT":
+            raise ValueError("Only DRAFT Xero invoices can be created by JobHub.")
+        payload = self.accounting_request(
+            "POST",
+            "Invoices",
+            token,
+            tenant_id,
+            payload={"Invoices": [invoice]},
+        )
+        invoices = list(payload.get("Invoices") or [])
+        if not invoices:
+            raise ValueError("Xero did not return the created draft invoice.")
+        created = dict(invoices[0])
+        if str(created.get("Status", "")).upper() != "DRAFT":
+            raise ValueError("Xero did not return the invoice as a draft.")
+        return created
+
     def accounting_request(
         self,
         method: str,
