@@ -3535,8 +3535,8 @@ def seed_app_users():
             # A secure environment value can recover a disabled historical
             # default. A deliberate one-time override is also available only
             # in staging, where free Render services do not provide shell
-            # access. The marker prevents reruns from reapplying the same
-            # temporary password after the administrator changes it.
+            # access. The versioned marker prevents reruns from reapplying the
+            # same temporary password after the administrator changes it.
             force_staging_recovery = (
                 str(os.getenv("JOBHUB_ENV", "")).strip().casefold() == "staging"
                 and str(os.getenv("JOBHUB_FORCE_ADMIN_RECOVERY", ""))
@@ -3544,14 +3544,13 @@ def seed_app_users():
                 .casefold() in {"1", "true", "yes", "on"}
             )
             recovery_marker = (
-                "Staging admin recovery "
+                "Staging admin recovery v2 "
                 + hashlib.sha256(bootstrap_password.encode("utf-8")).hexdigest()[:16]
             )
             cur.execute("""
                 SELECT id, password_hash, COALESCE(notes, '')
                 FROM app_users
                 WHERE LOWER(TRIM(username)) = LOWER(TRIM(?))
-                  AND role = 'admin'
                 LIMIT 1
             """, (bootstrap_username,))
             existing = cur.fetchone()
@@ -3563,18 +3562,38 @@ def seed_app_users():
                 and force_staging_recovery
                 and str(existing[2] or "") != recovery_marker
             )
-            if recover_default or recover_staging:
+            if existing and (recover_default or recover_staging):
                 cur.execute("""
                     UPDATE app_users
-                    SET password_hash = ?, active = 1, failed_login_count = 0,
-                        locked_until = '', must_change_password = 1,
-                        password_changed_at = ?, notes = ?
+                    SET password_hash = ?, role = 'admin', active = 1,
+                        failed_login_count = 0, locked_until = '',
+                        must_change_password = 1, password_changed_at = ?,
+                        notes = ?
                     WHERE id = ?
                 """, (
                     hash_password(bootstrap_password),
                     datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     recovery_marker,
                     int(existing[0]),
+                ))
+            elif force_staging_recovery and not existing:
+                cur.execute("""
+                    INSERT INTO app_users
+                    (username, password_hash, role, employee_id, active, notes,
+                     failed_login_count, locked_until, must_change_password,
+                     password_changed_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    bootstrap_username,
+                    hash_password(bootstrap_password),
+                    "admin",
+                    None,
+                    1,
+                    recovery_marker,
+                    0,
+                    "",
+                    1,
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 ))
 
         # Known shared passwords are disabled rather than silently left active.
