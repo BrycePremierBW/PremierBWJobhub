@@ -88,6 +88,67 @@ class XeroOAuthTests(unittest.TestCase):
         request_data = session.post.call_args.kwargs["data"]
         self.assertEqual(request_data["refresh_token"], "old-refresh")
 
+    def test_contacts_are_returned_from_accounting_response(self):
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            "Contacts": [{"ContactID": "contact-1", "Name": "Example Builder"}]
+        }
+        session = Mock()
+        session.request.return_value = response
+        client = XeroClient(self.config, session=session)
+        token = XeroToken(
+            "access",
+            "refresh",
+            datetime.now(timezone.utc) + timedelta(minutes=20),
+        )
+        contacts = client.contacts(token, "tenant-1")
+        self.assertEqual(contacts[0]["ContactID"], "contact-1")
+        self.assertEqual(session.request.call_args.args[:2], ("GET", "https://api.xero.com/api.xro/2.0/Contacts"))
+
+    def test_only_draft_invoices_can_be_created(self):
+        client = XeroClient(self.config, session=Mock())
+        token = XeroToken(
+            "access",
+            "refresh",
+            datetime.now(timezone.utc) + timedelta(minutes=20),
+        )
+        with self.assertRaisesRegex(ValueError, "Only DRAFT"):
+            client.create_draft_invoice(
+                token,
+                "tenant-1",
+                {"Status": "AUTHORISED"},
+            )
+
+    def test_draft_invoice_is_wrapped_and_returned(self):
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            "Invoices": [
+                {
+                    "InvoiceID": "invoice-1",
+                    "InvoiceNumber": "INV-1",
+                    "Status": "DRAFT",
+                }
+            ]
+        }
+        session = Mock()
+        session.request.return_value = response
+        client = XeroClient(self.config, session=session)
+        token = XeroToken(
+            "access",
+            "refresh",
+            datetime.now(timezone.utc) + timedelta(minutes=20),
+        )
+        created = client.create_draft_invoice(
+            token,
+            "tenant-1",
+            {"Status": "DRAFT"},
+        )
+        self.assertEqual(created["InvoiceID"], "invoice-1")
+        request_payload = session.request.call_args.kwargs["json"]
+        self.assertEqual(request_payload, {"Invoices": [{"Status": "DRAFT"}]})
+
 
 class OAuthStateTests(unittest.TestCase):
     def test_signed_state_round_trip(self):
