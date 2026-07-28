@@ -60,7 +60,7 @@ class XeroOAuthTests(unittest.TestCase):
         url = client.authorisation_url("csrf-token")
         self.assertIn("state=csrf-token", url)
         self.assertIn("offline_access", url)
-        self.assertIn("app.connections", url)
+        self.assertNotIn("app.connections", url)
         self.assertIn("accounting.contacts", url)
         self.assertIn("accounting.invoices", url)
         self.assertIn("accounting.payments", url)
