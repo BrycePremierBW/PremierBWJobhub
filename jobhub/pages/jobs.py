@@ -4,6 +4,15 @@ from __future__ import annotations
 from ..runtime import *
 
 
+def job_date_value(value):
+    if value is None or str(value).strip() == "":
+        return None
+    try:
+        return pd.to_datetime(str(value).strip()[:10], errors="raise").date()
+    except Exception:
+        return None
+
+
 def render_jobs():
     st.header("Job Register")
     builder_options = get_builder_options()
@@ -29,14 +38,19 @@ def render_jobs():
             contract_value = col5.number_input("Contract Value Ex GST", min_value=0.0, step=100.0)
 
             col6, col7 = st.columns(2)
-            start_date = col6.text_input("Start Date", placeholder="DD/MM/YYYY")
-            end_date = col7.text_input("End Date", placeholder="DD/MM/YYYY")
+            start_date_value = col6.date_input("Start Date", value=None, format="DD/MM/YYYY")
+            end_date_value = col7.date_input("End Date", value=None, format="DD/MM/YYYY")
+            start_date = start_date_value.isoformat() if start_date_value else ""
+            end_date = end_date_value.isoformat() if end_date_value else ""
 
             notes = st.text_area("Notes")
             submitted = st.form_submit_button("Save Job")
 
             if submitted and job_no:
                 builder_id = builder_options.get(builder_label) if builder_label else None
+                if start_date_value and end_date_value and end_date_value < start_date_value:
+                    st.error("End Date cannot be before Start Date.")
+                    return
                 execute("""
                     INSERT INTO jobs
                     (job_no, job_name, builder_client_id, site_address, status, leading_hand, start_date, end_date, contract_value, notes)
@@ -97,8 +111,14 @@ def render_jobs():
                 edit_contract_value = col5.number_input("Contract Value Ex GST", min_value=0.0, step=100.0, value=float(current["contract_value"] or 0))
 
                 col6, col7 = st.columns(2)
-                edit_start_date = col6.text_input("Start Date", value=str(current["start_date"] or ""))
-                edit_end_date = col7.text_input("End Date", value=str(current["end_date"] or ""))
+                edit_start_date_value = col6.date_input(
+                    "Start Date", value=job_date_value(current["start_date"]), format="DD/MM/YYYY"
+                )
+                edit_end_date_value = col7.date_input(
+                    "End Date", value=job_date_value(current["end_date"]), format="DD/MM/YYYY"
+                )
+                edit_start_date = edit_start_date_value.isoformat() if edit_start_date_value else ""
+                edit_end_date = edit_end_date_value.isoformat() if edit_end_date_value else ""
 
                 edit_notes = st.text_area("Notes", value=str(current["notes"] or ""))
                 submitted = st.form_submit_button("Update Job")
@@ -237,8 +257,16 @@ def render_jobs():
                 )
 
                 col6, col7 = st.columns(2)
-                edit_start_date = col6.text_input("Start Date", value=str(current["start_date"] or ""), key="arch_start_date")
-                edit_end_date = col7.text_input("End Date", value=str(current["end_date"] or ""), key="arch_end_date")
+                edit_start_date_value = col6.date_input(
+                    "Start Date", value=job_date_value(current["start_date"]),
+                    format="DD/MM/YYYY", key="arch_start_date"
+                )
+                edit_end_date_value = col7.date_input(
+                    "End Date", value=job_date_value(current["end_date"]),
+                    format="DD/MM/YYYY", key="arch_end_date"
+                )
+                edit_start_date = edit_start_date_value.isoformat() if edit_start_date_value else ""
+                edit_end_date = edit_end_date_value.isoformat() if edit_end_date_value else ""
 
                 edit_notes = st.text_area("Notes", value=str(current["notes"] or ""), key="arch_notes")
                 update_archived = st.form_submit_button("Update Archived Job")

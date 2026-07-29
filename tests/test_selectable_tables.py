@@ -40,10 +40,30 @@ class SelectableTableSourceTests(unittest.TestCase):
         for candidate in (source, modular_source):
             self.assertIn("def render_selectable_job_details", candidate)
             self.assertIn('key=f"selectable_job_details_{int(job_id)}"', candidate)
-            self.assertIn('"Change selected job status"', candidate)
-            self.assertIn('"Save status"', candidate)
+            self.assertIn('new_status = c3.selectbox(', candidate)
+            self.assertIn('"Save job details"', candidate)
             self.assertIn("UPDATE jobs", candidate)
-            self.assertIn("SET status = ?", candidate)
+            self.assertIn("status = ?", candidate)
+
+    def test_selected_job_row_can_edit_all_job_details(self):
+        source = (ROOT / "pb_jobhub_app.py").read_text(encoding="utf-8")
+        modular_source = (ROOT / "jobhub" / "job_views.py").read_text(encoding="utf-8")
+        for candidate in (source, modular_source):
+            self.assertIn('"Save job details"', candidate)
+            self.assertIn('"Job Number"', candidate)
+            self.assertIn('"Builder / Client"', candidate)
+            self.assertIn('"Contract Value Ex GST"', candidate)
+            self.assertIn("UPDATE builders_clients", candidate)
+            self.assertIn('date_input("Start Date"', candidate)
+            self.assertIn('date_input("End Date"', candidate)
+            self.assertIn('format="DD/MM/YYYY"', candidate)
+
+    def test_edit_job_dates_use_calendar_inputs(self):
+        source = (ROOT / "pb_jobhub_app.py").read_text(encoding="utf-8")
+        jobs_page = (ROOT / "jobhub" / "pages" / "jobs.py").read_text(encoding="utf-8")
+        for candidate in (source, jobs_page):
+            self.assertNotIn('text_input("Start Date"', candidate)
+            self.assertNotIn('text_input("End Date"', candidate)
 
     def test_no_live_daily_default_is_below_eight_hours(self):
         scheduler = (ROOT / "pb_jobhub_visual_scheduler.py").read_text(encoding="utf-8")
