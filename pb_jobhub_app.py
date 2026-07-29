@@ -138,7 +138,10 @@ st.set_page_config(
     page_title="Premier Brushworks JobHub",
     page_icon="🎨",
     layout="wide",
-    initial_sidebar_state="expanded",
+    # Let Streamlit keep the navigation open on desktop while collapsing it on
+    # narrow/mobile viewports. Forcing it open makes the signed-in page appear
+    # zoomed and leaves too little room for the main content on phones.
+    initial_sidebar_state="auto",
 )
 
 
@@ -697,8 +700,100 @@ def apply_pb_branding():
         }
 
         @media (max-width: 760px) {
+            /* PB_JOBHUB_MOBILE_VIEWPORT_FIX
+               Keep the signed-in app inside the phone viewport. */
+            html,
+            body,
+            [data-testid="stAppViewContainer"],
+            [data-testid="stMain"],
+            .stApp {
+                width: 100% !important;
+                max-width: 100vw !important;
+                min-width: 0 !important;
+                overflow-x: hidden !important;
+            }
+
+            .block-container {
+                width: 100% !important;
+                max-width: 100% !important;
+                min-width: 0 !important;
+                padding: 0.75rem 0.65rem 2rem !important;
+                box-sizing: border-box !important;
+            }
+
+            /* Desktop column groups become readable vertical sections. */
+            div[data-testid="stHorizontalBlock"] {
+                flex-wrap: wrap !important;
+                gap: 0.65rem !important;
+            }
+
+            div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"] {
+                flex: 1 1 100% !important;
+                width: 100% !important;
+                min-width: 0 !important;
+            }
+
+            /* Do not let form controls, uploaders or custom cards set a wider
+               intrinsic page width. */
+            div[data-testid="stVerticalBlock"],
+            div[data-testid="stVerticalBlockBorderWrapper"],
+            div[data-testid="stForm"],
+            div[data-testid="stForm"] > div,
+            div[data-testid="stFileUploader"],
+            div[data-baseweb="select"],
+            .pb-page-hero,
+            .pb-card {
+                width: 100% !important;
+                max-width: 100% !important;
+                min-width: 0 !important;
+                box-sizing: border-box !important;
+            }
+
+            .pb-page-hero {
+                padding: 1rem !important;
+                border-radius: 16px !important;
+            }
+
             .pb-page-title { font-size: 26px; }
             .pb-card { min-height: auto; }
+
+            /* Wide records remain usable by scrolling the record itself rather
+               than zooming or widening the whole application. */
+            [data-testid="stDataFrame"],
+            [data-testid="stTable"],
+            [data-testid="stDataEditor"] {
+                width: 100% !important;
+                max-width: 100% !important;
+                min-width: 0 !important;
+                overflow-x: auto !important;
+                -webkit-overflow-scrolling: touch !important;
+            }
+
+            div[data-testid="stTabs"] {
+                width: 100% !important;
+                max-width: 100% !important;
+                min-width: 0 !important;
+                overflow: hidden !important;
+            }
+
+            div[data-testid="stTabs"] [data-baseweb="tab-list"] {
+                overflow-x: auto !important;
+                overflow-y: hidden !important;
+                white-space: nowrap !important;
+                scrollbar-width: thin !important;
+                -webkit-overflow-scrolling: touch !important;
+            }
+
+            div[data-testid="stTabs"] [role="tab"] {
+                flex: 0 0 auto !important;
+            }
+
+            .stButton > button,
+            .stDownloadButton > button {
+                width: 100% !important;
+                min-height: 44px !important;
+                white-space: normal !important;
+            }
         }
         </style>
         """,
