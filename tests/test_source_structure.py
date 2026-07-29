@@ -34,6 +34,14 @@ class SourceStructureTests(unittest.TestCase):
         ]
         self.assertEqual(unsafe, [])
 
+    def test_main_app_has_mobile_viewport_guards(self):
+        source = (ROOT / "pb_jobhub_app.py").read_text(encoding="utf-8")
+        self.assertIn('initial_sidebar_state="auto"', source)
+        self.assertIn("PB_JOBHUB_MOBILE_VIEWPORT_FIX", source)
+        self.assertIn('div[data-testid="stHorizontalBlock"]', source)
+        self.assertIn("max-width: 100vw !important", source)
+        self.assertIn("-webkit-overflow-scrolling: touch !important", source)
+
 
 if __name__ == "__main__":
     unittest.main()
