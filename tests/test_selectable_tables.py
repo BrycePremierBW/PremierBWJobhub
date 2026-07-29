@@ -34,6 +34,17 @@ class SelectableTableSourceTests(unittest.TestCase):
         self.assertIn('kwargs["selection_mode"] = "single-row"', source)
         self.assertIn("st.dataframe = pb_selectable_dataframe", source)
 
+    def test_selected_job_row_can_change_status(self):
+        source = (ROOT / "pb_jobhub_app.py").read_text(encoding="utf-8")
+        modular_source = (ROOT / "jobhub" / "job_views.py").read_text(encoding="utf-8")
+        for candidate in (source, modular_source):
+            self.assertIn("def render_selectable_job_details", candidate)
+            self.assertIn('key=f"selectable_job_details_{int(job_id)}"', candidate)
+            self.assertIn('"Change selected job status"', candidate)
+            self.assertIn('"Save status"', candidate)
+            self.assertIn("UPDATE jobs", candidate)
+            self.assertIn("SET status = ?", candidate)
+
     def test_no_live_daily_default_is_below_eight_hours(self):
         scheduler = (ROOT / "pb_jobhub_visual_scheduler.py").read_text(encoding="utf-8")
         app = (ROOT / "pb_jobhub_app.py").read_text(encoding="utf-8")
