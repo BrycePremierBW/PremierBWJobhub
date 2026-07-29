@@ -277,7 +277,61 @@ def apply_pb_branding():
         }
 
         @media (max-width: 900px) {
-            .block-container { padding-left: 0.85rem; padding-right: 0.85rem; }
+            html,
+            body,
+            [data-testid="stAppViewContainer"],
+            [data-testid="stMain"],
+            .stApp {
+                width: 100% !important;
+                max-width: 100vw !important;
+                min-width: 0 !important;
+                overflow-x: hidden !important;
+            }
+            .block-container {
+                width: 100% !important;
+                max-width: 100% !important;
+                min-width: 0 !important;
+                padding: 0.75rem 0.65rem 2rem !important;
+                box-sizing: border-box !important;
+            }
+            div[data-testid="stHorizontalBlock"] {
+                flex-wrap: wrap !important;
+                gap: 0.65rem !important;
+            }
+            div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"] {
+                flex: 1 1 100% !important;
+                width: 100% !important;
+                min-width: 0 !important;
+            }
+            div[data-testid="stVerticalBlock"],
+            div[data-testid="stVerticalBlockBorderWrapper"],
+            div[data-testid="stForm"],
+            div[data-testid="stForm"] > div,
+            div[data-testid="stFileUploader"],
+            div[data-baseweb="select"],
+            .pb-page-hero,
+            .pb-card {
+                width: 100% !important;
+                max-width: 100% !important;
+                min-width: 0 !important;
+                box-sizing: border-box !important;
+            }
+            [data-testid="stDataFrame"],
+            [data-testid="stTable"],
+            [data-testid="stDataEditor"],
+            div[data-testid="stTabs"] [data-baseweb="tab-list"] {
+                max-width: 100% !important;
+                min-width: 0 !important;
+                overflow-x: auto !important;
+                -webkit-overflow-scrolling: touch !important;
+            }
+            div[data-testid="stTabs"] [role="tab"] { flex: 0 0 auto !important; }
+            .stButton > button,
+            .stDownloadButton > button {
+                width: 100% !important;
+                min-height: 44px !important;
+                white-space: normal !important;
+            }
             .pb-page-title { font-size: 1.4rem; }
         }
         </style>
@@ -342,4 +396,3 @@ def pb_job_header(row):
         </div>
     </div>
     """, unsafe_allow_html=True)
-
