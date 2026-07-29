@@ -12662,7 +12662,7 @@ JOB_STATUS_OPTIONS = [
 
 
 def render_selectable_job_details(job_details, job_id):
-    """Let a user select the displayed job row and update its status."""
+    """Let a user select the displayed job row and update all job details."""
     event = st.dataframe(
         job_details,
         width="stretch",
@@ -12673,32 +12673,117 @@ def render_selectable_job_details(job_details, job_id):
     )
     selected_rows = list(getattr(getattr(event, "selection", None), "rows", []) or [])
     if not selected_rows:
-        st.caption("Select the job row to change its status.")
+        st.caption("Select the job row to edit its details.")
         return
 
-    current_status = str(job_details.iloc[selected_rows[0]].get("Status", "") or "Not Started")
+    row = job_details.iloc[selected_rows[0]]
+    current_status = str(row.get("Status", "") or "Not Started")
     status_options = list(JOB_STATUS_OPTIONS)
     if current_status not in status_options:
         status_options.append(current_status)
 
-    with st.form(f"quick_job_status_form_{int(job_id)}"):
-        new_status = st.selectbox(
-            "Change selected job status",
+    builder_options = get_builder_options()
+    builder_names = [""] + list(builder_options.keys())
+    current_builder = str(row.get("Builder / Client", "") or "")
+    if current_builder and current_builder not in builder_names:
+        builder_names.append(current_builder)
+    employee_options = get_employee_options(active_only=True)
+    employee_names = [""] + list(employee_options.keys())
+    current_leading_hand = str(row.get("Leading Hand", "") or "")
+    if current_leading_hand and current_leading_hand not in employee_names:
+        employee_names.append(current_leading_hand)
+
+    with st.form(f"quick_job_details_form_{int(job_id)}"):
+        st.markdown("#### Edit selected job")
+        c1, c2 = st.columns(2)
+        new_job_no = c1.text_input("Job Number", value=str(row.get("Job No", "") or ""))
+        new_job_name = c2.text_input("Job Name", value=str(row.get("Job Name", "") or ""))
+        new_builder = st.selectbox(
+            "Builder / Client",
+            builder_names,
+            index=builder_names.index(current_builder) if current_builder in builder_names else 0,
+        )
+        new_site_address = st.text_input("Site Address", value=str(row.get("Site Address", "") or ""))
+
+        c3, c4, c5 = st.columns(3)
+        new_status = c3.selectbox(
+            "Status",
             status_options,
             index=status_options.index(current_status),
         )
-        save_status = st.form_submit_button("Save status", type="primary", use_container_width=True)
-    if save_status:
-        execute(
-            """
-            UPDATE jobs
-            SET status = ?, row_version = COALESCE(row_version, 1) + 1
-            WHERE id = ?
-            """,
-            (new_status, int(job_id)),
+        new_leading_hand = c4.selectbox(
+            "Leading Hand",
+            employee_names,
+            index=employee_names.index(current_leading_hand) if current_leading_hand in employee_names else 0,
         )
-        pb_success(f"Job status changed from {current_status} to {new_status}.")
-        pb_rerun()
+        new_contract_value = c5.number_input(
+            "Contract Value Ex GST",
+            min_value=0.0,
+            step=100.0,
+            value=float(row.get("Contract Value Ex GST", 0) or 0),
+        )
+
+        c6, c7 = st.columns(2)
+        new_start_date = c6.date_input(
+            "Start Date",
+            value=pb_date(row.get("Start Date")),
+            format="DD/MM/YYYY",
+        )
+        new_end_date = c7.date_input(
+            "End Date",
+            value=pb_date(row.get("End Date")),
+            format="DD/MM/YYYY",
+        )
+
+        st.markdown("##### Builder contact details")
+        b1, b2 = st.columns(2)
+        new_contact = b1.text_input("Contact", value=str(row.get("Contact", "") or ""))
+        new_phone = b2.text_input("Phone", value=str(row.get("Phone", "") or ""))
+        b3, b4 = st.columns(2)
+        new_email = b3.text_input("Email", value=str(row.get("Email", "") or ""))
+        new_terms = b4.text_input("Terms", value=str(row.get("Terms", "") or ""))
+        new_notes = st.text_area("Notes", value=str(row.get("Notes", "") or ""))
+        save_details = st.form_submit_button("Save job details", type="primary", use_container_width=True)
+
+    if save_details:
+        if not new_job_no.strip() or not new_job_name.strip():
+            pb_error("Job Number and Job Name are required.")
+            return
+        if new_start_date and new_end_date and new_end_date < new_start_date:
+            pb_error("End Date cannot be before Start Date.")
+            return
+        builder_id = builder_options.get(new_builder) if new_builder else None
+        try:
+            execute(
+                """
+                UPDATE jobs
+                SET job_no = ?, job_name = ?, builder_client_id = ?, site_address = ?,
+                    status = ?, leading_hand = ?, start_date = ?, end_date = ?,
+                    contract_value = ?, notes = ?,
+                    row_version = COALESCE(row_version, 1) + 1
+                WHERE id = ?
+                """,
+                (
+                    new_job_no.strip(), new_job_name.strip(), builder_id, new_site_address,
+                    new_status, new_leading_hand,
+                    new_start_date.isoformat() if new_start_date else "",
+                    new_end_date.isoformat() if new_end_date else "",
+                    new_contract_value, new_notes, int(job_id),
+                ),
+            )
+            if builder_id:
+                execute(
+                    """
+                    UPDATE builders_clients
+                    SET contact_name = ?, phone = ?, email = ?, terms = ?
+                    WHERE id = ?
+                    """,
+                    (new_contact, new_phone, new_email, new_terms, int(builder_id)),
+                )
+            pb_success(f"Updated all details for job {new_job_no.strip()}.")
+            pb_rerun()
+        except Exception:
+            pb_error("The job could not be updated. Check that the Job Number is unique and try again.")
 
 
 def go_to_linked_job_view(job_id=None, builder_id=None, mode=None):
@@ -14290,8 +14375,18 @@ elif menu == "Jobs":
                 edit_contract_value = col5.number_input("Contract Value Ex GST", min_value=0.0, step=100.0, value=float(current["contract_value"] or 0))
 
                 col6, col7 = st.columns(2)
-                edit_start_date = col6.text_input("Start Date", value=str(current["start_date"] or ""))
-                edit_end_date = col7.text_input("End Date", value=str(current["end_date"] or ""))
+                edit_start_date_value = col6.date_input(
+                    "Start Date",
+                    value=pb_date(current["start_date"]),
+                    format="DD/MM/YYYY",
+                )
+                edit_end_date_value = col7.date_input(
+                    "End Date",
+                    value=pb_date(current["end_date"]),
+                    format="DD/MM/YYYY",
+                )
+                edit_start_date = edit_start_date_value.isoformat() if edit_start_date_value else ""
+                edit_end_date = edit_end_date_value.isoformat() if edit_end_date_value else ""
 
                 st.markdown("#### Material supplier / brand allocation")
                 edit_restrict_material_products = st.checkbox(
@@ -14313,7 +14408,9 @@ elif menu == "Jobs":
                 if submitted:
                     edit_builder_id = builder_options.get(edit_builder_label) if edit_builder_label else None
                     current_version = int(current["row_version"] or 1)
-                    if edit_restrict_material_products and not edit_allowed_material_suppliers:
+                    if edit_start_date_value and edit_end_date_value and edit_end_date_value < edit_start_date_value:
+                        pb_error("End Date cannot be before Start Date.")
+                    elif edit_restrict_material_products and not edit_allowed_material_suppliers:
                         pb_error("Select at least one approved supplier/brand before restricting this job's products.")
                     else:
                         updated_rows = execute_with_rowcount("""
@@ -14492,8 +14589,20 @@ elif menu == "Jobs":
                 )
 
                 col6, col7 = st.columns(2)
-                edit_start_date = col6.text_input("Start Date", value=str(current["start_date"] or ""), key="arch_start_date")
-                edit_end_date = col7.text_input("End Date", value=str(current["end_date"] or ""), key="arch_end_date")
+                edit_start_date_value = col6.date_input(
+                    "Start Date",
+                    value=pb_date(current["start_date"]),
+                    format="DD/MM/YYYY",
+                    key="arch_start_date",
+                )
+                edit_end_date_value = col7.date_input(
+                    "End Date",
+                    value=pb_date(current["end_date"]),
+                    format="DD/MM/YYYY",
+                    key="arch_end_date",
+                )
+                edit_start_date = edit_start_date_value.isoformat() if edit_start_date_value else ""
+                edit_end_date = edit_end_date_value.isoformat() if edit_end_date_value else ""
 
                 edit_notes = st.text_area("Notes", value=str(current["notes"] or ""), key="arch_notes")
                 update_archived = st.form_submit_button("Update Archived Job")
