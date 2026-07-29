@@ -12655,6 +12655,52 @@ def safe_df_query(sql, params=()):
         return pd.DataFrame()
 
 
+JOB_STATUS_OPTIONS = [
+    "Not Started", "Quoted", "Booked", "Active", "On Hold",
+    "Completed", "Invoiced", "Paid", "Archived",
+]
+
+
+def render_selectable_job_details(job_details, job_id):
+    """Let a user select the displayed job row and update its status."""
+    event = st.dataframe(
+        job_details,
+        width="stretch",
+        hide_index=True,
+        key=f"selectable_job_details_{int(job_id)}",
+        on_select="rerun",
+        selection_mode="single-row",
+    )
+    selected_rows = list(getattr(getattr(event, "selection", None), "rows", []) or [])
+    if not selected_rows:
+        st.caption("Select the job row to change its status.")
+        return
+
+    current_status = str(job_details.iloc[selected_rows[0]].get("Status", "") or "Not Started")
+    status_options = list(JOB_STATUS_OPTIONS)
+    if current_status not in status_options:
+        status_options.append(current_status)
+
+    with st.form(f"quick_job_status_form_{int(job_id)}"):
+        new_status = st.selectbox(
+            "Change selected job status",
+            status_options,
+            index=status_options.index(current_status),
+        )
+        save_status = st.form_submit_button("Save status", type="primary", use_container_width=True)
+    if save_status:
+        execute(
+            """
+            UPDATE jobs
+            SET status = ?, row_version = COALESCE(row_version, 1) + 1
+            WHERE id = ?
+            """,
+            (new_status, int(job_id)),
+        )
+        pb_success(f"Job status changed from {current_status} to {new_status}.")
+        pb_rerun()
+
+
 def go_to_linked_job_view(job_id=None, builder_id=None, mode=None):
     if job_id is not None:
         st.session_state["linked_view_selected_job_id"] = int(job_id)
@@ -13025,7 +13071,7 @@ def render_job_linked_info(job_id, expanded=True):
 
     with tab_summary:
         st.markdown("### Job Details")
-        st.dataframe(job_details, width="stretch", hide_index=True)
+        render_selectable_job_details(job_details, job_id)
 
 
         st.markdown("### Staff Schedule")
