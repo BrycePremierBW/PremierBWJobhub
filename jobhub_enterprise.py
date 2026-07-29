@@ -1749,9 +1749,10 @@ def _xero_export_zip(ctx: dict[str, Any]) -> bytes:
         "supplier_bills.csv": _query(
             ctx,
             """
-            SELECT invoice_no AS "InvoiceNumber", supplier AS "ContactName", invoice_date AS "InvoiceDate",
-                   due_date AS "DueDate", subtotal_ex_gst AS "UnitAmount", status AS "Status",
-                   j.job_no AS "TrackingName", notes AS "Reference"
+            SELECT si.invoice_no AS "InvoiceNumber", si.supplier AS "ContactName",
+                   si.invoice_date AS "InvoiceDate", si.due_date AS "DueDate",
+                   si.subtotal_ex_gst AS "UnitAmount", si.status AS "Status",
+                   j.job_no AS "TrackingName", si.notes AS "Reference"
             FROM supplier_invoices si
             JOIN jobs j ON j.id = si.job_id
             ORDER BY si.id
