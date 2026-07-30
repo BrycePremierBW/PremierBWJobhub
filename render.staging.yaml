@@ -22,6 +22,22 @@ services:
         value: "false"
       - key: JOBHUB_EMAIL_NOTIFICATIONS_ENABLED
         value: "false"
+      - key: XERO_ENABLED
+        value: "false"
+      - key: XERO_CLIENT_ID
+        sync: false
+      - key: XERO_CLIENT_SECRET
+        sync: false
+      - key: XERO_REDIRECT_URI
+        sync: false
+      - key: XERO_TOKEN_ENCRYPTION_KEY
+        sync: false
+      - key: XERO_OAUTH_STATE_SECRET
+        sync: false
+      - key: XERO_SALES_ACCOUNT_CODE
+        sync: false
+      - key: XERO_PURCHASE_ACCOUNT_CODE
+        sync: false
       - key: AI_PROVIDER
         value: none
       - key: JOBHUB_ALLOW_EXTERNAL_AI

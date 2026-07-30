@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 import base64
 from datetime import datetime, timedelta, timezone
+import hashlib
+import json
 from typing import Any
 from urllib.parse import urlencode
 
@@ -31,6 +33,26 @@ DEFAULT_SCOPES = (
     "accounting.invoices",
     "accounting.payments",
 )
+
+
+def build_xero_idempotency_key(
+    operation: str,
+    tenant_id: str,
+    payload: dict[str, Any],
+) -> str:
+    """Build a stable Xero-compatible key for one logical write."""
+    canonical = json.dumps(
+        {
+            "operation": str(operation or "").strip().casefold(),
+            "tenant_id": str(tenant_id or "").strip(),
+            "payload": payload,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        default=str,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -129,7 +151,13 @@ class XeroClient:
             timeout=self.timeout,
         )
         response.raise_for_status()
-        return XeroToken.from_response(response.json())
+        token = XeroToken.from_response(response.json())
+        if not token.refresh_token:
+            raise RuntimeError(
+                "Xero did not return a refresh token. Confirm offline_access "
+                "is authorised and reconnect the organisation."
+            )
+        return token
 
     def exchange_code(self, code: str) -> XeroToken:
         return self._token_request(
@@ -189,6 +217,11 @@ class XeroClient:
             token,
             tenant_id,
             payload={"Invoices": [invoice]},
+            idempotency_key=build_xero_idempotency_key(
+                "create_draft_invoice",
+                tenant_id,
+                invoice,
+            ),
         )
         invoices = list(payload.get("Invoices") or [])
         if not invoices:
@@ -207,22 +240,26 @@ class XeroClient:
         *,
         payload: dict[str, Any] | None = None,
         params: dict[str, Any] | None = None,
+        idempotency_key: str = "",
     ) -> dict[str, Any]:
         if token.needs_refresh():
             raise RuntimeError("Xero access token must be refreshed before this request.")
         if not tenant_id:
             raise ValueError("A Xero tenant ID is required.")
+        headers = {
+            "Authorization": f"Bearer {token.access_token}",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "xero-tenant-id": tenant_id,
+        }
+        if idempotency_key:
+            headers["Idempotency-Key"] = str(idempotency_key)[:128]
         response = self.session.request(
             method.upper(),
             f"{ACCOUNTING_API_URL}/{endpoint.lstrip('/')}",
             json=payload,
             params=params,
-            headers={
-                "Authorization": f"Bearer {token.access_token}",
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-                "xero-tenant-id": tenant_id,
-            },
+            headers=headers,
             timeout=self.timeout,
         )
         response.raise_for_status()

@@ -2,9 +2,9 @@
 
 Use this runbook only against:
 
-- JobHub staging: `https://premier-brushworks-jobhub-staging.onrender.com`
-- Render service: `premier-brushworks-jobhub-staging`
-- Xero demo organisation
+- the separate JobHub staging service created from `render.staging.yaml`
+- its separate staging database
+- a Xero demo organisation
 
 Do not connect the production JobHub service during this run.
 
@@ -18,13 +18,15 @@ Do not connect the production JobHub service during this run.
 ## 2. Finalise the Xero developer app
 
 1. Sign in to the Xero developer portal.
-2. Add this exact redirect URI:
-   `https://premier-brushworks-jobhub-staging.onrender.com/xero/callback`
-3. Keep the production redirect URI registered separately:
-   `https://premierbwjobhub.onrender.com/xero/callback`
-4. Rotate the current Xero client secret.
-5. Replace `XERO_CLIENT_SECRET` in Render staging with the new secret.
-6. Confirm these staging variables are present without revealing their values:
+2. Copy the exact HTTPS staging application URL shown by Render.
+3. Register that application root as the redirect URI, including its trailing
+   slash. JobHub processes the returned `code` and `state` query parameters at
+   the application root.
+4. Keep any production redirect URI registered separately and do not select it
+   during staging.
+5. Rotate the current Xero client secret.
+6. Replace `XERO_CLIENT_SECRET` in Render staging with the new secret.
+7. Confirm these staging variables are present without revealing their values:
    - `XERO_CLIENT_ID`
    - `XERO_CLIENT_SECRET`
    - `XERO_REDIRECT_URI`
@@ -83,8 +85,7 @@ If any pass criterion fails:
 4. Rotate the Xero client secret and JobHub encryption/state keys if exposure is suspected.
 5. Keep all V2–V4 pull requests in draft.
 
-## Staging expiry note
+## Staging database note
 
-The free Render PostgreSQL staging database is currently scheduled to expire on
-26 August 2026 unless upgraded. Export or upgrade it before that date if testing
-continues.
+Record the staging database provider's actual expiry and backup policy when the
+database is created. Never assume it shares production retention or backups.

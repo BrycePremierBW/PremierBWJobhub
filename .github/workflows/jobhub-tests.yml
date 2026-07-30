@@ -30,6 +30,7 @@ jobs:
           jobhub_core.py
           jobhub
           jobhub_v2
+          jobhub_v3
           jobhub_v4
       - name: Run JobHub tests
         run: python -m unittest discover -s tests -p "test_*.py" -v

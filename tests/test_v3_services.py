@@ -70,6 +70,7 @@ class FakeXeroClient:
         *,
         payload=None,
         params=None,
+        idempotency_key="",
     ):
         self.requests.append(
             {
@@ -78,6 +79,7 @@ class FakeXeroClient:
                 "token": token,
                 "tenant_id": tenant_id,
                 "payload": payload,
+                "idempotency_key": idempotency_key,
             }
         )
         if endpoint == "Contacts":
@@ -180,6 +182,7 @@ class XeroSyncServiceTests(unittest.TestCase):
         payload = client.requests[0]["payload"]["Invoices"][0]
         self.assertEqual(payload["Type"], "ACCREC")
         self.assertEqual(payload["Status"], "DRAFT")
+        self.assertEqual(len(client.requests[0]["idempotency_key"]), 64)
 
     def test_supplier_bill_is_sent_to_xero_as_draft(self):
         service, client, _store, _database = connected_service()

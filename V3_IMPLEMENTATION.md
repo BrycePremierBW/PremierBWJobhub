@@ -1,12 +1,12 @@
 # JobHub V3 implementation
 
-Branch: `operations-v3` (stacked on `operations-v2`)
+Status: rebuilt as a clean V3 delta on the reconciled V2 foundation.
 
 ## Milestone 1 — Xero-safe accounting foundation
 
 - Standard Xero OAuth 2.0 authorisation-code client.
-- Required offline access plus Xero's post-March-2026 granular connection,
-  contacts, invoices and payments scopes.
+- Required offline access plus the granular contacts, invoices and payments
+  scopes documented by Xero.
 - Refresh-token rotation returned to the caller for immediate secure storage.
 - Signed, expiring OAuth state protection.
 - Encrypted access and refresh-token persistence.
@@ -18,10 +18,12 @@ Branch: `operations-v3` (stacked on `operations-v2`)
 ## Safety rules
 
 - Xero is disabled until `XERO_ENABLED=true`.
+- Only JobHub administrators can open the Xero integration page.
 - Never store or log Xero credentials in source code.
 - Store tokens encrypted and replace the stored refresh token after every refresh.
 - Create sales invoices and supplier bills as `DRAFT` until approved in JobHub.
-- Use idempotency keys and the sync-event register to prevent duplicates.
+- Send Xero's `Idempotency-Key` header as well as using JobHub's sync-event
+  register to prevent duplicates during retries.
 - Test against a Xero demo organisation before enabling production.
 
 ## Milestone 2 — accounting sync and commercial workflows
@@ -38,7 +40,8 @@ Branch: `operations-v3` (stacked on `operations-v2`)
 
 ## Remaining live validation
 
-1. Register the staging redirect URI in the Xero developer app.
+1. Register the exact HTTPS staging application root as the redirect URI in
+   the Xero developer app.
 2. Connect a Xero demo organisation.
 3. Map the Premier Brushworks chart-of-accounts codes and tax types.
 4. Run contact, draft invoice, draft bill and payment-status smoke tests.

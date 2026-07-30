@@ -88,6 +88,19 @@ class XeroOAuthTests(unittest.TestCase):
         request_data = session.post.call_args.kwargs["data"]
         self.assertEqual(request_data["refresh_token"], "old-refresh")
 
+    def test_missing_rotated_refresh_token_is_rejected(self):
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            "access_token": "new-access",
+            "expires_in": 1800,
+        }
+        session = Mock()
+        session.post.return_value = response
+        client = XeroClient(self.config, session=session)
+        with self.assertRaisesRegex(RuntimeError, "refresh token"):
+            client.refresh("old-refresh")
+
     def test_contacts_are_returned_from_accounting_response(self):
         response = Mock()
         response.raise_for_status.return_value = None
@@ -148,6 +161,10 @@ class XeroOAuthTests(unittest.TestCase):
         self.assertEqual(created["InvoiceID"], "invoice-1")
         request_payload = session.request.call_args.kwargs["json"]
         self.assertEqual(request_payload, {"Invoices": [{"Status": "DRAFT"}]})
+        idempotency_key = session.request.call_args.kwargs["headers"].get(
+            "Idempotency-Key"
+        )
+        self.assertEqual(len(idempotency_key), 64)
 
 
 class OAuthStateTests(unittest.TestCase):

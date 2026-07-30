@@ -134,14 +134,14 @@ def _handle_callback(ctx: dict[str, Any]) -> None:
 
     try:
         payload = _state_signer().verify(state)
+        if str(payload["user_id"]) != _current_user_id(ctx):
+            raise ValueError("The Xero callback belongs to a different JobHub user.")
         if not _nonce_store(ctx).consume(
             payload["user_id"],
             payload["nonce"],
             consumed_at=datetime.now(timezone.utc).isoformat(),
         ):
             raise ValueError("The Xero connection request was already used or expired.")
-        if str(payload["user_id"]) != _current_user_id(ctx):
-            raise ValueError("The Xero callback belongs to a different JobHub user.")
         client = _client()
         token = client.exchange_code(code)
         connections = client.connections(token.access_token)

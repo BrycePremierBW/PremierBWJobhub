@@ -249,6 +249,7 @@ class XeroSyncService:
                 self._token(),
                 self.tenant_id,
                 payload={wrapper: [payload]},
+                idempotency_key=key,
             )
             item = self._extract_first(response, wrapper)
             xero_id = str(item.get(id_field) or "")
