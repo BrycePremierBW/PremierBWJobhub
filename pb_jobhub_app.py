@@ -9539,7 +9539,12 @@ def estimate_working_sheet_page():
         if lines_df.empty:
             st.info("No line items added yet.")
         else:
-            st.dataframe(lines_df.drop(columns=["id"]), width="stretch", hide_index=True)
+            st.dataframe(
+                lines_df.drop(columns=["id"]),
+                width="stretch",
+                hide_index=True,
+                key=f"estimate_line_items_{selected_estimate_id}",
+            )
             st.metric("Line Item Total", f"${float(lines_df['Line Total'].fillna(0).sum()):,.2f}")
             delete_options = {f"{r['Section']} - {r['Description']} - ${float(r['Line Total'] or 0):,.2f}": int(r["id"]) for _, r in lines_df.iterrows()}
             selected_delete = st.selectbox("Line item to delete", list(delete_options.keys()))
@@ -9576,9 +9581,19 @@ def estimate_working_sheet_page():
             ORDER BY id
         """, (selected_estimate_id,))
         st.markdown("### Estimate Summary")
-        st.dataframe(summary_df, width="stretch", hide_index=True)
+        st.dataframe(
+            summary_df,
+            width="stretch",
+            hide_index=True,
+            key=f"estimate_summary_{selected_estimate_id}",
+        )
         st.markdown("### Estimate Lines")
-        st.dataframe(lines_export, width="stretch", hide_index=True)
+        st.dataframe(
+            lines_export,
+            width="stretch",
+            hide_index=True,
+            key=f"estimate_export_lines_{selected_estimate_id}",
+        )
 
         output = BytesIO()
         with pd.ExcelWriter(output, engine="openpyxl") as writer:
