@@ -8,8 +8,11 @@ from jobhub_core import (
     is_known_default_password_hash,
     is_public_ip_address,
     next_scoped_number,
+    notes_with_admin_reset_marker,
     password_needs_rehash,
     password_strength_errors,
+    should_reset_existing_admin,
+    staging_admin_reset_marker,
     validate_public_http_url,
     verify_password,
 )
@@ -34,6 +37,28 @@ class PasswordTests(unittest.TestCase):
         self.assertTrue(is_known_default_password_hash(legacy_default))
         self.assertTrue(password_strength_errors("admin123", "admin"))
         self.assertFalse(password_strength_errors("Long!UniquePass42", "admin"))
+
+    def test_explicit_admin_reset_is_staging_only_and_single_use(self):
+        marker = staging_admin_reset_marker(
+            "staging",
+            "2026-07-30-jobhub-recovery",
+        )
+        self.assertTrue(marker.startswith("staging-admin-reset:"))
+        self.assertFalse(
+            staging_admin_reset_marker(
+                "production",
+                "2026-07-30-jobhub-recovery",
+            )
+        )
+        self.assertFalse(staging_admin_reset_marker("staging", "short"))
+
+        secure_hash = hash_password("Existing!StrongPass42")
+        self.assertTrue(should_reset_existing_admin(secure_hash, "", marker))
+        consumed_notes = notes_with_admin_reset_marker("Administrator", marker)
+        self.assertIn(marker, consumed_notes)
+        self.assertFalse(
+            should_reset_existing_admin(secure_hash, consumed_notes, marker)
+        )
 
 
 class PricingTests(unittest.TestCase):

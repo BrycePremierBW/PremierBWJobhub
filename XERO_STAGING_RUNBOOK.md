@@ -10,10 +10,18 @@ Do not connect the production JobHub service during this run.
 
 ## 1. Secure the staging administrator
 
-1. Complete JobHub's required permanent-password screen.
-2. Confirm the new password works in a fresh private session.
-3. Remove `JOBHUB_BOOTSTRAP_ADMIN_PASSWORD` from the Render staging service.
-4. Redeploy and confirm the administrator still signs in.
+1. If the existing staging password is unavailable, set:
+   - `JOBHUB_BOOTSTRAP_ADMIN_USERNAME` to the staging administrator username.
+   - `JOBHUB_BOOTSTRAP_ADMIN_PASSWORD` to a strong temporary password.
+   - `JOBHUB_BOOTSTRAP_ADMIN_RESET_ID` to a new unique identifier of at least
+     eight characters. The reset ID is ignored outside staging and consumed
+     only once.
+2. Deploy staging and sign in with the temporary password.
+3. Complete JobHub's required permanent-password screen.
+4. Confirm the new password works in a fresh private session.
+5. Remove `JOBHUB_BOOTSTRAP_ADMIN_PASSWORD` and
+   `JOBHUB_BOOTSTRAP_ADMIN_RESET_ID` from the Render staging service.
+6. Redeploy and confirm the administrator still signs in.
 
 ## 2. Finalise the Xero developer app
 

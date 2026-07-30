@@ -46,8 +46,11 @@ from jobhub_core import (
     hash_password as secure_hash_password,
     is_known_default_password_hash,
     next_scoped_number,
+    notes_with_admin_reset_marker,
     password_needs_rehash,
     password_strength_errors,
+    should_reset_existing_admin,
+    staging_admin_reset_marker,
     validate_public_http_url,
     verify_password,
 )
@@ -3641,6 +3644,10 @@ def seed_app_users():
             if bootstrap_password
             else []
         )
+        reset_marker = staging_admin_reset_marker(
+            os.getenv("JOBHUB_ENV", ""),
+            os.getenv("JOBHUB_BOOTSTRAP_ADMIN_RESET_ID", ""),
+        )
 
         if user_count == 0 and bootstrap_password and not bootstrap_errors:
             cur.execute("""
@@ -3661,26 +3668,32 @@ def seed_app_users():
                 datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             ))
         elif bootstrap_password and not bootstrap_errors:
-            # A secure environment value can recover an existing admin account
-            # that still has one of the disabled historical default passwords.
+            # Existing administrators are reset only when they still use a
+            # disabled historical default or when a unique, staging-only reset
+            # ID has not already been consumed.
             cur.execute("""
-                SELECT id, password_hash
+                SELECT id, password_hash, COALESCE(notes, '')
                 FROM app_users
                 WHERE LOWER(TRIM(username)) = LOWER(TRIM(?))
                   AND role = 'admin'
                 LIMIT 1
             """, (bootstrap_username,))
             existing = cur.fetchone()
-            if existing and is_known_default_password_hash(existing[1]):
+            if existing and should_reset_existing_admin(
+                existing[1],
+                existing[2],
+                reset_marker,
+            ):
                 cur.execute("""
                     UPDATE app_users
                     SET password_hash = ?, active = 1, failed_login_count = 0,
                         locked_until = '', must_change_password = 1,
-                        password_changed_at = ?
+                        password_changed_at = ?, notes = ?
                     WHERE id = ?
                 """, (
                     hash_password(bootstrap_password),
                     datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    notes_with_admin_reset_marker(existing[2], reset_marker),
                     int(existing[0]),
                 ))
 

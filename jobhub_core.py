@@ -27,6 +27,7 @@ KNOWN_DEFAULT_PASSWORD_HASHES = frozenset(
     hashlib.sha256(password.encode("utf-8")).hexdigest()
     for password in _KNOWN_DEFAULT_PASSWORDS
 )
+STAGING_ADMIN_RESET_PREFIX = "staging-admin-reset:"
 
 
 def hash_password(
@@ -80,6 +81,35 @@ def password_needs_rehash(stored_hash: str) -> bool:
 
 def is_known_default_password_hash(stored_hash: str) -> bool:
     return str(stored_hash or "") in KNOWN_DEFAULT_PASSWORD_HASHES
+
+
+def staging_admin_reset_marker(environment: str, reset_id: str) -> str:
+    """Return a stable, non-secret marker for an explicit staging reset."""
+    if str(environment or "").strip().casefold() != "staging":
+        return ""
+    reset_id = str(reset_id or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9._:-]{8,128}", reset_id):
+        return ""
+    digest = hashlib.sha256(reset_id.encode("utf-8")).hexdigest()
+    return f"{STAGING_ADMIN_RESET_PREFIX}{digest}"
+
+
+def should_reset_existing_admin(
+    stored_hash: str,
+    notes: str,
+    reset_marker: str,
+) -> bool:
+    """Allow legacy-default recovery or one explicitly requested staging reset."""
+    if is_known_default_password_hash(stored_hash):
+        return True
+    return bool(reset_marker and reset_marker not in str(notes or ""))
+
+
+def notes_with_admin_reset_marker(notes: str, reset_marker: str) -> str:
+    notes = str(notes or "").strip()
+    if not reset_marker or reset_marker in notes:
+        return notes
+    return "\n".join(value for value in (notes, reset_marker) if value)
 
 
 def password_strength_errors(password: str, username: str = "") -> list[str]:
