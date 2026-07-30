@@ -34,6 +34,16 @@ class SelectableTableSourceTests(unittest.TestCase):
         self.assertIn('kwargs["selection_mode"] = "single-row"', source)
         self.assertIn("st.dataframe = pb_selectable_dataframe", source)
 
+    def test_estimate_working_sheet_dataframes_have_unique_keys(self):
+        source = (ROOT / "pb_jobhub_app.py").read_text(encoding="utf-8")
+        expected_keys = (
+            'key=f"estimate_line_items_{selected_estimate_id}"',
+            'key=f"estimate_summary_{selected_estimate_id}"',
+            'key=f"estimate_export_lines_{selected_estimate_id}"',
+        )
+        for expected_key in expected_keys:
+            self.assertEqual(source.count(expected_key), 1)
+
     def test_selected_job_row_can_change_status(self):
         source = (ROOT / "pb_jobhub_app.py").read_text(encoding="utf-8")
         modular_source = (ROOT / "jobhub" / "job_views.py").read_text(encoding="utf-8")
