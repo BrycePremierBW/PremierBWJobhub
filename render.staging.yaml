@@ -1,0 +1,32 @@
+services:
+  - type: web
+    name: premierbw-jobhub-staging
+    runtime: python
+    branch: main
+    region: singapore
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: streamlit run pb_jobhub_app.py --server.port=$PORT --server.address=0.0.0.0 --server.headless=true
+    healthCheckPath: /_stcore/health
+    autoDeployTrigger: commit
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.4
+      - key: JOBHUB_ENV
+        value: staging
+      - key: DATABASE_URL
+        sync: false
+      - key: JOBHUB_URL
+        sync: false
+      - key: JOBHUB_OFFLINE_SYNC_ENABLED
+        value: "false"
+      - key: JOBHUB_EMAIL_NOTIFICATIONS_ENABLED
+        value: "false"
+      - key: AI_PROVIDER
+        value: none
+      - key: JOBHUB_ALLOW_EXTERNAL_AI
+        value: "false"
+      - key: JOBHUB_AI_INCLUDE_PERSONAL_DATA
+        value: "false"
+      - key: JOBHUB_ENABLE_SELF_EDIT
+        value: "false"

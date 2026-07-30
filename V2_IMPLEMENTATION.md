@@ -1,6 +1,6 @@
 # JobHub V2 implementation
 
-Branch: `operations-v2`
+Status: reconciled with `main`.
 
 ## Milestone 1 — test and staging foundation
 
@@ -27,9 +27,9 @@ Branch: `operations-v2`
 - Idempotent critical-email queue with exponential backoff and a terminal retry limit.
 - Provider credentials remain unconfigured and delivery remains disabled in staging.
 
-## Remaining live wiring
+## Remaining live validation
 
-1. Route the existing clock, timesheet, photo and field-form actions through the processor.
-2. Serve the PWA assets from the final JobHub application origin.
+1. Route each approved clock, timesheet, photo and field-form action through the processor.
+2. Verify the PWA assets from the final JobHub application origin on Android and iPhone.
 3. Select the Premier Brushworks business email provider and configure its sender identity.
-4. Enable offline sync and email separately in staging after field-device testing.
+4. Enable offline sync and email separately in staging only after field-device testing.
