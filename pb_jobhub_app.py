@@ -36,6 +36,8 @@ from jobhub_enterprise import (
     render_operations_hub,
 )
 from jobhub_v2.schema import ensure_v2_schema
+from jobhub_v3.schema import ensure_xero_schema
+from jobhub_v3.streamlit_xero import render_xero_settings
 from jobhub_v4.schema import ensure_v4_schema
 from jobhub_v4.streamlit_painting import render_painting_intelligence
 from jobhub_core import (
@@ -13817,6 +13819,7 @@ def initialise_jobhub_runtime(database_url, data_dir):
     apply_schema_migrations()
     ensure_enterprise_schema(connect)
     ensure_v2_schema(connect)
+    ensure_xero_schema(connect)
     ensure_v4_schema(connect)
     init_linked_schema()
     seed_data()
@@ -13934,6 +13937,7 @@ else:
         "Employees": "Employees",
         "Products": "Products",
         "Equipment": "Equipment",
+        "Xero Integration": "Xero Integration",
     }
     estimating_menu_map = {
         "Import / Create Job Pack": "Import Take-off Job Pack",
@@ -13986,6 +13990,15 @@ hidden_route_options = (
     ["Job Lookup / Links"]
 )
 allowed_menu = main_menu_options + hidden_route_options
+
+if role == "admin" and any(
+    name in st.query_params
+    for name in ("code", "state", "error", "error_description")
+):
+    # Xero redirects back to the application root. Route the callback to the
+    # administrator-only integration page even when a fresh Streamlit session
+    # would otherwise open on Dashboard.
+    st.session_state["go_to_menu"] = "Xero Integration"
 
 requested_menu = st.session_state.pop("go_to_menu", None)
 if requested_menu in main_menu_options:
@@ -14280,6 +14293,12 @@ elif menu == "Employee Portal":
 
 elif menu == "Operations Hub":
     render_operations_hub(jobhub_enterprise_context())
+
+elif menu == "Xero Integration":
+    if role != "admin":
+        pb_error("Only an administrator can access the Xero integration.")
+    else:
+        render_xero_settings(jobhub_enterprise_context())
 
 elif menu == "Painting Intelligence":
     render_painting_intelligence(jobhub_enterprise_context())
