@@ -1,6 +1,12 @@
+import io
 import unittest
+import zipfile
 
-from jobhub.job_pack_matching import match_job_pack_to_jobs, normalise_address
+from jobhub.job_pack_matching import (
+    expand_nested_job_pack_uploads,
+    match_job_pack_to_jobs,
+    normalise_address,
+)
 
 
 JOBS = [
@@ -29,6 +35,33 @@ JOBS = [
         "contract_value": 0,
     },
 ]
+
+
+class FakeUpload:
+    def __init__(self, name, content):
+        self.name = name
+        self.size = len(content)
+        self._buffer = io.BytesIO(content)
+
+    def read(self, *args):
+        return self._buffer.read(*args)
+
+    def seek(self, *args):
+        return self._buffer.seek(*args)
+
+    def tell(self):
+        return self._buffer.tell()
+
+    def getbuffer(self):
+        return self._buffer.getbuffer()
+
+
+def make_zip(members):
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, content in members.items():
+            archive.writestr(name, content)
+    return output.getvalue()
 
 
 class JobPackMatchingTests(unittest.TestCase):
@@ -85,7 +118,39 @@ class JobPackMatchingTests(unittest.TestCase):
             "18 puma st tingalpa",
         )
 
+    def test_master_zip_expands_inner_job_packs(self):
+        first_pack = make_zip({"job_manifest.json": '{"job_no":"PB26031"}'})
+        second_pack = make_zip({"nested/job_manifest.json": '{"job_no":"PB26032"}'})
+        outer = FakeUpload(
+            "PB_All_Job_Packs.zip",
+            make_zip({
+                "PB26032_JobHub_Import.zip": second_pack,
+                "PB26031_JobHub_Import.zip": first_pack,
+                "readme.txt": "not a pack",
+            }),
+        )
+
+        expanded = expand_nested_job_pack_uploads([outer])
+
+        self.assertEqual([item.name for item in expanded], [
+            "PB26031_JobHub_Import.zip",
+            "PB26032_JobHub_Import.zip",
+        ])
+        for item in expanded:
+            item.seek(0)
+            with zipfile.ZipFile(io.BytesIO(item.read())) as archive:
+                self.assertTrue(any(name.endswith("job_manifest.json") for name in archive.namelist()))
+
+    def test_normal_job_pack_is_not_expanded(self):
+        normal_pack = FakeUpload(
+            "PB26031_JobHub_Import.zip",
+            make_zip({"job_manifest.json": '{"job_no":"PB26031"}'}),
+        )
+
+        expanded = expand_nested_job_pack_uploads([normal_pack])
+
+        self.assertEqual(expanded, [normal_pack])
+
 
 if __name__ == "__main__":
     unittest.main()
-
