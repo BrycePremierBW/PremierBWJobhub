@@ -13,6 +13,7 @@ import io
 from pathlib import PurePosixPath
 import re
 import sys
+from types import SimpleNamespace
 import unicodedata
 from typing import Any, Iterable, Mapping
 import zipfile
@@ -207,7 +208,103 @@ def install_nested_job_pack_uploader() -> bool:
     return True
 
 
+def _dataframe_row_count(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> int | None:
+    data = args[0] if args else kwargs.get("data")
+    if data is None:
+        return None
+    try:
+        return len(data)
+    except Exception:
+        return None
+
+
+def _selection_rows(selection: Any) -> list[Any]:
+    if selection is None:
+        return []
+    rows = getattr(selection, "rows", None)
+    if rows is None and isinstance(selection, Mapping):
+        rows = selection.get("rows")
+    if rows is None:
+        return []
+    try:
+        return list(rows)
+    except TypeError:
+        return []
+
+
+def _bounded_selection_rows(rows: list[Any], row_count: int) -> tuple[list[int], bool]:
+    bounded: list[int] = []
+    changed = False
+    for row in rows:
+        try:
+            position = int(row)
+        except (TypeError, ValueError):
+            changed = True
+            continue
+        if 0 <= position < row_count:
+            bounded.append(position)
+        else:
+            changed = True
+    return bounded, changed
+
+
+def _event_with_bounded_rows(event: Any, bounded_rows: list[int]) -> Any:
+    selection = getattr(event, "selection", None)
+    if selection is not None:
+        try:
+            selection.rows = bounded_rows
+            return event
+        except Exception:
+            pass
+        if isinstance(selection, dict):
+            try:
+                selection["rows"] = bounded_rows
+                return event
+            except Exception:
+                pass
+
+    columns = _selection_rows(getattr(event, "selection", None))
+    return SimpleNamespace(selection=SimpleNamespace(rows=bounded_rows, columns=columns))
+
+
+def install_bounded_dataframe_selection() -> bool:
+    """Prevent stale Streamlit dataframe row selections from crashing pages.
+
+    Streamlit can briefly return a selected positional row from the previous
+    render after a filter or dataframe content changes.  Pages that use
+    ``visible.iloc[selected_rows[0]]`` should receive no row instead of a stale
+    out-of-bounds row.
+    """
+    streamlit_module = sys.modules.get("streamlit")
+    if streamlit_module is None:
+        return False
+    original = getattr(streamlit_module, "dataframe", None)
+    if original is None or getattr(original, "_pb_bounded_selection_wrapper", False):
+        return False
+
+    def pb_bounded_dataframe(*args, **kwargs):
+        event = original(*args, **kwargs)
+        if kwargs.get("on_select") != "rerun":
+            return event
+        row_count = _dataframe_row_count(args, kwargs)
+        if row_count is None:
+            return event
+        rows = _selection_rows(getattr(event, "selection", None))
+        if not rows:
+            return event
+        bounded_rows, changed = _bounded_selection_rows(rows, row_count)
+        if not changed:
+            return event
+        return _event_with_bounded_rows(event, bounded_rows)
+
+    pb_bounded_dataframe._pb_bounded_selection_wrapper = True
+    pb_bounded_dataframe._pb_original_dataframe = original
+    streamlit_module.dataframe = pb_bounded_dataframe
+    return True
+
+
 install_nested_job_pack_uploader()
+install_bounded_dataframe_selection()
 
 
 def _ascii_words(value: Any) -> list[str]:
