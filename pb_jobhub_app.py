@@ -80,7 +80,7 @@ MAX_TAKEOFF_PACK_FILES = 300
 MAX_IMAGE_PIXELS = 25_000_000
 Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 
-PB_JOBHUB_BUILD = "2026.08.02-operations-dashboard-production-v3"
+PB_JOBHUB_BUILD = "2026.08.03-mobile-push-production-v4"
 PLANNING_LABOUR_RATE = 60.0
 
 
@@ -97,7 +97,9 @@ EXPORTS_DIR = os.path.join(DATA_DIR, "exports")
 
 TEMPLATE_DIR = os.path.join(os.path.dirname(__file__), "templates")
 ASSET_DIR = os.path.join(os.path.dirname(__file__), "assets")
+STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 PB_LOGO_BACKGROUND_IMAGE = os.path.join(ASSET_DIR, "PB_Logo_Main_PNG.png")
+PB_PWA_ICON = os.path.join(STATIC_DIR, "PB_JobHub_Icon.png")
 
 
 def first_existing_app_file(directory, *file_names):
@@ -220,6 +222,83 @@ def ensure_runtime_storage():
 ensure_runtime_storage()
 
 
+@st.cache_resource(show_spinner=False)
+def ensure_mobile_web_assets():
+    """Publish the existing square logo at a stable PWA icon URL."""
+    try:
+        source = Path(PB_LOGO_BACKGROUND_IMAGE)
+        target = Path(PB_PWA_ICON)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if source.exists() and (
+            not target.exists()
+            or source.stat().st_size != target.stat().st_size
+            or source.read_bytes() != target.read_bytes()
+        ):
+            shutil.copyfile(source, target)
+        return target.exists()
+    except OSError:
+        # Android and desktop web push still work without the install icon. The
+        # public manifest remains available and the next restart retries.
+        return False
+
+
+def install_mobile_app_shell():
+    """Install stable viewport and PWA metadata in Streamlit's top-level page."""
+    st.html(
+        """
+        <script>
+        (() => {
+          const head = document.head;
+          let viewport = head.querySelector('meta[name="viewport"]');
+          if (!viewport) {
+            viewport = document.createElement('meta');
+            viewport.name = 'viewport';
+            head.appendChild(viewport);
+          }
+          viewport.content = 'width=device-width, initial-scale=1, viewport-fit=cover';
+
+          let manifest = head.querySelector('link[rel="manifest"]');
+          if (!manifest) {
+            manifest = document.createElement('link');
+            manifest.rel = 'manifest';
+            head.appendChild(manifest);
+          }
+          manifest.href = '/app/static/manifest.webmanifest';
+
+          const metaValues = {
+            'mobile-web-app-capable': 'yes',
+            'apple-mobile-web-app-capable': 'yes',
+            'apple-mobile-web-app-status-bar-style': 'black-translucent',
+            'apple-mobile-web-app-title': 'JobHub'
+          };
+          Object.entries(metaValues).forEach(([name, content]) => {
+            let meta = head.querySelector(`meta[name="${name}"]`);
+            if (!meta) {
+              meta = document.createElement('meta');
+              meta.name = name;
+              head.appendChild(meta);
+            }
+            meta.content = content;
+          });
+
+          let touchIcon = head.querySelector('link[rel="apple-touch-icon"]');
+          if (!touchIcon) {
+            touchIcon = document.createElement('link');
+            touchIcon.rel = 'apple-touch-icon';
+            head.appendChild(touchIcon);
+          }
+          touchIcon.href = '/app/static/PB_JobHub_Icon.png';
+        })();
+        </script>
+        """,
+        unsafe_allow_javascript=True,
+    )
+
+
+ensure_mobile_web_assets()
+install_mobile_app_shell()
+
+
 # =============================
 # PREMIER BRUSHWORKS VISUAL THEME
 # =============================
@@ -312,6 +391,8 @@ def apply_pb_branding():
 
         html, body, [class*="css"] {
             font-family: 'Poppins', 'Segoe UI', Arial, sans-serif;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
         }
 
         .stApp {
@@ -324,12 +405,15 @@ def apply_pb_branding():
         """ + logo_background_css + """
 
         [data-testid="stHeader"] {
-            background: transparent;
+            background: rgba(247,243,238,0.88);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border-bottom: 1px solid rgba(122,104,86,0.10);
         }
 
         .block-container {
             max-width: 1560px;
-            padding-top: 1.15rem;
+            padding-top: 1.35rem;
             padding-bottom: 2.5rem;
         }
 
@@ -555,6 +639,16 @@ def apply_pb_branding():
         h1, h2, h3, h4 {
             color: var(--pb-charcoal);
             letter-spacing: -0.02em;
+            text-wrap: balance;
+        }
+
+        p, li, label, [data-testid="stCaptionContainer"] {
+            line-height: 1.5;
+        }
+
+        a:not([data-testid="stSidebarNavLink"]) {
+            color: var(--pb-accent-dark);
+            text-underline-offset: 3px;
         }
 
         div[data-testid="stMetric"],
@@ -563,6 +657,15 @@ def apply_pb_branding():
             border: 1px solid var(--pb-border);
             border-radius: 18px;
             box-shadow: 0 10px 28px rgba(31,31,31,0.06);
+        }
+
+        div[data-testid="stVerticalBlockBorderWrapper"] {
+            transition: border-color 150ms ease, box-shadow 150ms ease;
+        }
+
+        div[data-testid="stVerticalBlockBorderWrapper"]:hover {
+            border-color: rgba(122,104,86,0.32);
+            box-shadow: 0 13px 32px rgba(31,31,31,0.09);
         }
 
         div[data-testid="stMetric"] {
@@ -691,6 +794,46 @@ def apply_pb_branding():
         .pb-card.blue { border-left: 7px solid var(--pb-info); }
         .pb-card.taupe { border-left: 7px solid var(--pb-accent-dark); }
 
+        /* Dashboard summary buttons are the tiles: the entire surface is
+           tappable/clickable on phones and desktop, not just a small link. */
+        div[class*="st-key-dashboard_tile_"] .stButton > button {
+            width: 100% !important;
+            min-height: 142px !important;
+            height: 100% !important;
+            align-items: flex-start !important;
+            justify-content: flex-start !important;
+            text-align: left !important;
+            white-space: pre-line !important;
+            border-radius: 18px !important;
+            border: 1px solid var(--pb-border) !important;
+            border-left: 7px solid var(--pb-accent-dark) !important;
+            background: rgba(255,255,255,0.97) !important;
+            padding: 0.95rem 1rem !important;
+            box-shadow: 0 10px 28px rgba(31,31,31,0.07) !important;
+            line-height: 1.35 !important;
+        }
+
+        div[class*="st-key-dashboard_tile_"] .stButton > button:hover,
+        div[class*="st-key-dashboard_tile_"] .stButton > button:focus-visible {
+            border-color: var(--pb-accent-dark) !important;
+            background: #fff !important;
+            transform: translateY(-2px) !important;
+            box-shadow: 0 14px 32px rgba(31,31,31,0.12) !important;
+        }
+
+        div[class*="st-key-dashboard_tile_"][class*="_red"] .stButton > button {
+            border-left-color: var(--pb-danger) !important;
+        }
+        div[class*="st-key-dashboard_tile_"][class*="_orange"] .stButton > button {
+            border-left-color: var(--pb-warning) !important;
+        }
+        div[class*="st-key-dashboard_tile_"][class*="_green"] .stButton > button {
+            border-left-color: var(--pb-success) !important;
+        }
+        div[class*="st-key-dashboard_tile_"][class*="_blue"] .stButton > button {
+            border-left-color: var(--pb-info) !important;
+        }
+
         .stButton > button, .stDownloadButton > button {
             border-radius: 999px !important;
             border: 1px solid var(--pb-accent) !important;
@@ -699,6 +842,8 @@ def apply_pb_branding():
             font-weight: 700 !important;
             padding: 0.55rem 1rem !important;
             box-shadow: 0 6px 14px rgba(31,31,31,0.05);
+            transition: transform 140ms ease, box-shadow 140ms ease,
+                        border-color 140ms ease, background-color 140ms ease;
         }
 
         .stButton > button:hover, .stDownloadButton > button:hover {
@@ -707,18 +852,108 @@ def apply_pb_branding():
             transform: translateY(-1px);
         }
 
+        .stButton > button[kind="primary"],
+        .stDownloadButton > button[kind="primary"],
+        button[data-testid="baseButton-primary"] {
+            background: linear-gradient(135deg, #7a6856, #4c4036) !important;
+            border-color: #6b5948 !important;
+            color: #ffffff !important;
+            box-shadow: 0 8px 18px rgba(76,64,54,0.22) !important;
+        }
+
+        .stButton > button[kind="primary"] p,
+        button[data-testid="baseButton-primary"] p {
+            color: #ffffff !important;
+        }
+
+        .stButton > button:focus-visible,
+        .stDownloadButton > button:focus-visible,
+        input:focus-visible,
+        textarea:focus-visible,
+        [role="combobox"]:focus-visible,
+        [role="tab"]:focus-visible {
+            outline: 3px solid rgba(47,95,143,0.34) !important;
+            outline-offset: 2px !important;
+        }
+
+        /* PB_JOBHUB_GLOBAL_USABILITY_V1: consistent, readable form controls. */
+        div[data-baseweb="input"],
+        div[data-baseweb="textarea"],
+        div[data-baseweb="select"] > div,
+        div[data-testid="stDateInput"] > div > div,
+        div[data-testid="stTimeInput"] > div > div {
+            min-height: 44px;
+            border-radius: 12px !important;
+            background: rgba(255,255,255,0.98) !important;
+        }
+
+        div[data-baseweb="input"]:focus-within,
+        div[data-baseweb="textarea"]:focus-within,
+        div[data-baseweb="select"]:focus-within {
+            box-shadow: 0 0 0 3px rgba(47,95,143,0.14) !important;
+        }
+
+        [data-testid="stWidgetLabel"] p {
+            font-weight: 650 !important;
+            color: #403830 !important;
+        }
+
+        div[data-testid="stForm"] {
+            background: rgba(255,255,255,0.72);
+            border: 1px solid var(--pb-border) !important;
+            border-radius: 18px !important;
+            padding: 0.85rem !important;
+        }
+
+        details[data-testid="stExpander"] {
+            background: rgba(255,255,255,0.90);
+            border: 1px solid var(--pb-border) !important;
+            border-radius: 14px !important;
+            overflow: hidden;
+        }
+
+        details[data-testid="stExpander"] summary {
+            min-height: 48px;
+            font-weight: 700;
+        }
+
+        div[data-testid="stTabs"] [data-baseweb="tab-list"] {
+            gap: 0.35rem;
+            padding: 0.25rem;
+            background: rgba(237,229,218,0.68);
+            border-radius: 13px;
+        }
+
+        div[data-testid="stTabs"] [role="tab"] {
+            min-height: 42px;
+            border-radius: 10px;
+            padding-inline: 0.85rem;
+        }
+
+        div[data-testid="stTabs"] [aria-selected="true"] {
+            background: #ffffff;
+            box-shadow: 0 4px 12px rgba(31,31,31,0.08);
+        }
+
+        div[data-testid="stAlert"] {
+            border-radius: 14px !important;
+            border-width: 1px !important;
+            box-shadow: 0 5px 14px rgba(31,31,31,0.04);
+        }
+
         [data-testid="stDataFrame"], [data-testid="stTable"] {
             border: 1px solid var(--pb-border);
             border-radius: 18px;
             overflow: hidden;
             background: rgba(255,255,255,0.98);
+            box-shadow: 0 8px 20px rgba(31,31,31,0.045);
         }
 
         div[data-testid="stTabs"] button {
             font-weight: 700;
         }
 
-        @media (max-width: 760px) {
+        @media (max-width: 768px) {
             /* PB_JOBHUB_MOBILE_VIEWPORT_FIX
                Keep the signed-in app inside the phone viewport. */
             html,
@@ -732,12 +967,37 @@ def apply_pb_branding():
                 overflow-x: hidden !important;
             }
 
+            html {
+                -webkit-text-size-adjust: 100% !important;
+                text-size-adjust: 100% !important;
+            }
+
+            /* iOS automatically zooms the entire page when a focused input is
+               below 16px. Keep controls at 16px so the app stays at the
+               device-width scale after logins, searches and form edits. */
+            input,
+            textarea,
+            select,
+            [contenteditable="true"],
+            div[data-baseweb="select"] input {
+                font-size: 16px !important;
+            }
+
             .block-container {
                 width: 100% !important;
                 max-width: 100% !important;
                 min-width: 0 !important;
                 padding: 0.75rem 0.65rem 2rem !important;
                 box-sizing: border-box !important;
+            }
+
+            [data-testid="stHeader"] {
+                min-height: 3.25rem !important;
+            }
+
+            button[data-testid="stBaseButton-headerNoPadding"] {
+                min-width: 44px !important;
+                min-height: 44px !important;
             }
 
             /* Desktop column groups become readable vertical sections. */
@@ -756,12 +1016,22 @@ def apply_pb_branding():
                intrinsic page width. */
             div[data-testid="stVerticalBlock"],
             div[data-testid="stVerticalBlockBorderWrapper"],
+            div[data-testid="stElementContainer"],
             div[data-testid="stForm"],
             div[data-testid="stForm"] > div,
             div[data-testid="stFileUploader"],
             div[data-baseweb="select"],
             .pb-page-hero,
             .pb-card {
+                width: 100% !important;
+                max-width: 100% !important;
+                min-width: 0 !important;
+                box-sizing: border-box !important;
+            }
+
+            iframe,
+            div[data-testid="stIFrame"],
+            div[data-testid="stCustomComponentV1"] {
                 width: 100% !important;
                 max-width: 100% !important;
                 min-width: 0 !important;
@@ -775,6 +1045,19 @@ def apply_pb_branding():
 
             .pb-page-title { font-size: 26px; }
             .pb-card { min-height: auto; }
+
+            h1 { font-size: clamp(1.65rem, 8vw, 2.15rem) !important; }
+            h2 { font-size: clamp(1.35rem, 6.8vw, 1.8rem) !important; }
+            h3 { font-size: clamp(1.15rem, 5.8vw, 1.5rem) !important; }
+
+            div[data-testid="stMetric"] {
+                min-height: auto !important;
+                padding: 0.85rem 0.95rem !important;
+            }
+
+            div[class*="st-key-dashboard_tile_"] .stButton > button {
+                min-height: 122px !important;
+            }
 
             /* Wide records remain usable by scrolling the record itself rather
                than zooming or widening the whole application. */
@@ -900,6 +1183,32 @@ def pb_metric_card(label, value, subtitle="", tone="taupe"):
         """,
         unsafe_allow_html=True,
     )
+
+
+def pb_dashboard_navigation_tile(label, value, subtitle, target_menu, key, tone="taupe"):
+    """Render one full-surface dashboard button and route to its detail page."""
+    safe_key = re.sub(r"[^A-Za-z0-9_-]", "_", str(key or label)).strip("_")
+    button_label = (
+        f"{label}\n\n{value}\n\n{subtitle}\n\nOpen details →"
+    )
+    if st.button(
+        button_label,
+        key=f"dashboard_tile_{safe_key}_{tone}",
+        width="stretch",
+    ):
+        st.session_state["go_to_menu"] = target_menu
+        pb_rerun()
+
+
+def pb_dashboard_widget_link(label, target_menu, key):
+    """Add a consistent detail link to a larger dashboard widget."""
+    if st.button(
+        f"Open {label} →",
+        key=f"dashboard_widget_link_{key}",
+        width="stretch",
+    ):
+        st.session_state["go_to_menu"] = target_menu
+        pb_rerun()
 
 
 apply_pb_branding()
@@ -2636,6 +2945,39 @@ def phone_push_configured():
     )
 
 
+@st.cache_resource(show_spinner=False)
+def phone_push_provider_status(app_id, api_key):
+    """Validate the server-side OneSignal credentials without sending a push."""
+    if not app_id or not api_key:
+        return {"status": "not_configured", "detail": "Required settings are missing."}
+    try:
+        response = requests.get(
+            "https://api.onesignal.com/notifications",
+            headers={
+                "Authorization": f"Key {api_key}",
+                "Content-Type": "application/json",
+            },
+            params={"app_id": app_id, "limit": 1, "offset": 0},
+            timeout=12,
+        )
+        if response.ok:
+            return {"status": "connected", "detail": f"OneSignal HTTP {response.status_code}"}
+        detail = str(response.text or "").strip().replace("\n", " ")[:500]
+        return {
+            "status": "failed",
+            "detail": f"OneSignal HTTP {response.status_code}: {detail or 'request rejected'}",
+        }
+    except Exception as exc:
+        return {"status": "failed", "detail": str(exc)[:500]}
+
+
+def current_phone_push_provider_status():
+    return phone_push_provider_status(
+        str(os.getenv("ONESIGNAL_APP_ID", "")).strip(),
+        str(os.getenv("ONESIGNAL_REST_API_KEY", "")).strip(),
+    )
+
+
 def phone_push_external_id(user_id):
     """Stable OneSignal identity that does not expose or depend on usernames."""
     return f"jobhub-user-{int(user_id)}"
@@ -2779,7 +3121,7 @@ def create_user_notifications(
 
 
 def render_phone_push_opt_in(user, key_prefix="phone_push"):
-    """Render the signed-in device permission control for OneSignal web push."""
+    """Render a top-level, mobile-safe OneSignal permission control."""
     user_id = user.get("id") if user else None
     app_id = str(os.getenv("ONESIGNAL_APP_ID", "")).strip()
     if not user_id:
@@ -2795,55 +3137,154 @@ def render_phone_push_opt_in(user, key_prefix="phone_push"):
     external_id = phone_push_external_id(user_id)
     app_id_js = json.dumps(app_id)
     external_id_js = json.dumps(external_id)
-    st.iframe(
+    control_key = re.sub(r"[^A-Za-z0-9_-]", "-", str(key_prefix or "phone-push"))
+    button_id = f"pb-enable-push-{control_key}"
+    status_id = f"pb-push-status-{control_key}"
+    button_id_js = json.dumps(button_id)
+    status_id_js = json.dumps(status_id)
+    st.html(
         f"""
-        <script src="https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.page.js" defer></script>
-        <div style="font-family:Arial,sans-serif;padding:8px 2px">
-          <button id="pb-enable-push" style="border:1px solid #8B6F47;border-radius:999px;
-            background:#fff;padding:10px 18px;font-weight:700;cursor:pointer">
-            Enable phone notifications on this device
+        <div class="pb-push-control" style="font-family:Poppins,Arial,sans-serif;padding:8px 0;max-width:100%">
+          <button id="{button_id}" type="button" disabled style="border:1px solid #8B6F47;
+            border-radius:999px;background:#fff;padding:11px 18px;min-height:44px;max-width:100%;
+            white-space:normal;font-size:16px;font-weight:700;cursor:pointer;color:#1f1f1f">
+            Loading phone notifications…
           </button>
-          <div id="pb-push-status" style="margin-top:8px;color:#5f574f;font-size:13px"></div>
+          <div id="{status_id}" role="status" aria-live="polite"
+            style="margin-top:8px;color:#5f574f;font-size:14px;line-height:1.4;overflow-wrap:anywhere"></div>
         </div>
         <script>
+        (() => {{
+          const appId = {app_id_js};
+          const externalId = {external_id_js};
+          const button = document.getElementById({button_id_js});
+          const statusNode = document.getElementById({status_id_js});
+          if (!button || !statusNode) return;
+
+          const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent)
+            || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+          const isStandalone = window.matchMedia('(display-mode: standalone)').matches
+            || window.navigator.standalone === true;
+          const setStatus = (message, colour = '#5f574f') => {{
+            statusNode.textContent = message;
+            statusNode.style.color = colour;
+          }};
+
           window.OneSignalDeferred = window.OneSignalDeferred || [];
-          let pbOneSignal = null;
-          const statusNode = document.getElementById("pb-push-status");
-          window.OneSignalDeferred.push(async function(OneSignal) {{
-            pbOneSignal = OneSignal;
-            try {{
-              await OneSignal.init({{
-                appId: {app_id_js},
-                serviceWorkerPath: "/app/static/OneSignalSDKWorker.js",
-                serviceWorkerParam: {{ scope: "/app/static/" }},
-                notifyButton: {{ enable: false }}
+          if (!window.__pbJobHubOneSignalScript) {{
+            window.__pbJobHubOneSignalScript = true;
+            const sdk = document.createElement('script');
+            sdk.src = 'https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.page.js';
+            sdk.defer = true;
+            sdk.dataset.pbJobhubOnesignal = 'true';
+            sdk.addEventListener('error', () => {{
+              setStatus('The notification service was blocked by this browser or network.', '#b42318');
+            }});
+            document.head.appendChild(sdk);
+          }}
+
+          if (!window.__pbJobHubOneSignalReady) {{
+            window.__pbJobHubOneSignalReady = new Promise((resolve, reject) => {{
+              window.OneSignalDeferred.push(async function(OneSignal) {{
+                try {{
+                  if (!window.__pbJobHubOneSignalAppId) {{
+                    await OneSignal.init({{
+                      appId,
+                      serviceWorkerPath: 'app/static/OneSignalSDKWorker.js',
+                      serviceWorkerParam: {{ scope: '/app/static/' }},
+                      autoResubscribe: true,
+                      notifyButton: {{ enable: false }}
+                    }});
+                    window.__pbJobHubOneSignalAppId = appId;
+                  }} else if (window.__pbJobHubOneSignalAppId !== appId) {{
+                    throw new Error('The notification App ID changed. Refresh JobHub and try again.');
+                  }}
+                  window.__pbJobHubOneSignal = OneSignal;
+                  resolve(OneSignal);
+                }} catch (error) {{
+                  reject(error);
+                }}
               }});
-              await OneSignal.login({external_id_js});
-              statusNode.textContent = OneSignal.Notifications.permission
-                ? "Notifications are enabled for this JobHub login."
-                : "Tap the button, then allow notifications when your phone asks.";
-            }} catch (err) {{
-              statusNode.textContent = "Push setup could not start: " + String(err);
-            }}
-          }});
-          document.getElementById("pb-enable-push").addEventListener("click", async () => {{
-            if (!pbOneSignal) {{
-              statusNode.textContent = "Notification service is still loading. Try again in a moment.";
+            }});
+          }}
+
+          const showSubscriptionState = async () => {{
+            if (isIOS && !isStandalone) {{
+              button.disabled = false;
+              button.textContent = 'How to enable iPhone notifications';
+              setStatus('On iPhone: use Share → Add to Home Screen, then open JobHub from the new Home Screen icon.');
               return;
             }}
             try {{
-              await pbOneSignal.login({external_id_js});
-              await pbOneSignal.Notifications.requestPermission();
-              statusNode.textContent = pbOneSignal.Notifications.permission
-                ? "Phone notifications are enabled."
-                : "Notification permission was not granted. Check this site's phone/browser settings.";
-            }} catch (err) {{
-              statusNode.textContent = "Could not enable notifications: " + String(err);
+              const OneSignal = await window.__pbJobHubOneSignalReady;
+              if (!OneSignal.Notifications.isPushSupported()) {{
+                button.disabled = true;
+                button.textContent = 'Notifications not supported';
+                setStatus('This browser does not support web push. Use current Safari, Chrome or Edge.', '#b42318');
+                return;
+              }}
+              await OneSignal.login(externalId);
+              const subscribed = Boolean(
+                OneSignal.Notifications.permission
+                && OneSignal.User.PushSubscription.optedIn
+                && OneSignal.User.PushSubscription.id
+              );
+              button.disabled = false;
+              button.textContent = subscribed
+                ? 'Phone notifications enabled'
+                : 'Enable phone notifications on this device';
+              setStatus(
+                subscribed
+                  ? 'This device is registered to receive JobHub notifications.'
+                  : 'Tap the button, then allow notifications when your phone asks.',
+                subscribed ? '#1f7a4d' : '#5f574f'
+              );
+            }} catch (error) {{
+              button.disabled = false;
+              button.textContent = 'Retry phone notification setup';
+              setStatus('Push setup could not start: ' + String(error), '#b42318');
+            }}
+          }};
+
+          button.addEventListener('click', async () => {{
+            if (isIOS && !isStandalone) {{
+              setStatus('Tap Share, choose Add to Home Screen, then open JobHub from that icon and try again.', '#b7791f');
+              return;
+            }}
+            const OneSignal = window.__pbJobHubOneSignal;
+            if (!OneSignal) {{
+              setStatus('Notification service is still loading. Tap again in a moment.', '#b7791f');
+              return;
+            }}
+            button.disabled = true;
+            setStatus('Waiting for your phone or browser permission…');
+            try {{
+              if (!OneSignal.Notifications.permission) {{
+                await OneSignal.Notifications.requestPermission();
+              }}
+              if (!OneSignal.Notifications.permission) {{
+                throw new Error('Notification permission was not granted.');
+              }}
+              await OneSignal.User.PushSubscription.optIn();
+              await OneSignal.login(externalId);
+              await new Promise((resolve) => setTimeout(resolve, 900));
+              await showSubscriptionState();
+            }} catch (error) {{
+              button.disabled = false;
+              button.textContent = 'Retry phone notification setup';
+              setStatus(
+                'Could not enable notifications: ' + String(error)
+                  + ' Check this site in your phone notification settings.',
+                '#b42318'
+              );
             }}
           }});
+
+          showSubscriptionState();
+        }})();
         </script>
         """,
-        height=105,
+        unsafe_allow_javascript=True,
     )
 
 
@@ -3035,6 +3476,45 @@ def staff_requests_page():
             "Phone push code is installed, but ONESIGNAL_APP_ID and ONESIGNAL_REST_API_KEY are not both configured. "
             "Requests will still appear instantly in each employee's JobHub inbox."
         )
+
+    with st.expander("Phone notification diagnostics", expanded=False):
+        provider_status = current_phone_push_provider_status()
+        if provider_status["status"] == "connected":
+            st.success("JobHub's secure server connection to OneSignal is working.")
+        elif provider_status["status"] == "not_configured":
+            st.warning(provider_status["detail"])
+        else:
+            st.error("OneSignal rejected the server connection.")
+            st.code(provider_status["detail"])
+        st.caption(
+            "A provider status of Sent means OneSignal accepted the message. "
+            "The employee's phone must also show as subscribed after using the enable button."
+        )
+        push_log_df = safe_df_query(
+            """
+            SELECT p.sent_at AS "Sent At",COALESCE(e.name,u.username,'') AS "Employee",
+                   p.delivery_status AS "Provider Status",
+                   COALESCE(p.provider_message_id,'') AS "Message ID",
+                   COALESCE(p.response_text,'') AS "Provider Response"
+            FROM push_notification_log p
+            LEFT JOIN app_users u ON u.id=p.recipient_user_id
+            LEFT JOIN employees e ON e.id=u.employee_id
+            ORDER BY p.id DESC
+            LIMIT 20
+            """
+        )
+        if push_log_df.empty:
+            st.info("No phone push attempts have been recorded yet.")
+        else:
+            push_log_df["Provider Response"] = (
+                push_log_df["Provider Response"].fillna("").astype(str).str.slice(0, 320)
+            )
+            st.dataframe(
+                push_log_df,
+                width="stretch",
+                hide_index=True,
+                key="staff_request_push_diagnostics",
+            )
 
     employees = safe_df_query(
         """
@@ -14635,12 +15115,39 @@ def render_operational_dashboard():
     )
     attention_count = len(risks) if not risks.empty else 0
     metric_cols = st.columns(6)
-    metric_cols[0].metric("Active Jobs", len(active_jobs))
-    metric_cols[1].metric("Jobs Needing Attention", attention_count)
-    metric_cols[2].metric("Open Staff Tasks", len(open_requests))
-    metric_cols[3].metric("Timesheets Awaiting", int(pending_timesheets["Entries"].sum()) if not pending_timesheets.empty else 0)
-    metric_cols[4].metric("Paint Orders Pending", len(pending_orders))
-    metric_cols[5].metric("Active Blockers", len(active_blockers))
+    with metric_cols[0]:
+        pb_dashboard_navigation_tile(
+            "Active Jobs", len(active_jobs), "Open the Job Register",
+            "Jobs", "active_jobs", "blue",
+        )
+    with metric_cols[1]:
+        pb_dashboard_navigation_tile(
+            "Jobs Needing Attention", attention_count, "Review job costs and forecasting",
+            "Job Costs / Forecasting", "attention_jobs", "red" if attention_count else "green",
+        )
+    with metric_cols[2]:
+        pb_dashboard_navigation_tile(
+            "Open Staff Tasks", len(open_requests), "Review employee requests",
+            "Staff Requests", "staff_tasks", "orange" if len(open_requests) else "green",
+        )
+    with metric_cols[3]:
+        waiting_timesheets = (
+            int(pending_timesheets["Entries"].sum()) if not pending_timesheets.empty else 0
+        )
+        pb_dashboard_navigation_tile(
+            "Timesheets Awaiting", waiting_timesheets, "Review submitted timesheets",
+            "Timesheets", "timesheets", "orange" if waiting_timesheets else "green",
+        )
+    with metric_cols[4]:
+        pb_dashboard_navigation_tile(
+            "Paint Orders Pending", len(pending_orders), "Review material and paint orders",
+            "Material Costs", "paint_orders", "orange" if len(pending_orders) else "green",
+        )
+    with metric_cols[5]:
+        pb_dashboard_navigation_tile(
+            "Active Blockers", len(active_blockers), "Review site progress blockers",
+            "Job Progress Tracker", "active_blockers", "red" if len(active_blockers) else "green",
+        )
 
     left, middle, right = st.columns(3)
     with left:
@@ -14653,6 +15160,9 @@ def render_operational_dashboard():
                     risks[["Job No", "Job Name", "Health", "Health Notes", "End Date"]].head(6),
                     width="stretch", hide_index=True,
                 )
+            pb_dashboard_widget_link(
+                "job forecasting", "Job Costs / Forecasting", "crucial_jobs"
+            )
         with st.container(border=True):
             st.markdown("#### Paint to Order")
             if pending_orders.empty and material_shortages.empty:
@@ -14664,6 +15174,9 @@ def render_operational_dashboard():
                 if not material_shortages.empty:
                     st.caption("Required quantity not yet received")
                     st.dataframe(material_shortages.head(5), width="stretch", hide_index=True)
+            pb_dashboard_widget_link(
+                "paint and material orders", "Material Costs", "paint_to_order"
+            )
         with st.container(border=True):
             st.markdown("#### Today’s Staff")
             if today_staff.empty:
@@ -14671,6 +15184,9 @@ def render_operational_dashboard():
             else:
                 st.metric("People Scheduled", int(today_staff["Employee"].nunique()))
                 st.dataframe(today_staff.head(8), width="stretch", hide_index=True)
+            pb_dashboard_widget_link(
+                "the staff scheduler", "Staff Scheduler", "todays_staff"
+            )
 
     with middle:
         with st.container(border=True):
@@ -14679,6 +15195,9 @@ def render_operational_dashboard():
                 st.success("No open employee requests.")
             else:
                 st.dataframe(open_requests.drop(columns=["id"]).head(7), width="stretch", hide_index=True)
+            pb_dashboard_widget_link(
+                "staff requests", "Staff Requests", "tasks_to_complete"
+            )
         with st.container(border=True):
             st.markdown("#### Job Progress")
             st.caption("Physical completion compared with progress earned by used hours.")
@@ -14686,12 +15205,18 @@ def render_operational_dashboard():
                 st.info("Add job stages and field progress to populate this widget.")
             else:
                 st.dataframe(progress.head(7), width="stretch", hide_index=True)
+            pb_dashboard_widget_link(
+                "job progress", "Job Progress Tracker", "job_progress"
+            )
         with st.container(border=True):
             st.markdown("#### Active Site Blockers")
             if active_blockers.empty:
                 st.success("No active blockers reported.")
             else:
                 st.dataframe(active_blockers.head(6), width="stretch", hide_index=True)
+            pb_dashboard_widget_link(
+                "site blockers", "Job Progress Tracker", "site_blockers"
+            )
 
     with right:
         with st.container(border=True):
@@ -14703,6 +15228,9 @@ def render_operational_dashboard():
                 t1.metric("Entries", int(pending_timesheets["Entries"].sum()))
                 t2.metric("Hours", f"{float(pending_timesheets['Hours'].sum()):,.1f}")
                 st.dataframe(pending_timesheets.head(7), width="stretch", hide_index=True)
+            pb_dashboard_widget_link(
+                "timesheets", "Timesheets", "timesheets"
+            )
         with st.container(border=True):
             st.markdown("#### Overhead & Profit")
             settings = operating_setting_values()
@@ -14765,6 +15293,9 @@ def render_operational_dashboard():
                             save_operating_settings(edited)
                             pb_success("Operating assumptions saved.")
                             refresh()
+            pb_dashboard_widget_link(
+                "the Control Centre", "Control Centre", "overhead_profit"
+            )
         with st.container(border=True):
             st.markdown("#### Overdue Claims")
             if overdue_claims.empty:
@@ -14772,6 +15303,9 @@ def render_operational_dashboard():
             else:
                 st.metric("Outstanding", f"${float(overdue_claims['Outstanding'].sum()):,.0f}")
                 st.dataframe(overdue_claims.head(6), width="stretch", hide_index=True)
+            pb_dashboard_widget_link(
+                "claims and operations", "Operations Hub", "overdue_claims"
+            )
 
 
 JOB_STATUS_OPTIONS = [
@@ -17781,6 +18315,12 @@ def initialise_jobhub_runtime(database_url, data_dir):
     init_linked_schema()
     seed_data()
     seed_app_users()
+    push_status = current_phone_push_provider_status()
+    print(
+        "JobHub OneSignal provider check: "
+        f"{push_status['status']} — {push_status['detail']}",
+        flush=True,
+    )
     return True
 
 

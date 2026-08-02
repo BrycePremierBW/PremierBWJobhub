@@ -1,4 +1,5 @@
 import ast
+import json
 import pathlib
 import unittest
 
@@ -41,6 +42,38 @@ class SourceStructureTests(unittest.TestCase):
         self.assertIn('div[data-testid="stHorizontalBlock"]', source)
         self.assertIn("max-width: 100vw !important", source)
         self.assertIn("-webkit-overflow-scrolling: touch !important", source)
+        self.assertIn("font-size: 16px !important", source)
+        self.assertIn("viewport-fit=cover", source)
+
+    def test_phone_push_runs_in_top_level_page_with_pwa_support(self):
+        source = (ROOT / "pb_jobhub_app.py").read_text(encoding="utf-8")
+        start = source.index("def render_phone_push_opt_in")
+        end = source.index("STAFF_REQUEST_TYPES", start)
+        push_source = source[start:end]
+        self.assertIn("st.html(", push_source)
+        self.assertIn("unsafe_allow_javascript=True", push_source)
+        self.assertNotIn("st.iframe(", push_source)
+        self.assertIn("OneSignal.Notifications.requestPermission()", push_source)
+        self.assertIn("OneSignal.User.PushSubscription.optIn()", push_source)
+        self.assertIn("OneSignal.User.PushSubscription.id", push_source)
+        self.assertIn("serviceWorkerPath: 'app/static/OneSignalSDKWorker.js'", push_source)
+        self.assertIn("Share → Add to Home Screen", push_source)
+
+        manifest = json.loads(
+            (ROOT / "static" / "manifest.webmanifest").read_text(encoding="utf-8")
+        )
+        self.assertEqual(manifest["display"], "standalone")
+        self.assertEqual(manifest["start_url"], "/?jobhub-home=1")
+        self.assertTrue(manifest["icons"])
+        self.assertEqual(manifest["icons"][0]["type"], "image/png")
+        self.assertIn("ensure_mobile_web_assets()", source)
+
+    def test_phone_push_has_server_connection_and_delivery_diagnostics(self):
+        source = (ROOT / "pb_jobhub_app.py").read_text(encoding="utf-8")
+        self.assertIn("def phone_push_provider_status", source)
+        self.assertIn('requests.get(\n            "https://api.onesignal.com/notifications"', source)
+        self.assertIn("Phone notification diagnostics", source)
+        self.assertIn("staff_request_push_diagnostics", source)
 
     def test_operations_dashboard_contains_requested_widgets_and_settings(self):
         source = (ROOT / "pb_jobhub_app.py").read_text(encoding="utf-8")
@@ -53,6 +86,16 @@ class SourceStructureTests(unittest.TestCase):
             self.assertIn(label, source)
         self.assertIn("def save_operating_settings", source)
         self.assertIn("overhead_recovery_metrics", source)
+        self.assertIn("def pb_dashboard_navigation_tile", source)
+        self.assertIn("def pb_dashboard_widget_link", source)
+        for target in (
+            '"Jobs", "active_jobs"',
+            '"Staff Requests", "staff_tasks"',
+            '"Timesheets", "timesheets"',
+            '"Material Costs", "paint_orders"',
+            '"Job Progress Tracker", "active_blockers"',
+        ):
+            self.assertIn(target, source)
 
     def test_job_folder_uses_editable_schedule_and_weighted_progress(self):
         app_source = (ROOT / "pb_jobhub_app.py").read_text(encoding="utf-8")

@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json.schemastore.org/web-manifest-combined.json",
+  "id": "/?jobhub-home=1",
+  "name": "Premier Brushworks JobHub",
+  "short_name": "JobHub",
+  "description": "Premier Brushworks field and operations hub",
+  "start_url": "/?jobhub-home=1",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#F7F3ED",
+  "theme_color": "#8B6F47",
+  "icons": [
+    {
+      "src": "/app/static/PB_JobHub_Icon.png",
+      "sizes": "300x300",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
