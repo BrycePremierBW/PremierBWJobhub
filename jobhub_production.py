@@ -178,6 +178,59 @@ def budget_production_allowance(
     }
 
 
+def remaining_contract_labour(
+    *,
+    contract_value: Any,
+    actual_labour_hours: Any = 0,
+    material_commitment: Any = 0,
+    sundries_allowance: Any = 0,
+    access_allowance: Any = 0,
+    subcontractor_allowance: Any = 0,
+    day_hours: Any = DEFAULT_DAY_HOURS,
+    value_target: Any = DEFAULT_VALUE_TARGET,
+) -> dict[str, float]:
+    """Calculate labour hours left from the live contract position.
+
+    Premier Brushworks' $1,000 painter-day target already includes profit. The
+    contract value remaining after known non-labour commitments is therefore
+    converted at $125 of completed work per painter-hour. Timesheet hours used
+    are then deducted from that allowance.
+    """
+    settings = validate_production_targets(
+        day_hours=day_hours,
+        value_low=value_target,
+        value_target=value_target,
+        value_high=value_target,
+    )
+    contract = _non_negative_number(contract_value, "Contract value")
+    actual_hours = _non_negative_number(actual_labour_hours, "Actual labour hours")
+    materials = _non_negative_number(material_commitment, "Material commitment")
+    sundries = _non_negative_number(sundries_allowance, "Sundries allowance")
+    access = _non_negative_number(access_allowance, "Access allowance")
+    subcontractors = _non_negative_number(
+        subcontractor_allowance, "Subcontractor allowance"
+    )
+    value_per_hour = settings["value_target"] / settings["day_hours"]
+    non_labour_commitment = materials + sundries + access + subcontractors
+    labour_work_value = max(0.0, contract - non_labour_commitment)
+    allowed_hours = labour_work_value / value_per_hour
+    used_work_value = actual_hours * value_per_hour
+    remaining_work_value = max(0.0, labour_work_value - used_work_value)
+    return {
+        "contract_value": contract,
+        "material_commitment": materials,
+        "non_labour_commitment": non_labour_commitment,
+        "labour_work_value": labour_work_value,
+        "production_value_per_hour": value_per_hour,
+        "allowed_labour_hours": allowed_hours,
+        "actual_labour_hours": actual_hours,
+        "used_labour_work_value": used_work_value,
+        "remaining_labour_work_value": remaining_work_value,
+        "remaining_labour_hours": remaining_work_value / value_per_hour,
+        "hours_over_allowance": max(0.0, actual_hours - allowed_hours),
+    }
+
+
 def overhead_recovery_metrics(
     *,
     monthly_overhead: Any,

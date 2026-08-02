@@ -119,6 +119,25 @@ class SourceStructureTests(unittest.TestCase):
         self.assertNotIn('"High value / day"', app_source)
         self.assertIn("contingency_amount = 0.0", production_source)
 
+    def test_job_pack_import_supports_one_click_single_and_bulk_matching(self):
+        source = (ROOT / "pb_jobhub_app.py").read_text(encoding="utf-8")
+        self.assertIn("match_job_pack_to_jobs", source)
+        self.assertIn("def _takeoff_render_bulk_import", source)
+        self.assertIn("accept_multiple_files=True", source)
+        self.assertIn('key="takeoff_job_pack_one_click_import"', source)
+        self.assertIn('key="takeoff_job_pack_bulk_one_click_import"', source)
+        self.assertIn('"purchase_orders.csv"', source)
+        self.assertIn('"job_stages.csv"', source)
+
+    def test_operations_hub_calculates_contract_hours_automatically(self):
+        source = (ROOT / "jobhub_enterprise.py").read_text(encoding="utf-8")
+        production_source = (ROOT / "jobhub_production.py").read_text(encoding="utf-8")
+        self.assertIn("def remaining_contract_labour", production_source)
+        self.assertIn('result["Material Commitment"]', source)
+        self.assertIn('result["Forecast Remaining Labour Hours"] = contract_labour.map', source)
+        self.assertIn('h1.metric("Hours remaining"', source)
+        self.assertIn('h5.metric("Work target", "$125 / hour")', source)
+
 
 if __name__ == "__main__":
     unittest.main()

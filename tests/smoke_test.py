@@ -20,10 +20,10 @@ for source in ROOT.rglob("*.py"):
 from streamlit.testing.v1 import AppTest
 
 routes = [
-    "Dashboard", "Job Folders", "Jobs", "Control Centre", "Timesheets",
+    "Dashboard", "Job Folders", "Jobs", "Control Centre", "Operations Hub", "Timesheets",
     "Material Costs", "Wages", "Equipment", "Job Photos", "PDF Import Centre",
     "Estimate Working Sheet", "Job Costs / Forecasting",
-    "Import Take-off / Model File", "Progress / Billing Model", "3D Model Viewer",
+    "Import Take-off / Model File", "Import / Create Job Pack", "Progress / Billing Model", "3D Model Viewer",
     "Reports / Export", "Builders & Clients", "Employees", "Products",
     "User Access", "Staff Requests", "Staff Scheduler", "Painting Intelligence",
     "Job Progress Tracker", "JobHub AI Assistant", "App Builder AI",
