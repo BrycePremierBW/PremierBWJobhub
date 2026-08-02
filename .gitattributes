@@ -6,7 +6,9 @@
 *.yaml text eol=lf
 *.yml text eol=lf
 *.txt text eol=lf
-*.csv text eol=lf
+# CSV files include supplier/job exports with significant Windows line endings.
+# Preserve their imported bytes instead of making clean checkouts appear modified.
+*.csv -text
 *.sql text eol=lf
 *.bat text eol=crlf
 

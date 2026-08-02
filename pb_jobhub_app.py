@@ -21,10 +21,10 @@ import requests
 from psycopg2.pool import ThreadedConnectionPool
 from pypdf import PdfReader, PdfWriter
 import streamlit as st
-import streamlit.components.v1 as components
 from jobhub_feedback import error as pb_error, replay_pending as pb_replay_pending, rerun as pb_rerun, success as pb_success
 from pb_jobhub_visual_scheduler import (
     init_linked_schema,
+    render_job_folder_schedule_editor,
     render_jobhub_staff_scheduler,
     sync_linked_job_dates,
 )
@@ -38,8 +38,12 @@ from jobhub_enterprise import (
 from jobhub_v2.schema import ensure_v2_schema
 from jobhub_v4.schema import ensure_v4_schema
 from jobhub_v4.streamlit_painting import render_painting_intelligence
+from jobhub_v4.measurements import (
+    EXTERNAL_SUBSTRATE_AREA,
+    INTERNAL_FLOOR_AREA,
+    recommended_measurement_basis,
+)
 from jobhub_core import (
-    calculate_estimate_pricing,
     calculate_shift_hours,
     hash_password as secure_hash_password,
     is_known_default_password_hash,
@@ -54,11 +58,12 @@ from jobhub_production import (
     DEFAULT_VALUE_HIGH,
     DEFAULT_VALUE_LOW,
     DEFAULT_VALUE_TARGET,
+    budget_production_allowance,
     crew_duration_days,
     claimable_value,
     expected_progress,
-    measured_progress,
     line_production_metrics,
+    overhead_recovery_metrics,
     production_sell_pricing,
     production_variance,
     validate_production_targets,
@@ -75,7 +80,7 @@ MAX_TAKEOFF_PACK_FILES = 300
 MAX_IMAGE_PIXELS = 25_000_000
 Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 
-PB_JOBHUB_BUILD = "2026.08.02-stage-control-claims-production-v2"
+PB_JOBHUB_BUILD = "2026.08.02-operations-dashboard-production-v3"
 PLANNING_LABOUR_RATE = 60.0
 
 
@@ -841,7 +846,7 @@ def pb_scroll_sidebar_to_top():
     The CSS scroll guard remains the primary fix.  This helper simply prevents
     Streamlit from preserving an awkward sidebar scroll offset between pages.
     """
-    components.html(
+    st.iframe(
         """
         <script>
         (() => {
@@ -866,8 +871,8 @@ def pb_scroll_sidebar_to_top():
         })();
         </script>
         """,
-        height=0,
-        width=0,
+        height=1,
+        width=1,
     )
 
 
@@ -1527,7 +1532,7 @@ def init_db():
     ensure_column("estimate_working_sheets", "archived_by", "TEXT")
     ensure_column("estimate_working_sheets", "production_day_hours", "REAL DEFAULT 8")
     ensure_column("estimate_working_sheets", "production_value_low", "REAL DEFAULT 800")
-    ensure_column("estimate_working_sheets", "production_value_target", "REAL DEFAULT 900")
+    ensure_column("estimate_working_sheets", "production_value_target", "REAL DEFAULT 1000")
     ensure_column("estimate_working_sheets", "production_value_high", "REAL DEFAULT 1000")
 
     cur.execute("""
@@ -1606,7 +1611,7 @@ def init_db():
         total_inc_gst REAL DEFAULT 0,
         labour_hours REAL DEFAULT 0,
         production_day_hours REAL DEFAULT 8,
-        production_value_target REAL DEFAULT 900,
+        production_value_target REAL DEFAULT 1000,
         active INTEGER NOT NULL DEFAULT 1,
         locked_at TEXT NOT NULL,
         locked_by TEXT,
@@ -2324,6 +2329,78 @@ def apply_schema_migrations():
                 (material_policy_migration_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
             )
 
+        production_target_migration_id = "20260802_production_target_budget_overheads_v1"
+        if production_target_migration_id not in applied:
+            for column, definition in (
+                ("production_measurement_basis", "TEXT"),
+                ("production_area_quantity", "REAL DEFAULT 0"),
+                ("production_value_target", "REAL DEFAULT 1000"),
+                ("production_day_hours", "REAL DEFAULT 8"),
+            ):
+                _migration_ensure_column(cur, "job_budgets", column, definition)
+            cur.execute(
+                """
+                UPDATE estimate_working_sheets
+                SET production_value_target=1000
+                WHERE COALESCE(production_value_target,900)=900
+                """
+            )
+            cur.execute(
+                """
+                UPDATE estimate_baselines
+                SET production_value_target=1000
+                WHERE COALESCE(production_value_target,900)=900
+                """
+            )
+            cur.execute(
+                """
+                UPDATE job_budgets
+                SET production_value_target=1000
+                WHERE COALESCE(production_value_target,900)=900
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS business_operating_settings (
+                    setting_key TEXT PRIMARY KEY,
+                    label TEXT NOT NULL,
+                    setting_group TEXT NOT NULL,
+                    numeric_value REAL DEFAULT 0,
+                    unit TEXT,
+                    sequence_order INTEGER DEFAULT 1,
+                    updated_at TEXT,
+                    updated_by TEXT
+                )
+                """
+            )
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            settings = [
+                ("overhead_wages", "Wage overhead", "Monthly overhead", 16000.0, "$ / month", 1),
+                ("overhead_vehicles", "Cars / vehicles", "Monthly overhead", 600.0, "$ / month", 2),
+                ("overhead_office", "Office", "Monthly overhead", 1500.0, "$ / month", 3),
+                ("overhead_phones_internet", "Phones and internet", "Monthly overhead", 400.0, "$ / month", 4),
+                ("overhead_insurance", "Insurance and workers compensation", "Monthly overhead", 1200.0, "$ / month", 5),
+                ("painter_count", "Painters", "Capacity", 12.0, "people", 10),
+                ("paid_hours_week", "Paid hours per painter", "Capacity", 38.0, "hours / week", 11),
+                ("productive_utilisation", "Productive utilisation", "Capacity", 80.0, "%", 12),
+                ("production_value_target", "Completed-work target", "Capacity", 1000.0, "$ / painter day", 13),
+                ("planning_hourly_rate", "Planning labour rate", "Capacity", 60.0, "$ / painter hour", 14),
+            ]
+            for setting in settings:
+                cur.execute(
+                    """
+                    INSERT INTO business_operating_settings
+                    (setting_key,label,setting_group,numeric_value,unit,sequence_order,updated_at,updated_by)
+                    VALUES (?,?,?,?,?,?,?,?)
+                    ON CONFLICT(setting_key) DO NOTHING
+                    """,
+                    (*setting, now, "system"),
+                )
+            cur.execute(
+                "INSERT INTO schema_migrations (migration_id, applied_at) VALUES (?, ?)",
+                (production_target_migration_id, now),
+            )
+
         conn.commit()
         return True
     except Exception:
@@ -2718,7 +2795,7 @@ def render_phone_push_opt_in(user, key_prefix="phone_push"):
     external_id = phone_push_external_id(user_id)
     app_id_js = json.dumps(app_id)
     external_id_js = json.dumps(external_id)
-    components.html(
+    st.iframe(
         f"""
         <script src="https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.page.js" defer></script>
         <div style="font-family:Arial,sans-serif;padding:8px 2px">
@@ -2883,7 +2960,7 @@ def render_employee_requests(employee_id):
         save_response = st.form_submit_button(
             "Save response",
             type="primary",
-            use_container_width=True,
+            width="stretch",
         )
     if save_response:
         job_id = None if pd.isna(selected.get("job_id")) else int(selected["job_id"])
@@ -3013,7 +3090,7 @@ def staff_requests_page():
         create_request = st.button(
             "Send request and notify employees",
             type="primary",
-            use_container_width=True,
+            width="stretch",
             key="create_staff_request_button",
         )
         if create_request:
@@ -3146,7 +3223,7 @@ def staff_requests_page():
     if a1.button(
         "Send reminder",
         disabled=not recipient_user_id or pd.isna(recipient_user_id),
-        use_container_width=True,
+        width="stretch",
         key=f"remind_staff_request_{request_id}",
     ):
         create_user_notifications(
@@ -3160,7 +3237,7 @@ def staff_requests_page():
             staff_request_id=request_id,
         )
         pb_success("Reminder sent.")
-    if a2.button("Reopen request", use_container_width=True, key=f"reopen_staff_request_{request_id}"):
+    if a2.button("Reopen request", width="stretch", key=f"reopen_staff_request_{request_id}"):
         execute(
             "UPDATE staff_requests SET status='Requested',completed_at='',completed_by='' WHERE id=?",
             (request_id,),
@@ -3171,7 +3248,7 @@ def staff_requests_page():
     if a3.button(
         cancel_label,
         disabled=str(selected["Status"]) == "Cancelled",
-        use_container_width=True,
+        width="stretch",
         key=f"cancel_staff_request_{request_id}",
     ):
         execute(
@@ -3187,7 +3264,7 @@ def staff_requests_page():
     if st.button(
         "Delete selected request",
         disabled=not confirm_delete,
-        use_container_width=True,
+        width="stretch",
         key=f"delete_staff_request_{request_id}",
     ):
         execute("DELETE FROM push_notification_log WHERE staff_request_id=?", (request_id,))
@@ -9460,7 +9537,7 @@ def import_takeoff_job_pack(
         access_allowance = _takeoff_float(summary.get("access_equipment_allowance"))
         subcontractor_allowance = _takeoff_float(summary.get("subcontractor_allowance"))
         sundries_allowance = _takeoff_float(summary.get("sundries_allowance"))
-        # Take-off rates and the $900 painter-day target already include profit.
+        # Take-off rates and the $1,000 painter-day target already include profit.
         # Retain legacy manifest fields for compatibility, but do not add a
         # second margin/markup percentage to imported estimates.
         target_gp = 0.0
@@ -10281,7 +10358,7 @@ def estimate_totals(
     settings_df = safe_df_query(
         """
         SELECT COALESCE(production_day_hours, 8) AS day_hours,
-               COALESCE(production_value_target, 900) AS value_target
+               COALESCE(production_value_target, 1000) AS value_target
         FROM estimate_working_sheets
         WHERE id = ?
         """,
@@ -10445,7 +10522,7 @@ def render_estimate_production_progress(estimate_id, job_id, current):
     st.subheader("Production target and expected progress")
     st.caption(
         "Each measured line is converted to the quantity one painter should complete in an "
-        "8-hour day for $800, $900 and $1,000 of completed work. Timesheet hours then show "
+        "8-hour day for the $800 warning level and the $1,000 completed-work target. Timesheet hours then show "
         "the percentage that should be complete by now."
     )
     render_estimate_baseline_panel(estimate_id, job_id, current)
@@ -10471,7 +10548,7 @@ def render_estimate_production_progress(estimate_id, job_id, current):
                 "High value / day", min_value=1.0, value=value_high, step=50.0,
             )
             save_settings = st.form_submit_button(
-                "Save production settings", type="primary", use_container_width=True,
+                "Save production settings", type="primary", width="stretch",
             )
         if save_settings:
             try:
@@ -10551,7 +10628,7 @@ def render_estimate_production_progress(estimate_id, job_id, current):
         edited_assignments = st.data_editor(
             assignment_editor,
             hide_index=True,
-            use_container_width=True,
+            width="stretch",
             disabled=["id", "Description", "Qty", "Unit", "Rate", "Value"],
             column_config={
                 "id": None,
@@ -10566,7 +10643,7 @@ def render_estimate_production_progress(estimate_id, job_id, current):
             "Save tracked lines and stage assignments",
             type="primary",
             key=f"save_estimate_production_assignments_{estimate_id}",
-            use_container_width=True,
+            width="stretch",
         ):
             for _, row in edited_assignments.iterrows():
                 stage_name = str(row["Stage"] or "Whole Job")
@@ -10590,6 +10667,9 @@ def render_estimate_production_progress(estimate_id, job_id, current):
         st.info("No estimate lines are currently included in production tracking.")
         return
 
+    warning_qty_column = f"Warning Qty / {day_hours:g}h (${value_low:,.0f})"
+    target_qty_column = f"Target Qty / {day_hours:g}h (${value_target:,.0f})"
+    stretch_qty_column = f"Stretch Qty / {day_hours:g}h (${value_high:,.0f})"
     production_rows = []
     for _, line in tracked.iterrows():
         metrics = line_production_metrics(
@@ -10603,9 +10683,9 @@ def render_estimate_production_progress(estimate_id, job_id, current):
             "Description": str(line["item_description"] or ""),
             "Qty": float(line["qty"] or 0),
             "Unit": str(line["unit"] or "item"),
-            "$800 / 8h Qty": float(metrics["units_per_day_low"]),
-            "$900 / 8h Qty": float(metrics["units_per_day_target"]),
-            "$1,000 / 8h Qty": float(metrics["units_per_day_high"]),
+            warning_qty_column: float(metrics["units_per_day_low"]),
+            target_qty_column: float(metrics["units_per_day_target"]),
+            stretch_qty_column: float(metrics["units_per_day_high"]),
             "Target Hours": float(metrics["labour_hours_at_target"] or fallback_hours),
             "Low-value Hours": float(metrics["labour_hours_at_low"] or fallback_hours),
             "High-value Hours": float(metrics["labour_hours_at_high"] or fallback_hours),
@@ -10639,7 +10719,7 @@ def render_estimate_production_progress(estimate_id, job_id, current):
     m5.metric("Should Be Complete", f"{progress['raw_expected_percent']:,.1f}%")
     if progress["hours_over_budget"] > 0:
         st.warning(
-            f"Timesheets are {progress['hours_over_budget']:,.1f} hours beyond the $900/day target. "
+            f"Timesheets are {progress['hours_over_budget']:,.1f} hours beyond the $1,000/day target. "
             "This scope should already be complete."
         )
     elif target_hours > 0:
@@ -10652,11 +10732,11 @@ def render_estimate_production_progress(estimate_id, job_id, current):
     st.dataframe(
         production_df.drop(columns=["Low-value Hours", "High-value Hours"]),
         hide_index=True,
-        use_container_width=True,
+        width="stretch",
         column_config={
-            "$800 / 8h Qty": st.column_config.NumberColumn(format="%.2f"),
-            "$900 / 8h Qty": st.column_config.NumberColumn(format="%.2f"),
-            "$1,000 / 8h Qty": st.column_config.NumberColumn(format="%.2f"),
+            warning_qty_column: st.column_config.NumberColumn(format="%.2f"),
+            target_qty_column: st.column_config.NumberColumn(format="%.2f"),
+            stretch_qty_column: st.column_config.NumberColumn(format="%.2f"),
             "Target Hours": st.column_config.NumberColumn(format="%.1f"),
             "Work Value": st.column_config.NumberColumn(format="$%.2f"),
         },
@@ -10687,7 +10767,7 @@ def render_estimate_production_progress(estimate_id, job_id, current):
     st.dataframe(
         stage_targets,
         hide_index=True,
-        use_container_width=True,
+        width="stretch",
         column_config={
             "Target Hours": st.column_config.NumberColumn(format="%.1f"),
             "Timesheet Hours": st.column_config.NumberColumn(format="%.1f"),
@@ -11989,7 +12069,7 @@ def job_costs_forecasting_page():
             value=DEFAULT_VALUE_TARGET,
             step=50.0,
             disabled=True,
-            help="The $900 completed-work target already covers profit; no separate GP percentage is required.",
+            help="The $1,000 completed-work target already covers profit; no separate GP percentage is required.",
         )
         labour_cost_hour = i2.number_input(
             "Forecast Labour Cost / Hour",
@@ -12021,7 +12101,7 @@ def job_costs_forecasting_page():
         f4.metric("Forecast GP %", f"{forecast_gp:.2f}%")
 
         st.info(
-            "Forecast labour follows the $900 completed-work target. Gross profit remains visible "
+            "Forecast labour follows the $1,000 completed-work target. Gross profit remains visible "
             "as an actual result, but there is no separate target percentage input."
         )
 
@@ -13784,9 +13864,65 @@ def pb_control_job_health(df):
     st.dataframe(filtered[cols], width="stretch", hide_index=True)
 
 
+def pb_budget_measurement_quantities(job_id):
+    """Find internal floor m² and external substrate m² already stored for a job."""
+    internal = safe_df_query(
+        "SELECT COALESCE(internal_floor_m2,0) AS qty FROM job_progress_settings WHERE job_id=?",
+        (int(job_id),),
+    )
+    external = safe_df_query(
+        "SELECT COALESCE(SUM(measured_m2),0) AS qty FROM job_external_progress WHERE job_id=?",
+        (int(job_id),),
+    )
+    internal_qty = float(internal.iloc[0]["qty"] or 0) if not internal.empty else 0.0
+    external_qty = float(external.iloc[0]["qty"] or 0) if not external.empty else 0.0
+
+    estimate = safe_df_query(
+        """
+        SELECT id FROM estimate_working_sheets
+        WHERE job_id=? AND COALESCE(archived,0)=0
+        ORDER BY CASE LOWER(COALESCE(status,'')) WHEN 'approved' THEN 0 ELSE 1 END,id DESC
+        LIMIT 1
+        """,
+        (int(job_id),),
+    )
+    if not estimate.empty and (internal_qty <= 0 or external_qty <= 0):
+        lines = safe_df_query(
+            """
+            SELECT COALESCE(li.qty,0) AS qty,COALESCE(li.unit,'') AS unit,
+                   COALESCE(js.stage_name,'') AS stage_name,
+                   COALESCE(li.section,'') || ' ' || COALESCE(li.item_description,'') || ' ' ||
+                   COALESCE(li.work_location,'') AS context
+            FROM estimate_line_items li
+            LEFT JOIN job_stages js ON js.id=li.job_stage_id
+            WHERE li.estimate_id=? AND COALESCE(li.production_tracking_enabled,1)=1
+            """,
+            (int(estimate.iloc[0]["id"]),),
+        )
+        estimated_internal = 0.0
+        estimated_external = 0.0
+        for _, line in lines.iterrows():
+            basis = recommended_measurement_basis(
+                line["unit"], stage_name=line["stage_name"], context=line["context"],
+            )
+            if basis == INTERNAL_FLOOR_AREA:
+                estimated_internal += max(0.0, float(line["qty"] or 0))
+            elif basis == EXTERNAL_SUBSTRATE_AREA:
+                estimated_external += max(0.0, float(line["qty"] or 0))
+        internal_qty = internal_qty or estimated_internal
+        external_qty = external_qty or estimated_external
+    return {
+        INTERNAL_FLOOR_AREA: internal_qty,
+        EXTERNAL_SUBSTRATE_AREA: external_qty,
+    }
+
+
 def pb_control_budget_lock(df):
     st.subheader("Job Budget Lock-In")
-    st.caption("Lock in accepted quote budgets so actual labour/materials can be compared against the allowed budget.")
+    st.caption(
+        "Cross-check the accepted contract against measured internal floor m² or external "
+        "substrate m², then lock the painter-hours allowed after non-painter allowances."
+    )
 
     job_options = get_job_options()
     if not job_options:
@@ -13795,62 +13931,176 @@ def pb_control_budget_lock(df):
 
     selected_job = st.selectbox("Job", list(job_options.keys()), key="budget_lock_job")
     job_id = job_options[selected_job]
-
     existing = df_query("SELECT * FROM job_budgets WHERE job_id = ?", (job_id,))
     current = existing.iloc[0].to_dict() if not existing.empty else {}
-
-    with st.form("job_budget_form"):
-        c1, c2, c3 = st.columns(3)
-        quoted_labour_hours = c1.number_input("Quoted Labour Hours", min_value=0.0, value=pb_float(current.get("quoted_labour_hours", 0)), step=1.0)
-        quoted_labour_cost = c2.number_input("Quoted Labour Cost", min_value=0.0, value=pb_float(current.get("quoted_labour_cost", 0)), step=100.0)
-        quoted_materials = c3.number_input("Quoted Materials", min_value=0.0, value=pb_float(current.get("quoted_materials", 0)), step=100.0)
-
-        c4, c5, c6 = st.columns(3)
-        quoted_access = c4.number_input("Access / Equipment Allowance", min_value=0.0, value=pb_float(current.get("quoted_access_equipment", 0)), step=100.0)
-        quoted_subbies = c5.number_input("Subcontractor Allowance", min_value=0.0, value=pb_float(current.get("quoted_subcontractors", 0)), step=100.0)
-        quoted_sundries = c6.number_input("Sundries / Consumables", min_value=0.0, value=pb_float(current.get("quoted_sundries", 0)), step=50.0)
-
-        target_gp = 0.0
-        st.caption(
-            "Profit is already allowed for in the $900 completed-work target per painter-day. "
-            "No additional GP percentage is applied."
+    job_row = df_query(
+        "SELECT COALESCE(contract_value,0) AS contract_value FROM jobs WHERE id=?",
+        (int(job_id),),
+    )
+    contract_value = float(job_row.iloc[0]["contract_value"] or 0) if not job_row.empty else 0.0
+    quantities = pb_budget_measurement_quantities(job_id)
+    basis_options = list(quantities.keys())
+    saved_basis = str(current.get("production_measurement_basis") or "")
+    if saved_basis not in basis_options:
+        saved_basis = (
+            INTERNAL_FLOOR_AREA
+            if quantities[INTERNAL_FLOOR_AREA] > 0 or quantities[EXTERNAL_SUBSTRATE_AREA] <= 0
+            else EXTERNAL_SUBSTRATE_AREA
         )
-        notes = st.text_area("Budget Notes", value=str(current.get("notes", "") or ""))
-        submitted = st.form_submit_button("Save / Lock Job Budget")
+    measurement_basis = st.radio(
+        "Production measurement basis",
+        basis_options,
+        index=basis_options.index(saved_basis),
+        horizontal=True,
+        key=f"budget_measurement_basis_{job_id}",
+    )
+    suggested_quantity = float(quantities[measurement_basis] or 0)
+    saved_quantity = float(current.get("production_area_quantity") or 0)
+    measured_quantity = st.number_input(
+        "Internal floor m²" if measurement_basis == INTERNAL_FLOOR_AREA else "External substrate m²",
+        min_value=0.0,
+        value=saved_quantity if saved_basis == measurement_basis and saved_quantity > 0 else suggested_quantity,
+        step=10.0,
+        key=f"budget_measurement_quantity_{job_id}_{measurement_basis}",
+        help="This is prefilled from the Progress Tracker or latest take-off and can be corrected here.",
+    )
+    if quantities[INTERNAL_FLOOR_AREA] > 0 and quantities[EXTERNAL_SUBSTRATE_AREA] > 0:
+        st.info(
+            "This job contains both internal and external measurements. Overall allowed hours use the "
+            "whole contract; the selected m² basis is a production-rate cross-check only."
+        )
+
+    c1, c2, c3 = st.columns(3)
+    quoted_materials = c1.number_input(
+        "Paint / Material Allowance", min_value=0.0,
+        value=pb_float(current.get("quoted_materials", 0)), step=100.0,
+        key=f"budget_materials_{job_id}",
+    )
+    quoted_sundries = c2.number_input(
+        "Sundries / Consumables", min_value=0.0,
+        value=pb_float(current.get("quoted_sundries", 0)), step=50.0,
+        key=f"budget_sundries_{job_id}",
+    )
+    quoted_access = c3.number_input(
+        "Access / Equipment Allowance", min_value=0.0,
+        value=pb_float(current.get("quoted_access_equipment", 0)), step=100.0,
+        key=f"budget_access_{job_id}",
+    )
+    quoted_subbies = st.number_input(
+        "Subcontractor Allowance", min_value=0.0,
+        value=pb_float(current.get("quoted_subcontractors", 0)), step=100.0,
+        key=f"budget_subbies_{job_id}",
+    )
+    target_value = DEFAULT_VALUE_TARGET
+    allowance = budget_production_allowance(
+        contract_value=contract_value,
+        material_allowance=quoted_materials,
+        sundries_allowance=quoted_sundries,
+        access_allowance=quoted_access,
+        subcontractor_allowance=quoted_subbies,
+        measured_quantity=measured_quantity,
+        measurement_unit=("floor m²" if measurement_basis == INTERNAL_FLOOR_AREA else "substrate m²"),
+        day_hours=DEFAULT_DAY_HOURS,
+        value_target=target_value,
+        planning_hourly_rate=PLANNING_LABOUR_RATE,
+    )
+    a1, a2, a3, a4, a5 = st.columns(5)
+    a1.metric("Contract Ex GST", f"${contract_value:,.0f}")
+    a2.metric("Paint + Other Allowances", f"${float(allowance['non_painter_allowances']):,.0f}")
+    a3.metric("Painter Production Value", f"${float(allowance['painter_production_value']):,.0f}")
+    a4.metric("Allowed Painter Hours", f"{float(allowance['allowed_painter_hours']):,.1f}")
+    a5.metric("Planning Labour Cost", f"${float(allowance['planning_labour_cost']):,.0f}")
+    r1, r2, r3 = st.columns(3)
+    r1.metric(
+        f"Net Sell / {allowance['measurement_unit']}",
+        f"${float(allowance['net_sell_value_per_unit']):,.2f}",
+    )
+    r2.metric(
+        f"Target {allowance['measurement_unit']} / 8h",
+        f"{float(allowance['target_units_per_day']):,.2f}",
+    )
+    r3.metric("Profit-Inclusive Target", "$1,000 / painter day")
+
+    use_calculated = st.checkbox(
+        "Use the calculated $1,000/day allowance as the locked labour budget",
+        value=True,
+        key=f"budget_use_calculated_{job_id}",
+    )
+    calculated_hours = float(allowance["allowed_painter_hours"])
+    calculated_cost = float(allowance["planning_labour_cost"])
+    l1, l2 = st.columns(2)
+    if use_calculated:
+        quoted_labour_hours = calculated_hours
+        quoted_labour_cost = calculated_cost
+        l1.metric("Locked Labour Hours", f"{quoted_labour_hours:,.1f}")
+        l2.metric("Planning Labour Cost at $60/hour", f"${quoted_labour_cost:,.0f}")
+    else:
+        quoted_labour_hours = l1.number_input(
+            "Locked Labour Hours", min_value=0.0,
+            value=pb_float(current.get("quoted_labour_hours", 0)),
+            step=1.0, key=f"budget_labour_hours_{job_id}",
+        )
+        quoted_labour_cost = l2.number_input(
+            "Planning Labour Cost at $60/hour", min_value=0.0,
+            value=pb_float(current.get("quoted_labour_cost", 0)),
+            step=100.0, key=f"budget_labour_cost_{job_id}",
+        )
+    st.caption(
+        "The $1,000 completed-work target already includes overhead and profit. The $60/hour "
+        "figure is planning cost only; actual job cost continues to use each employee's real rate."
+    )
+    notes = st.text_area(
+        "Budget Notes", value=str(current.get("notes", "") or ""), key=f"budget_notes_{job_id}",
+    )
+    submitted = st.button("Save / Lock Job Budget", type="primary", key=f"save_job_budget_{job_id}")
 
     if submitted:
+        values = (
+            float(quoted_labour_hours), float(quoted_labour_cost), float(quoted_materials),
+            float(quoted_access), float(quoted_subbies), float(quoted_sundries), 0.0,
+            measurement_basis, float(measured_quantity), float(target_value),
+            float(DEFAULT_DAY_HOURS), datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            current_username(), notes,
+        )
         if existing.empty:
-            execute("""
+            execute(
+                """
                 INSERT INTO job_budgets
-                (job_id, quoted_labour_hours, quoted_labour_cost, quoted_materials, quoted_access_equipment,
-                 quoted_subcontractors, quoted_sundries, target_gp_percent, locked_at, locked_by, notes)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (job_id, quoted_labour_hours, quoted_labour_cost, quoted_materials, quoted_access, quoted_subbies, quoted_sundries, target_gp, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), current_username(), notes))
+                (job_id,quoted_labour_hours,quoted_labour_cost,quoted_materials,
+                 quoted_access_equipment,quoted_subcontractors,quoted_sundries,target_gp_percent,
+                 production_measurement_basis,production_area_quantity,production_value_target,
+                 production_day_hours,locked_at,locked_by,notes)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (int(job_id), *values),
+            )
         else:
-            execute("""
+            execute(
+                """
                 UPDATE job_budgets
-                SET quoted_labour_hours = ?, quoted_labour_cost = ?, quoted_materials = ?, quoted_access_equipment = ?,
-                    quoted_subcontractors = ?, quoted_sundries = ?, target_gp_percent = ?, locked_at = ?, locked_by = ?, notes = ?
-                WHERE job_id = ?
-            """, (quoted_labour_hours, quoted_labour_cost, quoted_materials, quoted_access, quoted_subbies, quoted_sundries, target_gp, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), current_username(), notes, job_id))
-        pb_success("Job budget saved.")
+                SET quoted_labour_hours=?,quoted_labour_cost=?,quoted_materials=?,
+                    quoted_access_equipment=?,quoted_subcontractors=?,quoted_sundries=?,
+                    target_gp_percent=?,production_measurement_basis=?,production_area_quantity=?,
+                    production_value_target=?,production_day_hours=?,locked_at=?,locked_by=?,notes=?
+                WHERE job_id=?
+                """,
+                (*values, int(job_id)),
+            )
+        pb_success("Job budget and calculated painter-hour allowance saved.")
         refresh()
 
-    budget_df = df_query("""
-        SELECT j.job_no AS 'Job No',
-               j.job_name AS 'Job Name',
-               b.quoted_labour_hours AS 'Labour Hours',
-               b.quoted_labour_cost AS 'Labour Cost',
-               b.quoted_materials AS 'Materials',
-               b.quoted_access_equipment AS 'Access',
-               b.quoted_subcontractors AS 'Subcontractors',
-               b.quoted_sundries AS 'Sundries',
-               b.locked_at AS 'Locked At',
-               b.locked_by AS 'Locked By'
-        FROM job_budgets b
-        JOIN jobs j ON j.id = b.job_id
-        ORDER BY j.job_no
-    """)
+    budget_df = df_query(
+        """
+        SELECT j.job_no AS 'Job No',j.job_name AS 'Job Name',
+               b.production_measurement_basis AS 'Measurement Basis',
+               b.production_area_quantity AS 'Measured Qty',
+               b.quoted_labour_hours AS 'Allowed Labour Hours',
+               b.quoted_labour_cost AS 'Planning Labour Cost',b.quoted_materials AS 'Paint / Materials',
+               b.quoted_access_equipment AS 'Access',b.quoted_subcontractors AS 'Subcontractors',
+               b.quoted_sundries AS 'Sundries',b.locked_at AS 'Locked At',b.locked_by AS 'Locked By'
+        FROM job_budgets b JOIN jobs j ON j.id=b.job_id ORDER BY j.job_no
+        """
+    )
     st.markdown("### Locked Budgets")
     st.dataframe(budget_df, width="stretch", hide_index=True)
 
@@ -14189,6 +14439,341 @@ def safe_df_query(sql, params=()):
         return pd.DataFrame()
 
 
+OPERATING_SETTING_DEFAULTS = {
+    "overhead_wages": ("Wage overhead", "Monthly overhead", 16000.0, "$ / month", 1),
+    "overhead_vehicles": ("Cars / vehicles", "Monthly overhead", 600.0, "$ / month", 2),
+    "overhead_office": ("Office", "Monthly overhead", 1500.0, "$ / month", 3),
+    "overhead_phones_internet": ("Phones and internet", "Monthly overhead", 400.0, "$ / month", 4),
+    "overhead_insurance": ("Insurance and workers compensation", "Monthly overhead", 1200.0, "$ / month", 5),
+    "painter_count": ("Painters", "Capacity", 12.0, "people", 10),
+    "paid_hours_week": ("Paid hours per painter", "Capacity", 38.0, "hours / week", 11),
+    "productive_utilisation": ("Productive utilisation", "Capacity", 80.0, "%", 12),
+    "production_value_target": ("Completed-work target", "Capacity", 1000.0, "$ / painter day", 13),
+    "planning_hourly_rate": ("Planning labour rate", "Capacity", 60.0, "$ / painter hour", 14),
+}
+
+
+def operating_setting_values():
+    rows = safe_df_query(
+        "SELECT setting_key,numeric_value FROM business_operating_settings"
+    )
+    values = {
+        key: float(details[2]) for key, details in OPERATING_SETTING_DEFAULTS.items()
+    }
+    if not rows.empty:
+        for _, row in rows.iterrows():
+            key = str(row.get("setting_key") or "")
+            if key in values:
+                values[key] = pb_float(row.get("numeric_value"))
+    return values
+
+
+def save_operating_settings(values):
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    for key, details in OPERATING_SETTING_DEFAULTS.items():
+        label, group, _, unit, order = details
+        execute(
+            """
+            INSERT INTO business_operating_settings
+            (setting_key,label,setting_group,numeric_value,unit,sequence_order,updated_at,updated_by)
+            VALUES (?,?,?,?,?,?,?,?)
+            ON CONFLICT(setting_key) DO UPDATE SET
+                label=excluded.label,setting_group=excluded.setting_group,
+                numeric_value=excluded.numeric_value,unit=excluded.unit,
+                sequence_order=excluded.sequence_order,updated_at=excluded.updated_at,
+                updated_by=excluded.updated_by
+            """,
+            (key, label, group, float(values[key]), unit, order, now, current_username()),
+        )
+
+
+def dashboard_job_progress(active_jobs):
+    """Build a compact cross-job view of stage progress versus used hours."""
+    rows = []
+    # The dashboard only displays seven rows. Limiting the candidates avoids a
+    # full measured-progress rebuild for every active job on every rerun.
+    for _, job in active_jobs.head(10).iterrows():
+        summary = stage_progress_summary_dataframe(int(job["job_id"]))
+        if summary.empty:
+            continue
+        weights = pd.to_numeric(summary["Job %"], errors="coerce").fillna(0).clip(lower=0)
+        if float(weights.sum()) <= 0:
+            weights = pd.Series([1.0] * len(summary), index=summary.index)
+        actual = float((pd.to_numeric(summary["Actual Physical %"], errors="coerce").fillna(0) * weights).sum() / weights.sum())
+        expected = float((pd.to_numeric(summary["Should Be Complete %"], errors="coerce").fillna(0) * weights).sum() / weights.sum())
+        performance = production_variance(actual, expected)
+        rows.append({
+            "Job": f"{job['Job No']} — {job['Job Name']}",
+            "Actual %": round(actual, 1),
+            "Should Be %": round(expected, 1),
+            "Variance": round(float(performance["variance_points"]), 1),
+            "Performance": str(performance["status"]),
+        })
+    if not rows:
+        return pd.DataFrame()
+    result = pd.DataFrame(rows)
+    rank = {"Critical": 0, "Behind": 1, "On track": 2, "Ahead": 3}
+    result["_rank"] = result["Performance"].map(rank).fillna(4)
+    return result.sort_values(["_rank", "Variance", "Job"]).drop(columns=["_rank"])
+
+
+def render_operational_dashboard():
+    """Render the widget-based management dashboard."""
+    st.subheader("Operations Dashboard")
+    today_text = str(date.today())
+    closed_statuses = ["complete", "completed", "closed", "paid", "archived"]
+
+    active_jobs = safe_df_query(
+        """
+        SELECT id AS job_id,job_no AS "Job No",job_name AS "Job Name",status AS "Status",
+               leading_hand AS "Leading Hand",start_date AS "Start Date",end_date AS "End Date"
+        FROM jobs
+        WHERE LOWER(COALESCE(status,'')) NOT IN ('complete','completed','closed','paid','archived')
+        ORDER BY CASE WHEN end_date IS NULL OR end_date='' THEN 1 ELSE 0 END,end_date,job_no
+        """
+    )
+    open_requests = safe_df_query(
+        """
+        SELECT r.id,e.name AS "Employee",r.request_type AS "Type",r.title AS "Task",
+               COALESCE(j.job_no,'') AS "Job",r.priority AS "Priority",r.due_at AS "Due"
+        FROM staff_requests r
+        JOIN employees e ON e.id=r.employee_id
+        LEFT JOIN jobs j ON j.id=r.job_id
+        WHERE LOWER(COALESCE(r.status,'requested')) NOT IN ('completed','cancelled','declined')
+        ORDER BY CASE LOWER(COALESCE(r.priority,'')) WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 ELSE 2 END,
+                 CASE WHEN r.due_at IS NULL OR r.due_at='' THEN 1 ELSE 0 END,r.due_at,r.id DESC
+        """
+    )
+    pending_timesheets = safe_df_query(
+        """
+        SELECT e.name AS "Employee",COUNT(*) AS "Entries",
+               COALESCE(SUM(t.total_hours),0) AS "Hours"
+        FROM timesheet_entries t JOIN employees e ON e.id=t.employee_id
+        WHERE LOWER(COALESCE(t.status,'submitted'))='submitted'
+        GROUP BY e.id,e.name ORDER BY COUNT(*) DESC,e.name
+        """
+    )
+    pending_orders = safe_df_query(
+        """
+        SELECT r.id,COALESCE(r.order_no,'Draft') AS "Order",j.job_no AS "Job",
+               COALESCE(r.supplier,'') AS "Supplier",COALESCE(r.status,'Draft') AS "Status",
+               COALESCE(r.required_delivery_date,'') AS "Required"
+        FROM material_order_requests r JOIN jobs j ON j.id=r.job_id
+        WHERE LOWER(COALESCE(r.status,'draft')) NOT IN
+              ('received','completed','cancelled','rejected','closed')
+        ORDER BY CASE WHEN r.required_delivery_date IS NULL OR r.required_delivery_date='' THEN 1 ELSE 0 END,
+                 r.required_delivery_date,r.id DESC
+        """
+    )
+    material_shortages = safe_df_query(
+        """
+        SELECT j.job_no AS "Job",
+               COALESCE(NULLIF(m.custom_product_name,''),p.product_name,'Custom paint / material') AS "Product",
+               (COALESCE(m.qty_required,0)-COALESCE(m.qty_received,0)) AS "Qty to Order"
+        FROM material_entries m
+        JOIN jobs j ON j.id=m.job_id LEFT JOIN products p ON p.id=m.product_id
+        WHERE COALESCE(m.qty_required,0)>COALESCE(m.qty_received,0)
+        ORDER BY (COALESCE(m.qty_required,0)-COALESCE(m.qty_received,0)) DESC,j.job_no
+        """
+    )
+    active_blockers = safe_df_query(
+        """
+        SELECT j.job_no AS "Job",COALESCE(js.stage_name,'Whole job') AS "Stage",
+               u.blocker_type AS "Blocker",u.blocker_notes AS "Details",u.update_date AS "Date"
+        FROM stage_progress_updates u
+        JOIN jobs j ON j.id=u.job_id LEFT JOIN job_stages js ON js.id=u.job_stage_id
+        WHERE COALESCE(u.blocker_status,'None')='Active' AND COALESCE(u.blocker_type,'')<>''
+        ORDER BY u.update_date,u.id
+        """
+    )
+    today_staff = safe_df_query(
+        """
+        SELECT e.name AS "Employee",j.job_no AS "Job",COALESCE(js.stage_name,'Whole job') AS "Stage",
+               COALESCE(s.start_time,'') AS "Start",COALESCE(s.finish_time,'') AS "Finish",
+               COALESCE(s.site_role,e.role,'Painter') AS "Role"
+        FROM staff_schedule s JOIN employees e ON e.id=s.employee_id
+        LEFT JOIN jobs j ON j.id=s.job_id LEFT JOIN job_stages js ON js.id=s.job_stage_id
+        WHERE s.schedule_date=? OR (? BETWEEN COALESCE(s.period_start,'') AND COALESCE(s.period_end,''))
+        ORDER BY e.name,s.start_time
+        """,
+        (today_text, today_text),
+    )
+    overdue_claims = safe_df_query(
+        """
+        SELECT j.job_no AS "Job",c.claim_no AS "Claim",c.due_date AS "Due",
+               COALESCE(c.amount_ex_gst,0) AS "Outstanding"
+        FROM invoice_claims c JOIN jobs j ON j.id=c.job_id
+        WHERE LOWER(COALESCE(c.status,'')) NOT IN ('paid','void','cancelled')
+          AND COALESCE(c.due_date,'')<>'' AND c.due_date<?
+        ORDER BY c.due_date,c.id
+        """,
+        (today_text,),
+    )
+
+    try:
+        costs = pb_job_cost_frame()
+    except Exception:
+        costs = pd.DataFrame()
+    risks = pd.DataFrame()
+    if not costs.empty:
+        risks = costs[
+            costs["Health"].isin(["Red", "Orange"])
+            & ~costs["Status"].astype(str).str.lower().isin(closed_statuses)
+        ].copy()
+        risks["_rank"] = risks["Health"].map({"Red": 0, "Orange": 1}).fillna(2)
+        risks = risks.sort_values(["_rank", "End Date", "Job No"])
+
+    progress_candidates = active_jobs
+    if not risks.empty:
+        priority_ids = set(risks["job_id"].astype(int).tolist())
+        priority = active_jobs[active_jobs["job_id"].astype(int).isin(priority_ids)]
+        other = active_jobs[~active_jobs["job_id"].astype(int).isin(priority_ids)]
+        progress_candidates = pd.concat([priority, other], ignore_index=True)
+    progress = (
+        dashboard_job_progress(progress_candidates)
+        if not progress_candidates.empty else pd.DataFrame()
+    )
+    attention_count = len(risks) if not risks.empty else 0
+    metric_cols = st.columns(6)
+    metric_cols[0].metric("Active Jobs", len(active_jobs))
+    metric_cols[1].metric("Jobs Needing Attention", attention_count)
+    metric_cols[2].metric("Open Staff Tasks", len(open_requests))
+    metric_cols[3].metric("Timesheets Awaiting", int(pending_timesheets["Entries"].sum()) if not pending_timesheets.empty else 0)
+    metric_cols[4].metric("Paint Orders Pending", len(pending_orders))
+    metric_cols[5].metric("Active Blockers", len(active_blockers))
+
+    left, middle, right = st.columns(3)
+    with left:
+        with st.container(border=True):
+            st.markdown("#### Crucial Jobs")
+            if risks.empty:
+                st.success("No red or orange jobs.")
+            else:
+                st.dataframe(
+                    risks[["Job No", "Job Name", "Health", "Health Notes", "End Date"]].head(6),
+                    width="stretch", hide_index=True,
+                )
+        with st.container(border=True):
+            st.markdown("#### Paint to Order")
+            if pending_orders.empty and material_shortages.empty:
+                st.success("No outstanding paint or material orders.")
+            else:
+                if not pending_orders.empty:
+                    st.caption("Orders awaiting completion")
+                    st.dataframe(pending_orders.drop(columns=["id"]).head(5), width="stretch", hide_index=True)
+                if not material_shortages.empty:
+                    st.caption("Required quantity not yet received")
+                    st.dataframe(material_shortages.head(5), width="stretch", hide_index=True)
+        with st.container(border=True):
+            st.markdown("#### Today’s Staff")
+            if today_staff.empty:
+                st.info("No staff scheduled today.")
+            else:
+                st.metric("People Scheduled", int(today_staff["Employee"].nunique()))
+                st.dataframe(today_staff.head(8), width="stretch", hide_index=True)
+
+    with middle:
+        with st.container(border=True):
+            st.markdown("#### Tasks to Complete")
+            if open_requests.empty:
+                st.success("No open employee requests.")
+            else:
+                st.dataframe(open_requests.drop(columns=["id"]).head(7), width="stretch", hide_index=True)
+        with st.container(border=True):
+            st.markdown("#### Job Progress")
+            st.caption("Physical completion compared with progress earned by used hours.")
+            if progress.empty:
+                st.info("Add job stages and field progress to populate this widget.")
+            else:
+                st.dataframe(progress.head(7), width="stretch", hide_index=True)
+        with st.container(border=True):
+            st.markdown("#### Active Site Blockers")
+            if active_blockers.empty:
+                st.success("No active blockers reported.")
+            else:
+                st.dataframe(active_blockers.head(6), width="stretch", hide_index=True)
+
+    with right:
+        with st.container(border=True):
+            st.markdown("#### Timesheets")
+            if pending_timesheets.empty:
+                st.success("No submitted timesheets awaiting review.")
+            else:
+                t1, t2 = st.columns(2)
+                t1.metric("Entries", int(pending_timesheets["Entries"].sum()))
+                t2.metric("Hours", f"{float(pending_timesheets['Hours'].sum()):,.1f}")
+                st.dataframe(pending_timesheets.head(7), width="stretch", hide_index=True)
+        with st.container(border=True):
+            st.markdown("#### Overhead & Profit")
+            settings = operating_setting_values()
+            monthly_overhead = sum(
+                settings[key] for key in OPERATING_SETTING_DEFAULTS if key.startswith("overhead_")
+            )
+            metrics = overhead_recovery_metrics(
+                monthly_overhead=monthly_overhead,
+                painter_count=settings["painter_count"],
+                paid_hours_per_week=settings["paid_hours_week"],
+                productive_utilisation_percent=settings["productive_utilisation"],
+                production_value_target=settings["production_value_target"],
+                planning_hourly_rate=settings["planning_hourly_rate"],
+            )
+            o1, o2 = st.columns(2)
+            o1.metric("Monthly Overheads", f"${monthly_overhead:,.0f}")
+            o2.metric("Overhead / Paid Hour", f"${metrics['paid_hour_overhead_recovery']:,.2f}")
+            o3, o4 = st.columns(2)
+            o3.metric("At Productive Utilisation", f"${metrics['productive_hour_overhead_recovery']:,.2f}/h")
+            o4.metric("Recommended Recovery", f"${metrics['recommended_overhead_recovery']:,.2f}/h")
+            st.metric(
+                "Profit at Current Target",
+                f"${metrics['profit_per_hour_paid_basis']:,.2f}/h",
+                f"${metrics['profit_per_day_paid_basis']:,.2f} per painter-day · {metrics['profit_margin_paid_basis']:.1f}%",
+            )
+            st.caption(
+                f"Bridge: ${metrics['production_value_per_hour']:,.2f} completed work − "
+                f"${metrics['planning_hourly_rate']:,.2f} planning labour − "
+                f"${metrics['paid_hour_overhead_recovery']:,.2f} overhead. At "
+                f"{settings['productive_utilisation']:.0f}% productive utilisation, profit is "
+                f"${metrics['profit_per_hour_productive_basis']:,.2f}/h."
+            )
+            st.caption(
+                "Only include wages in monthly overhead when they are additional to the planning "
+                "labour rate. Set wage overhead to $0 if the same painters' wages are already "
+                "covered by that hourly rate, so wages are not counted twice."
+            )
+            with st.expander("Edit operating assumptions"):
+                if not is_manager_or_admin():
+                    st.info("A manager or admin can change these business assumptions.")
+                else:
+                    with st.form("dashboard_operating_settings"):
+                        edited = {}
+                        for key, details in OPERATING_SETTING_DEFAULTS.items():
+                            label, _, _, unit, _ = details
+                            edited[key] = st.number_input(
+                                f"{label} ({unit})", min_value=0.0,
+                                value=float(settings[key]), step=1.0,
+                                key=f"operating_setting_{key}",
+                            )
+                        settings_submitted = st.form_submit_button("Save Operating Assumptions")
+                    if settings_submitted:
+                        if edited["painter_count"] <= 0 or edited["paid_hours_week"] <= 0:
+                            pb_error("Painter count and paid hours must be greater than zero.")
+                        elif edited["productive_utilisation"] <= 0 or edited["productive_utilisation"] > 100:
+                            pb_error("Productive utilisation must be between 0 and 100%.")
+                        elif edited["production_value_target"] <= 0:
+                            pb_error("The completed-work target must be greater than zero.")
+                        else:
+                            save_operating_settings(edited)
+                            pb_success("Operating assumptions saved.")
+                            refresh()
+        with st.container(border=True):
+            st.markdown("#### Overdue Claims")
+            if overdue_claims.empty:
+                st.success("No overdue unpaid claims.")
+            else:
+                st.metric("Outstanding", f"${float(overdue_claims['Outstanding'].sum()):,.0f}")
+                st.dataframe(overdue_claims.head(6), width="stretch", hide_index=True)
+
+
 JOB_STATUS_OPTIONS = [
     "Not Started", "Quoted", "Booked", "Active", "On Hold",
     "Completed", "Invoiced", "Paid", "Archived",
@@ -14277,7 +14862,7 @@ def render_selectable_job_details(job_details, job_id):
         new_email = b3.text_input("Email", value=str(row.get("Email", "") or ""))
         new_terms = b4.text_input("Terms", value=str(row.get("Terms", "") or ""))
         new_notes = st.text_area("Notes", value=str(row.get("Notes", "") or ""))
-        save_details = st.form_submit_button("Save job details", type="primary", use_container_width=True)
+        save_details = st.form_submit_button("Save job details", type="primary", width="stretch")
 
     if save_details:
         if not new_job_no.strip() or not new_job_name.strip():
@@ -14366,7 +14951,7 @@ def job_production_settings(job_id):
     baseline = safe_df_query(
         """
         SELECT COALESCE(production_day_hours, 8) AS day_hours,
-               COALESCE(production_value_target, 900) AS value_target
+               COALESCE(production_value_target, 1000) AS value_target
         FROM estimate_baselines
         WHERE job_id=? AND COALESCE(active,1)=1
         ORDER BY locked_at DESC,id DESC LIMIT 1
@@ -14382,7 +14967,7 @@ def job_production_settings(job_id):
     current = safe_df_query(
         """
         SELECT COALESCE(production_day_hours, 8) AS day_hours,
-               COALESCE(production_value_target, 900) AS value_target
+               COALESCE(production_value_target, 1000) AS value_target
         FROM estimate_working_sheets
         WHERE job_id=? AND COALESCE(archived,0)=0
         ORDER BY CASE LOWER(COALESCE(status,'')) WHEN 'approved' THEN 0 ELSE 1 END,id DESC
@@ -14503,7 +15088,7 @@ def estimate_baselines_dataframe(job_id):
                COALESCE(b.revision,'') AS "Revision",
                COALESCE(b.total_ex_gst,0) AS "Total Ex GST",
                COALESCE(b.labour_hours,0) AS "Labour Hours",
-               COALESCE(b.production_value_target,900) AS "$ / Painter Day",
+               COALESCE(b.production_value_target,1000) AS "$ / Painter Day",
                CASE WHEN COALESCE(b.active,1)=1 THEN 'Active' ELSE 'Superseded' END AS "Status",
                b.locked_at AS "Locked At",
                COALESCE(b.locked_by,'') AS "Locked By",
@@ -14827,7 +15412,7 @@ def render_job_purchase_orders_panel(job_id):
             po_status = p4.selectbox("PO Status", JOB_PO_STATUS_OPTIONS, index=1)
             po_received = p5.date_input("Received Date", value=None, format="DD/MM/YYYY")
             po_notes = st.text_area("PO Notes")
-            add_po = st.form_submit_button("Add purchase order", use_container_width=True)
+            add_po = st.form_submit_button("Add purchase order", width="stretch")
         if add_po:
             clean_number = po_number.strip()
             if not clean_number:
@@ -14916,7 +15501,7 @@ def render_job_purchase_orders_panel(job_id):
             save_po = st.form_submit_button(
                 "Save purchase order",
                 type="primary",
-                use_container_width=True,
+                width="stretch",
             )
         if save_po:
             clean_number = edit_number.strip()
@@ -14968,7 +15553,7 @@ def render_job_purchase_orders_panel(job_id):
             "Delete selected purchase order",
             key=f"delete_job_po_{po_id}",
             disabled=po_in_use > 0 or not delete_po_confirmed,
-            use_container_width=True,
+            width="stretch",
         ):
             execute(
                 "DELETE FROM job_purchase_orders WHERE id = ? AND job_id = ?",
@@ -14998,7 +15583,7 @@ def render_estimate_baseline_panel(estimate_id, job_id, current):
             lock_baseline = st.form_submit_button(
                 "Lock current estimate as active baseline",
                 type="primary",
-                use_container_width=True,
+                width="stretch",
             )
         if lock_baseline:
             if not baseline_name.strip():
@@ -15051,7 +15636,7 @@ def render_job_stage_templates_panel(job_id, stages):
                 template_notes = st.text_area("Template Notes")
                 save_template = st.form_submit_button(
                     "Save current stages as template",
-                    use_container_width=True,
+                    width="stretch",
                 )
             if save_template:
                 clean_name = template_name.strip()
@@ -15155,7 +15740,7 @@ def render_job_stage_templates_panel(job_id, stages):
         if a1.button(
             "Apply selected template to this job",
             type="primary",
-            use_container_width=True,
+            width="stretch",
             key=f"apply_stage_template_{job_id}_{template_id}",
         ):
             existing_names = {
@@ -15196,7 +15781,7 @@ def render_job_stage_templates_panel(job_id, stages):
         if a2.button(
             "Remove selected template",
             disabled=not confirm_delete_template,
-            use_container_width=True,
+            width="stretch",
             key=f"delete_stage_template_{template_id}",
         ):
             execute("DELETE FROM job_stage_template_items WHERE template_id=?", (template_id,))
@@ -15333,7 +15918,7 @@ def render_stage_updates_panel(job_id, employee_mode=False, key_prefix="stage_up
         submit_update = st.form_submit_button(
             "Save stage update",
             type="primary",
-            use_container_width=True,
+            width="stretch",
         )
 
     if submit_update:
@@ -15493,7 +16078,7 @@ def render_stage_updates_panel(job_id, employee_mode=False, key_prefix="stage_up
             "Delete selected stage update",
             disabled=not confirm_delete,
             key=f"delete_stage_update_{update_id}",
-            use_container_width=True,
+            width="stretch",
         ):
             execute(
                 "UPDATE job_photos SET stage_progress_update_id=NULL WHERE stage_progress_update_id=?",
@@ -15693,7 +16278,7 @@ def render_operational_alerts_panel(job_id):
         if st.button(
             "Acknowledge selected alert",
             type="primary",
-            use_container_width=True,
+            width="stretch",
             key=f"ack_alert_{job_id}_{selected['alert_key']}",
         ):
             execute(
@@ -15770,7 +16355,7 @@ def render_stage_progress_claims_panel(job_id):
             create_claim = st.form_submit_button(
                 "Create claim from selected stages",
                 type="primary",
-                use_container_width=True,
+                width="stretch",
             )
         if create_claim:
             selected_claims = edited[edited["Include"].fillna(False).astype(bool)].copy()
@@ -15920,7 +16505,7 @@ def historical_production_rates_dataframe():
             "Completed Qty": total_qty,
             "Actual Qty / Painter Day": units_per_day,
             "Actual Sell Value / Painter Day": value_per_day,
-            "Against $900 Target": value_per_day - DEFAULT_VALUE_TARGET,
+            "Against $1,000 Target": value_per_day - DEFAULT_VALUE_TARGET,
             "Confidence": "Established" if len(group) >= 10 else ("Building" if len(group) >= 3 else "Early sample"),
         })
     return pd.DataFrame(rows).sort_values(["Work Type", "Substrate", "Coating System"])
@@ -15930,7 +16515,7 @@ def render_historical_production_rates():
     with st.expander("Historical production rates across completed work", expanded=False):
         st.caption(
             "JobHub learns actual m², lineal-metre and item output from stage updates. "
-            "Rates are weighted by painter-hours and compared with the profit-inclusive $900 target."
+            "Rates are weighted by painter-hours and compared with the profit-inclusive $1,000 target."
         )
         rates = historical_production_rates_dataframe()
         if rates.empty:
@@ -15942,7 +16527,7 @@ def render_historical_production_rates():
             hide_index=True,
             column_config={
                 "Actual Sell Value / Painter Day": st.column_config.NumberColumn(format="$%.2f"),
-                "Against $900 Target": st.column_config.NumberColumn(format="$%.2f"),
+                "Against $1,000 Target": st.column_config.NumberColumn(format="$%.2f"),
             },
         )
 
@@ -16016,7 +16601,7 @@ def render_job_stages_panel(job_id):
                 min_value=0.0,
                 step=8.0,
                 value=0.0,
-                help="Leave at 0 to calculate hours automatically from Job % and the $900 painter-day target.",
+                help="Leave at 0 to calculate hours automatically from Job % and the $1,000 painter-day target.",
             )
             stage_po_label = st.selectbox(
                 "Purchase Order",
@@ -16030,7 +16615,7 @@ def render_job_stages_panel(job_id):
             add_stage = st.form_submit_button(
                 "Add stage",
                 type="primary",
-                use_container_width=True,
+                width="stretch",
             )
         if add_stage:
             clean_name = stage_name.strip()
@@ -16195,7 +16780,7 @@ def render_job_stages_panel(job_id):
         save_stage = st.form_submit_button(
             "Save stage",
             type="primary",
-            use_container_width=True,
+            width="stretch",
         )
     if save_stage:
         clean_name = edit_name.strip()
@@ -16257,7 +16842,7 @@ def render_job_stages_panel(job_id):
         "Delete selected stage",
         key=f"delete_job_stage_{stage_id}",
         disabled=stage_in_use > 0 or not confirm_delete,
-        use_container_width=True,
+        width="stretch",
     ):
         execute("DELETE FROM job_stages WHERE id = ? AND job_id = ?", (stage_id, job_id))
         pb_success(f"Deleted stage: {selected['Stage Name']}.")
@@ -16576,21 +17161,6 @@ def render_job_linked_info(job_id, expanded=True):
         ORDER BY id DESC
     """, (job_id,))
 
-    schedule_df = safe_df_query("""
-        SELECT s.schedule_date AS "Date",
-               e.name AS "Employee",
-               COALESCE(js.stage_name, 'Whole Job') AS "Stage",
-               s.start_time AS "Start",
-               s.finish_time AS "Finish",
-               s.site_role AS "Role",
-               s.notes AS "Notes"
-        FROM staff_schedule s
-        JOIN employees e ON e.id = s.employee_id
-        LEFT JOIN job_stages js ON js.id = s.job_stage_id
-        WHERE s.job_id = ?
-        ORDER BY s.schedule_date DESC, e.name
-    """, (job_id,))
-
     photos_meta = safe_df_query("""
         SELECT id AS "Photo ID",
                photo_name AS "Photo Name",
@@ -16643,10 +17213,7 @@ def render_job_linked_info(job_id, expanded=True):
 
 
         st.markdown("### Staff Schedule")
-        if schedule_df.empty:
-            st.info("No staff schedule entries saved for this job.")
-        else:
-            st.dataframe(schedule_df, width="stretch", hide_index=True)
+        render_job_folder_schedule_editor(job_id, get_current_user())
 
     with tab_stages:
         st.markdown("### Job Stages and Purchase Orders")
@@ -17713,35 +18280,7 @@ elif menu == "Job Folders":
 
 
 elif menu == "Dashboard":
-    dashboard_counts = df_query("""
-        SELECT
-            (SELECT COUNT(*) FROM jobs) AS jobs_count,
-            (SELECT COUNT(*) FROM builders_clients) AS contacts_count,
-            (SELECT COUNT(*) FROM employees) AS employees_count,
-            (SELECT COUNT(*) FROM products) AS products_count
-    """)
-    counts = dashboard_counts.iloc[0] if not dashboard_counts.empty else {}
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Jobs", int(counts.get("jobs_count", 0) or 0))
-    c2.metric("Builders / Clients", int(counts.get("contacts_count", 0) or 0))
-    c3.metric("Employees", int(counts.get("employees_count", 0) or 0))
-    c4.metric("Products", int(counts.get("products_count", 0) or 0))
-
-    st.subheader("Open Jobs")
-    active = df_query("""
-        SELECT j.job_no AS 'Job No',
-               j.job_name AS 'Job Name',
-               bc.name AS 'Builder / Client',
-               j.site_address AS 'Site Address',
-               j.status AS 'Status',
-               j.leading_hand AS 'Leading Hand',
-               j.start_date AS 'Start Date'
-        FROM jobs j
-        LEFT JOIN builders_clients bc ON bc.id = j.builder_client_id
-        WHERE j.status NOT IN ('Completed', 'Paid', 'Archived')
-        ORDER BY j.job_no
-    """)
-    st.dataframe(active, width="stretch", hide_index=True)
+    render_operational_dashboard()
 
 
 # =============================
@@ -19034,7 +19573,7 @@ elif menu == "Material Costs":
                         "Mark Entire Order as Delivered",
                         key=f"material_order_delivered_{selected_order_id}",
                         type="primary",
-                        use_container_width=True,
+                        width="stretch",
                     ):
                         execute(
                             "UPDATE purchase_order_lines SET received_qty = qty WHERE purchase_order_id = ?",

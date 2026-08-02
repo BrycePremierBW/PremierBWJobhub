@@ -83,7 +83,7 @@ def render_selectable_job_details(job_details, job_id):
         new_email = b3.text_input("Email", value=str(row.get("Email", "") or ""))
         new_terms = b4.text_input("Terms", value=str(row.get("Terms", "") or ""))
         new_notes = st.text_area("Notes", value=str(row.get("Notes", "") or ""))
-        save_details = st.form_submit_button("Save job details", type="primary", use_container_width=True)
+        save_details = st.form_submit_button("Save job details", type="primary", width="stretch")
     if save_details:
         if not new_job_no.strip() or not new_job_name.strip():
             pb_error("Job Number and Job Name are required.")

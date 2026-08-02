@@ -13,7 +13,7 @@ from typing import Any
 
 DEFAULT_DAY_HOURS = 8.0
 DEFAULT_VALUE_LOW = 800.0
-DEFAULT_VALUE_TARGET = 900.0
+DEFAULT_VALUE_TARGET = 1000.0
 DEFAULT_VALUE_HIGH = 1000.0
 
 
@@ -124,6 +124,123 @@ def crew_duration_days(
     if crew <= 0 or hours <= 0:
         raise ValueError("Crew size and day hours must be greater than zero.")
     return budget / (crew * hours)
+
+
+def budget_production_allowance(
+    *,
+    contract_value: Any,
+    material_allowance: Any = 0,
+    sundries_allowance: Any = 0,
+    access_allowance: Any = 0,
+    subcontractor_allowance: Any = 0,
+    measured_quantity: Any = 0,
+    measurement_unit: str = "m²",
+    day_hours: Any = DEFAULT_DAY_HOURS,
+    value_target: Any = DEFAULT_VALUE_TARGET,
+    planning_hourly_rate: Any = 60,
+) -> dict[str, float | str]:
+    """Cross-check a locked contract against the profit-inclusive production target."""
+    settings = validate_production_targets(
+        day_hours=day_hours,
+        value_low=value_target,
+        value_target=value_target,
+        value_high=value_target,
+    )
+    contract = _non_negative_number(contract_value, "Contract value")
+    materials = _non_negative_number(material_allowance, "Material allowance")
+    sundries = _non_negative_number(sundries_allowance, "Sundries allowance")
+    access = _non_negative_number(access_allowance, "Access allowance")
+    subcontractors = _non_negative_number(
+        subcontractor_allowance, "Subcontractor allowance"
+    )
+    quantity = _non_negative_number(measured_quantity, "Measured quantity")
+    planning_rate = _non_negative_number(planning_hourly_rate, "Planning hourly rate")
+    allowances = materials + sundries + access + subcontractors
+    painter_value = max(0.0, contract - allowances)
+    painter_days = painter_value / settings["value_target"] if painter_value else 0.0
+    allowed_hours = painter_days * settings["day_hours"]
+    net_rate = painter_value / quantity if quantity else 0.0
+    return {
+        "contract_value": contract,
+        "non_painter_allowances": allowances,
+        "painter_production_value": painter_value,
+        "allowed_painter_days": painter_days,
+        "allowed_painter_hours": allowed_hours,
+        "planning_labour_cost": allowed_hours * planning_rate,
+        "measured_quantity": quantity,
+        "measurement_unit": str(measurement_unit or "m²"),
+        "net_sell_value_per_unit": net_rate,
+        "target_units_per_day": settings["value_target"] / net_rate if net_rate > 0 else 0.0,
+        "target_units_per_hour": (
+            settings["value_target"] / net_rate / settings["day_hours"]
+            if net_rate > 0 else 0.0
+        ),
+    }
+
+
+def overhead_recovery_metrics(
+    *,
+    monthly_overhead: Any,
+    painter_count: Any,
+    paid_hours_per_week: Any,
+    productive_utilisation_percent: Any = 100,
+    production_value_target: Any = DEFAULT_VALUE_TARGET,
+    day_hours: Any = DEFAULT_DAY_HOURS,
+    planning_hourly_rate: Any = 60,
+) -> dict[str, float]:
+    """Return overhead recovery and the resulting production profit bridge."""
+    overhead = _non_negative_number(monthly_overhead, "Monthly overhead")
+    painters = _non_negative_number(painter_count, "Painter count")
+    weekly_hours = _non_negative_number(paid_hours_per_week, "Paid hours per week")
+    utilisation = _non_negative_number(
+        productive_utilisation_percent, "Productive utilisation"
+    )
+    target = _non_negative_number(production_value_target, "Production value target")
+    hours_per_day = _non_negative_number(day_hours, "Day hours")
+    planning_rate = _non_negative_number(planning_hourly_rate, "Planning hourly rate")
+    if painters <= 0 or weekly_hours <= 0 or hours_per_day <= 0:
+        raise ValueError("Painters, paid weekly hours and day hours must be greater than zero.")
+    if utilisation <= 0 or utilisation > 100:
+        raise ValueError("Productive utilisation must be greater than zero and at most 100%.")
+
+    paid_hours_per_month = painters * weekly_hours * 52.0 / 12.0
+    productive_hours_per_month = paid_hours_per_month * utilisation / 100.0
+    paid_hour_recovery = overhead / paid_hours_per_month
+    productive_hour_recovery = overhead / productive_hours_per_month
+    recommended_recovery = math.ceil(productive_hour_recovery * 2.0) / 2.0
+    production_value_per_hour = target / hours_per_day
+    profit_after_paid_hour_overhead = (
+        production_value_per_hour - planning_rate - paid_hour_recovery
+    )
+    profit_after_productive_hour_overhead = (
+        production_value_per_hour - planning_rate - productive_hour_recovery
+    )
+    profit_after_recommended_overhead = (
+        production_value_per_hour - planning_rate - recommended_recovery
+    )
+
+    def margin(profit: float) -> float:
+        return profit / production_value_per_hour * 100.0 if production_value_per_hour else 0.0
+
+    return {
+        "monthly_overhead": overhead,
+        "paid_hours_per_month": paid_hours_per_month,
+        "productive_hours_per_month": productive_hours_per_month,
+        "paid_hour_overhead_recovery": paid_hour_recovery,
+        "productive_hour_overhead_recovery": productive_hour_recovery,
+        "recommended_overhead_recovery": recommended_recovery,
+        "production_value_per_hour": production_value_per_hour,
+        "planning_hourly_rate": planning_rate,
+        "profit_per_hour_paid_basis": profit_after_paid_hour_overhead,
+        "profit_per_day_paid_basis": profit_after_paid_hour_overhead * hours_per_day,
+        "profit_margin_paid_basis": margin(profit_after_paid_hour_overhead),
+        "profit_per_hour_productive_basis": profit_after_productive_hour_overhead,
+        "profit_per_day_productive_basis": profit_after_productive_hour_overhead * hours_per_day,
+        "profit_margin_productive_basis": margin(profit_after_productive_hour_overhead),
+        "profit_per_hour_recommended": profit_after_recommended_overhead,
+        "profit_per_day_recommended": profit_after_recommended_overhead * hours_per_day,
+        "profit_margin_recommended": margin(profit_after_recommended_overhead),
+    }
 
 
 def measured_progress(completed_quantity: Any, target_quantity: Any) -> dict[str, float]:

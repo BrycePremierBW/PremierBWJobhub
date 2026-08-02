@@ -310,7 +310,7 @@ def pb_control_budget_lock(df):
         quoted_sundries = c6.number_input("Sundries / Consumables", min_value=0.0, value=pb_float(current.get("quoted_sundries", 0)), step=50.0)
 
         target_gp = 0.0
-        st.caption("The $900 completed-work target already includes profit; no GP percentage is added.")
+        st.caption("The $1,000 completed-work target already includes profit; no GP percentage is added.")
         notes = st.text_area("Budget Notes", value=str(current.get("notes", "") or ""))
         submitted = st.form_submit_button("Save / Lock Job Budget")
 

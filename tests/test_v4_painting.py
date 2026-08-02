@@ -10,6 +10,14 @@ from jobhub_v4.paint import (
     colour_order_allowed,
     optimise_pack_mix,
 )
+from jobhub_v4.measurements import (
+    EXTERNAL_SUBSTRATE_AREA,
+    INTERNAL_FLOOR_AREA,
+    MEASUREMENT_BASIS_OPTIONS,
+    normalised_work_unit,
+    recommended_measurement_basis,
+    work_unit_for_measurement_basis,
+)
 from jobhub_v4.revisions import compare_revisions
 from jobhub_v4.schema import ensure_v4_schema
 
@@ -33,6 +41,56 @@ class PaintQuantityTests(unittest.TestCase):
                 coats=2,
                 coverage_sqm_per_litre=0,
             )
+
+
+class MeasurementBasisTests(unittest.TestCase):
+    def test_square_metres_default_to_substrate_area(self):
+        for unit in ("m²", "m2", "sqm", "substrate m²"):
+            with self.subTest(unit=unit):
+                self.assertEqual(normalised_work_unit(unit), EXTERNAL_SUBSTRATE_AREA)
+
+    def test_floor_area_units_remain_distinct(self):
+        for unit in ("floor m²", "Floor sqm", "m2 floor area"):
+            with self.subTest(unit=unit):
+                self.assertEqual(normalised_work_unit(unit), INTERNAL_FLOOR_AREA)
+
+    def test_lineal_and_item_units_remain_available(self):
+        self.assertEqual(normalised_work_unit("lm"), "Lineal m")
+        self.assertEqual(normalised_work_unit("doors"), "Item")
+        self.assertEqual(
+            MEASUREMENT_BASIS_OPTIONS,
+            (INTERNAL_FLOOR_AREA, EXTERNAL_SUBSTRATE_AREA, "Lineal m", "Item"),
+        )
+
+    def test_internal_context_defaults_generic_m2_to_floor_area(self):
+        self.assertEqual(
+            recommended_measurement_basis("m²", stage_name="Internal 1"),
+            INTERNAL_FLOOR_AREA,
+        )
+        self.assertEqual(
+            recommended_measurement_basis("m²", context="Internal walls and ceilings"),
+            INTERNAL_FLOOR_AREA,
+        )
+
+    def test_external_context_defaults_generic_m2_to_substrate_area(self):
+        self.assertEqual(
+            recommended_measurement_basis("m²", stage_name="External Upper"),
+            EXTERNAL_SUBSTRATE_AREA,
+        )
+        self.assertEqual(
+            work_unit_for_measurement_basis(EXTERNAL_SUBSTRATE_AREA),
+            "substrate m²",
+        )
+
+    def test_explicit_source_basis_beats_stage_default(self):
+        self.assertEqual(
+            recommended_measurement_basis("substrate m²", stage_name="Internal 1"),
+            EXTERNAL_SUBSTRATE_AREA,
+        )
+        self.assertEqual(
+            recommended_measurement_basis("floor m²", stage_name="External Upper"),
+            INTERNAL_FLOOR_AREA,
+        )
 
 
 class PackOptimisationTests(unittest.TestCase):

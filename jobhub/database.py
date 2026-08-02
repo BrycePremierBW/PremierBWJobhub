@@ -619,7 +619,7 @@ def init_db():
     ensure_column("estimate_working_sheets", "archived_by", "TEXT")
     ensure_column("estimate_working_sheets", "production_day_hours", "REAL DEFAULT 8")
     ensure_column("estimate_working_sheets", "production_value_low", "REAL DEFAULT 800")
-    ensure_column("estimate_working_sheets", "production_value_target", "REAL DEFAULT 900")
+    ensure_column("estimate_working_sheets", "production_value_target", "REAL DEFAULT 1000")
     ensure_column("estimate_working_sheets", "production_value_high", "REAL DEFAULT 1000")
 
     cur.execute("""
@@ -946,7 +946,7 @@ def init_db():
         total_inc_gst REAL DEFAULT 0,
         labour_hours REAL DEFAULT 0,
         production_day_hours REAL DEFAULT 8,
-        production_value_target REAL DEFAULT 900,
+        production_value_target REAL DEFAULT 1000,
         active INTEGER NOT NULL DEFAULT 1,
         locked_at TEXT NOT NULL,
         locked_by TEXT,

@@ -6,40 +6,35 @@ from io import BytesIO
 import pandas as pd
 import streamlit as st
 
+from jobhub_progress_rules import (
+    EXTERNAL_STAGES,
+    INTERNAL_STAGES,
+    STATUS_OPTIONS,
+    combine_internal_progress,
+    weighted_percent,
+)
 from jobhub_production import expected_progress, line_production_metrics
-
-
-INTERNAL_STAGES = [
-    ("sealer", "Sealer", 15.0),
-    ("spray_walls", "Spray Walls", 25.0),
-    ("spray_ceilings", "Spray Ceilings", 20.0),
-    ("spray_gloss", "Spray Gloss", 15.0),
-    ("pc", "PC", 15.0),
-    ("touchups", "Touch-ups", 10.0),
-]
-EXTERNAL_STAGES = [
-    ("prep", "Preparation", 15.0),
-    ("primer", "Primer / Sealer", 20.0),
-    ("first_coat", "First Coat", 25.0),
-    ("final_coat", "Final Coat", 30.0),
-    ("touchups", "Touch-ups", 10.0),
-]
-STATUS_FACTOR = {"Not started": 0.0, "In progress": 0.5, "Complete": 1.0}
-STATUS_OPTIONS = list(STATUS_FACTOR)
 
 
 def _now():
     return datetime.now().isoformat(timespec="seconds")
 
 
-def _status_factor(value):
-    return STATUS_FACTOR.get(str(value or "Not started"), 0.0)
-
-
 def _weighted_percent(row, stages):
-    weight_total = sum(stage[2] for stage in stages) or 100.0
-    earned = sum(_status_factor(row.get(stage[0])) * stage[2] for stage in stages)
-    return round(earned / weight_total * 100.0, 2)
+    return weighted_percent(row, stages)
+
+
+def _ensure_progress_column(context, table, column, definition):
+    """Add one portable progress column without rebuilding a live table."""
+    if context.get("USE_POSTGRES"):
+        context["execute"](
+            f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {definition}"
+        )
+        return
+    columns = context["df_query"](f"PRAGMA table_info({table})")
+    existing = set(columns.get("name", pd.Series(dtype=str)).astype(str).tolist())
+    if column not in existing:
+        context["execute"](f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
 @st.cache_resource(show_spinner=False)
@@ -81,12 +76,56 @@ def ensure_progress_schema(_context):
             spray_gloss TEXT DEFAULT 'Not started',
             pc TEXT DEFAULT 'Not started',
             touchups TEXT DEFAULT 'Not started',
+            prepped_sealed TEXT DEFAULT 'Not started',
+            prep_spray_finished TEXT DEFAULT 'Not started',
+            cut_rolled TEXT DEFAULT 'Not started',
+            defects TEXT DEFAULT 'Not started',
+            is_custom INTEGER DEFAULT 0,
+            scope_percent REAL DEFAULT 0,
             notes TEXT,
             updated_at TEXT,
             updated_by TEXT,
             UNIQUE(job_id, dwelling_no),
             FOREIGN KEY(job_id) REFERENCES jobs(id)
         )
+        """
+    )
+    for column, definition in (
+        ("prepped_sealed", "TEXT DEFAULT 'Not started'"),
+        ("prep_spray_finished", "TEXT DEFAULT 'Not started'"),
+        ("cut_rolled", "TEXT DEFAULT 'Not started'"),
+        ("defects", "TEXT DEFAULT 'Not started'"),
+        ("is_custom", "INTEGER DEFAULT 0"),
+        ("scope_percent", "REAL DEFAULT 0"),
+    ):
+        _ensure_progress_column(context, "job_dwelling_progress", column, definition)
+    context["execute"](
+        """
+        UPDATE job_dwelling_progress
+        SET prepped_sealed=COALESCE(NULLIF(sealer,''),'Not started'),
+            prep_spray_finished=CASE
+                WHEN LOWER(COALESCE(spray_walls,'Not started'))='complete'
+                 AND LOWER(COALESCE(spray_ceilings,'Not started'))='complete'
+                 AND LOWER(COALESCE(spray_gloss,'Not started'))='complete' THEN 'Complete'
+                WHEN LOWER(COALESCE(spray_walls,'Not started'))<>'not started'
+                  OR LOWER(COALESCE(spray_ceilings,'Not started'))<>'not started'
+                  OR LOWER(COALESCE(spray_gloss,'Not started'))<>'not started' THEN 'In progress'
+                ELSE 'Not started'
+            END,
+            cut_rolled=COALESCE(NULLIF(pc,''),'Not started'),
+            defects=COALESCE(NULLIF(touchups,''),'Not started')
+        WHERE LOWER(COALESCE(prepped_sealed,'Not started'))='not started'
+          AND LOWER(COALESCE(prep_spray_finished,'Not started'))='not started'
+          AND LOWER(COALESCE(cut_rolled,'Not started'))='not started'
+          AND LOWER(COALESCE(defects,'Not started'))='not started'
+          AND (
+              LOWER(COALESCE(sealer,'Not started'))<>'not started'
+              OR LOWER(COALESCE(spray_walls,'Not started'))<>'not started'
+              OR LOWER(COALESCE(spray_ceilings,'Not started'))<>'not started'
+              OR LOWER(COALESCE(spray_gloss,'Not started'))<>'not started'
+              OR LOWER(COALESCE(pc,'Not started'))<>'not started'
+              OR LOWER(COALESCE(touchups,'Not started'))<>'not started'
+          )
         """
     )
     execute(
@@ -113,6 +152,10 @@ def ensure_progress_schema(_context):
         """
     )
     execute("CREATE INDEX IF NOT EXISTS idx_dwelling_progress_job ON job_dwelling_progress(job_id)")
+    execute(
+        "CREATE INDEX IF NOT EXISTS idx_dwelling_progress_job_custom "
+        "ON job_dwelling_progress(job_id, is_custom, dwelling_no)"
+    )
     execute("CREATE INDEX IF NOT EXISTS idx_external_progress_job ON job_external_progress(job_id)")
     execute(
         "CREATE INDEX IF NOT EXISTS idx_external_progress_job_estimate "
@@ -159,7 +202,12 @@ def _setting(context, job_id):
 
 def _sync_dwellings(context, job_id, count, total_floor_m2, username):
     existing = context["df_query"](
-        "SELECT dwelling_no, floor_m2 FROM job_dwelling_progress WHERE job_id=? ORDER BY dwelling_no",
+        """
+        SELECT dwelling_no, floor_m2
+        FROM job_dwelling_progress
+        WHERE job_id=? AND COALESCE(is_custom,0)=0
+        ORDER BY dwelling_no
+        """,
         (job_id,),
     )
     existing_numbers = set(existing["dwelling_no"].astype(int).tolist()) if not existing.empty else set()
@@ -175,7 +223,10 @@ def _sync_dwellings(context, job_id, count, total_floor_m2, username):
                 (job_id, number, f"Dwelling {number}", default_m2, _now(), username),
             )
     context["execute"](
-        "DELETE FROM job_dwelling_progress WHERE job_id=? AND dwelling_no>?",
+        """
+        DELETE FROM job_dwelling_progress
+        WHERE job_id=? AND dwelling_no>? AND COALESCE(is_custom,0)=0
+        """,
         (job_id, int(count)),
     )
 
@@ -311,7 +362,11 @@ def sync_all_linked_progress(context):
 
 def _summary(context, job_id, settings):
     dwellings = context["df_query"](
-        "SELECT * FROM job_dwelling_progress WHERE job_id=? ORDER BY dwelling_no",
+        """
+        SELECT * FROM job_dwelling_progress
+        WHERE job_id=?
+        ORDER BY COALESCE(is_custom,0), dwelling_no
+        """,
         (job_id,),
     )
     external = context["df_query"](
@@ -326,26 +381,28 @@ def _summary(context, job_id, settings):
         external["progress_percent"] = external.apply(
             lambda row: _weighted_percent(row, EXTERNAL_STAGES), axis=1
         )
-    internal_m2 = float(dwellings["floor_m2"].fillna(0).sum()) if not dwellings.empty else 0.0
-    internal_done = (
-        float((dwellings["floor_m2"].fillna(0) * dwellings["progress_percent"] / 100).sum())
-        if not dwellings.empty else 0.0
-    )
+    internal = combine_internal_progress(dwellings.to_dict("records"))
+    internal_m2 = float(internal["internal_m2"])
+    internal_done = float(internal["internal_done"])
     external_m2 = float(external["measured_m2"].fillna(0).sum()) if not external.empty else 0.0
     external_done = (
         float((external["measured_m2"].fillna(0) * external["progress_percent"] / 100).sum())
         if not external.empty else 0.0
     )
-    internal_pct = internal_done / internal_m2 * 100 if internal_m2 else 0.0
+    internal_pct = float(internal["internal_percent"])
     external_pct = external_done / external_m2 * 100 if external_m2 else 0.0
     iw = float(settings.get("internal_weight_percent") or 65)
     ew = float(settings.get("external_weight_percent") or 35)
-    active_weight = (iw if internal_m2 else 0) + (ew if external_m2 else 0)
+    has_internal_scope = bool(internal_m2 or internal["custom_item_count"])
+    active_weight = (iw if has_internal_scope else 0) + (ew if external_m2 else 0)
     overall = ((internal_pct * iw) + (external_pct * ew)) / active_weight if active_weight else 0.0
     return dwellings, external, {
         "internal_m2": internal_m2,
         "internal_done": internal_done,
         "internal_pct": internal_pct,
+        "internal_floor_pct": float(internal["internal_floor_percent"]),
+        "internal_custom_items": int(internal["custom_item_count"]),
+        "internal_custom_weight": float(internal["custom_weight_percent"]),
         "external_m2": external_m2,
         "external_done": external_done,
         "external_pct": external_pct,
@@ -358,7 +415,7 @@ def _timesheet_expected_progress(context, job_id, estimate_id):
     baseline = context["df_query"](
         """
         SELECT id,estimate_id,COALESCE(production_day_hours,8) AS day_hours,
-               COALESCE(production_value_target,900) AS value_target
+               COALESCE(production_value_target,1000) AS value_target
         FROM estimate_baselines
         WHERE job_id=? AND COALESCE(active,1)=1
         ORDER BY locked_at DESC,id DESC LIMIT 1
@@ -372,7 +429,7 @@ def _timesheet_expected_progress(context, job_id, estimate_id):
         production = {
             "day_hours": float(baseline.iloc[0]["day_hours"] or 8),
             "value_low": 800.0,
-            "value_target": float(baseline.iloc[0]["value_target"] or 900),
+            "value_target": float(baseline.iloc[0]["value_target"] or 1000),
             "value_high": 1000.0,
         }
         lines = context["df_query"](
@@ -390,7 +447,7 @@ def _timesheet_expected_progress(context, job_id, estimate_id):
             """
             SELECT COALESCE(production_day_hours,8) AS day_hours,
                    COALESCE(production_value_low,800) AS value_low,
-                   COALESCE(production_value_target,900) AS value_target,
+                   COALESCE(production_value_target,1000) AS value_target,
                    COALESCE(production_value_high,1000) AS value_high
             FROM estimate_working_sheets WHERE id=?
             """,
@@ -481,6 +538,179 @@ def _render_status_editor(context, df, table, id_column, stages, username, key_p
                 tuple(params),
             )
         context["pb_success"]("Progress saved and percentages recalculated.")
+        context["pb_rerun"]()
+
+
+def _render_custom_internal_items(context, custom, job_id, username):
+    """Create and update stairs or other separately weighted internal items."""
+    st.markdown("#### Separate internal items")
+    st.caption(
+        "Add stairs, feature joinery or other quoted internal work separately. Its internal "
+        "scope percentage is reserved from the floor-m² work; use 0% for tracking only."
+    )
+    existing_weight = (
+        float(custom["scope_percent"].fillna(0).astype(float).sum())
+        if not custom.empty else 0.0
+    )
+    with st.expander("Add a separate internal item", expanded=custom.empty):
+        with st.form(f"add_custom_internal_{job_id}", clear_on_submit=True):
+            a1, a2 = st.columns(2)
+            item_name = a1.text_input("Item name", placeholder="e.g. Stairs")
+            scope_percent = a2.number_input(
+                "Share of internal scope %",
+                min_value=0.0,
+                max_value=100.0,
+                step=1.0,
+                value=0.0,
+                help="The remaining internal percentage stays allocated to the floor-m² work.",
+            )
+            item_notes = st.text_area("Item notes")
+            add_item = st.form_submit_button("Add separate item", type="primary")
+        if add_item:
+            clean_name = item_name.strip()
+            if not clean_name:
+                context["pb_error"]("Enter a name for the separate internal item.")
+            elif existing_weight + float(scope_percent) > 100.0001:
+                context["pb_error"]("Separate internal item percentages cannot total more than 100%.")
+            else:
+                duplicate = context["df_query"](
+                    """
+                    SELECT id FROM job_dwelling_progress
+                    WHERE job_id=? AND COALESCE(is_custom,0)=1
+                      AND LOWER(COALESCE(dwelling_name,''))=LOWER(?)
+                    LIMIT 1
+                    """,
+                    (int(job_id), clean_name),
+                )
+                if not duplicate.empty:
+                    context["pb_error"]("That separate internal item already exists.")
+                else:
+                    minimum = context["df_query"](
+                        "SELECT COALESCE(MIN(dwelling_no),0) AS minimum_no "
+                        "FROM job_dwelling_progress WHERE job_id=?",
+                        (int(job_id),),
+                    )
+                    current_minimum = int(minimum.iloc[0]["minimum_no"] or 0)
+                    custom_number = min(-1, current_minimum - 1)
+                    context["execute"](
+                        """
+                        INSERT INTO job_dwelling_progress
+                        (job_id,dwelling_no,dwelling_name,floor_m2,is_custom,scope_percent,
+                         notes,updated_at,updated_by)
+                        VALUES (?,?,?,?,?,?,?,?,?)
+                        """,
+                        (
+                            int(job_id), custom_number, clean_name, 0.0, 1,
+                            float(scope_percent), item_notes.strip(), _now(), username,
+                        ),
+                    )
+                    context["pb_success"](f"Added separate internal item: {clean_name}.")
+                    context["pb_rerun"]()
+
+    if custom.empty:
+        st.info("No separate internal items have been added.")
+        return
+
+    display_columns = [stage[0] for stage in INTERNAL_STAGES]
+    editor = custom[
+        ["id", "dwelling_name", "scope_percent", *display_columns, "notes"]
+    ].copy()
+    editor = editor.rename(
+        columns={
+            "dwelling_name": "Item",
+            "scope_percent": "Internal Scope %",
+            "notes": "Notes",
+        }
+    )
+    config = {
+        stage[0]: st.column_config.SelectboxColumn(
+            stage[1], options=STATUS_OPTIONS, required=True,
+        )
+        for stage in INTERNAL_STAGES
+    }
+    config.update({
+        "id": None,
+        "Internal Scope %": st.column_config.NumberColumn(
+            "Internal Scope %", min_value=0.0, max_value=100.0, step=1.0,
+        ),
+    })
+    edited = st.data_editor(
+        editor,
+        width="stretch",
+        hide_index=True,
+        disabled=["id"],
+        column_config=config,
+        key=f"custom_internal_editor_{job_id}",
+    )
+    if st.button(
+        "Save separate-item progress",
+        type="primary",
+        key=f"save_custom_internal_{job_id}",
+    ):
+        edited = edited.copy()
+        edited["Internal Scope %"] = pd.to_numeric(
+            edited["Internal Scope %"], errors="coerce"
+        ).fillna(0.0)
+        clean_names = edited["Item"].fillna("").astype(str).str.strip()
+        total_weight = float(edited["Internal Scope %"].sum())
+        if total_weight > 100.0001:
+            context["pb_error"]("Separate internal item percentages cannot total more than 100%.")
+        elif (edited["Internal Scope %"] < 0).any():
+            context["pb_error"]("Separate internal item percentages cannot be negative.")
+        elif (clean_names == "").any():
+            context["pb_error"]("Every separate internal item needs a name.")
+        elif clean_names.str.casefold().duplicated().any():
+            context["pb_error"]("Separate internal item names must be unique.")
+        else:
+            for row_index, row in edited.iterrows():
+                notes_value = row["Notes"]
+                clean_notes = "" if pd.isna(notes_value) else str(notes_value)
+                context["execute"](
+                    """
+                    UPDATE job_dwelling_progress
+                    SET dwelling_name=?,scope_percent=?,prepped_sealed=?,
+                        prep_spray_finished=?,cut_rolled=?,defects=?,notes=?,
+                        updated_at=?,updated_by=?
+                    WHERE id=? AND job_id=? AND COALESCE(is_custom,0)=1
+                    """,
+                    (
+                        clean_names.loc[row_index],
+                        float(row["Internal Scope %"]),
+                        row["prepped_sealed"], row["prep_spray_finished"],
+                        row["cut_rolled"], row["defects"], clean_notes,
+                        _now(), username, int(row["id"]), int(job_id),
+                    ),
+                )
+            context["pb_success"]("Separate internal item progress saved.")
+            context["pb_rerun"]()
+
+    item_options = {
+        str(row["dwelling_name"] or f"Item {int(row['id'])}"): int(row["id"])
+        for _, row in custom.iterrows()
+    }
+    remove_name = st.selectbox(
+        "Separate item to remove",
+        list(item_options.keys()),
+        key=f"remove_custom_internal_select_{job_id}",
+    )
+    remove_id = item_options[remove_name]
+    confirm_remove = st.checkbox(
+        f"Confirm removal of {remove_name}",
+        key=f"confirm_remove_custom_internal_{job_id}_{remove_id}",
+    )
+    if st.button(
+        "Remove selected separate item",
+        disabled=not confirm_remove,
+        key=f"remove_custom_internal_{job_id}_{remove_id}",
+    ):
+        context["execute"](
+            """
+            DELETE FROM job_dwelling_progress
+            WHERE id=? AND job_id=? AND COALESCE(is_custom,0)=1
+            """,
+            (remove_id, int(job_id)),
+        )
+        context["pb_success"](f"Removed separate internal item: {remove_name}.")
         context["pb_rerun"]()
 
 
@@ -596,6 +826,12 @@ def render_progress_tracker(context):
             context, job_id, int(settings["linked_estimate_id"]), username
         )
     dwellings, external, totals = _summary(context, job_id, settings)
+    regular_dwellings = dwellings[
+        dwellings["is_custom"].fillna(0).astype(int) == 0
+    ].copy() if not dwellings.empty else dwellings.copy()
+    custom_internal = dwellings[
+        dwellings["is_custom"].fillna(0).astype(int) == 1
+    ].copy() if not dwellings.empty else dwellings.copy()
     estimate_value = float(job.get("contract_value") or 0)
     baseline_value = context["df_query"](
         """
@@ -616,7 +852,10 @@ def render_progress_tracker(context):
 
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Overall Progress", f"{totals['overall_pct']:.1f}%")
-    c2.metric("Internal", f"{totals['internal_pct']:.1f}%", f"{totals['internal_done']:.1f} / {totals['internal_m2']:.1f} floor m²")
+    internal_detail = f"{totals['internal_done']:.1f} / {totals['internal_m2']:.1f} floor m²"
+    if totals["internal_custom_items"]:
+        internal_detail += f" + {totals['internal_custom_items']} separate item(s)"
+    c2.metric("Internal", f"{totals['internal_pct']:.1f}%", internal_detail)
     c3.metric("External", f"{totals['external_pct']:.1f}%", f"{totals['external_done']:.1f} / {totals['external_m2']:.1f} substrate m²")
     c4.metric("Earned Value", f"${earned_value:,.0f}")
     c5.metric("Remaining Value", f"${max(0, estimate_value-earned_value):,.0f}")
@@ -640,17 +879,18 @@ def render_progress_tracker(context):
     )
     with internal_tab:
         st.caption(
-            "Internal progress is calculated from floor m² and the confirmed stages: "
-            "Sealer, Spray Walls, Spray Ceilings, Spray Gloss, PC and Touch-ups."
+            "Internal floor-m² progress uses: Prepped and sealed 30%, Prep and spray "
+            "finished 30%, Cut and rolled 30%, and Defects 10%."
         )
         _render_status_editor(
-            context, dwellings, "job_dwelling_progress", "id",
+            context, regular_dwellings, "job_dwelling_progress", "id",
             INTERNAL_STAGES, username, f"internal_{job_id}",
         )
+        _render_custom_internal_items(context, custom_internal, job_id, username)
         if not dwellings.empty:
             chart = dwellings[["dwelling_name", "progress_percent"]].rename(
-                columns={"dwelling_name": "Dwelling", "progress_percent": "Progress %"}
-            ).set_index("Dwelling")
+                columns={"dwelling_name": "Internal Item", "progress_percent": "Progress %"}
+            ).set_index("Internal Item")
             st.bar_chart(chart)
     with external_tab:
         st.caption(
@@ -687,8 +927,11 @@ def render_progress_tracker(context):
             [
                 ["Overall progress %", totals["overall_pct"]],
                 ["Internal progress %", totals["internal_pct"]],
+                ["Internal floor-only progress %", totals["internal_floor_pct"]],
                 ["Internal completed floor m²", totals["internal_done"]],
                 ["Internal remaining floor m²", totals["internal_m2"] - totals["internal_done"]],
+                ["Separate internal items", totals["internal_custom_items"]],
+                ["Separate internal scope weighting %", totals["internal_custom_weight"]],
                 ["External progress %", totals["external_pct"]],
                 ["External completed substrate m²", totals["external_done"]],
                 ["External remaining substrate m²", totals["external_m2"] - totals["external_done"]],
@@ -702,7 +945,7 @@ def render_progress_tracker(context):
         output = BytesIO()
         with pd.ExcelWriter(output, engine="openpyxl") as writer:
             summary.to_excel(writer, index=False, sheet_name="Summary")
-            dwellings.to_excel(writer, index=False, sheet_name="Internal Dwellings")
+            dwellings.to_excel(writer, index=False, sheet_name="Internal Progress")
             external.to_excel(writer, index=False, sheet_name="External Substrates")
         output.seek(0)
         st.download_button(

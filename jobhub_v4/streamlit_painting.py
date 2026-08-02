@@ -11,6 +11,13 @@ import pandas as pd
 import streamlit as st
 
 from .handover import build_handover_manifest, build_handover_zip
+from .measurements import (
+    EXTERNAL_SUBSTRATE_AREA,
+    INTERNAL_FLOOR_AREA,
+    MEASUREMENT_BASIS_OPTIONS,
+    recommended_measurement_basis,
+    work_unit_for_measurement_basis,
+)
 from .paint import calculate_paint_quantity, colour_order_allowed, optimise_pack_mix
 from .revisions import compare_revisions
 from .schema import ensure_v4_schema
@@ -111,7 +118,7 @@ def _takeoff_lines_for_job(ctx: dict[str, Any], job_id: int) -> pd.DataFrame:
                COALESCE(li.production_tracking_enabled,1) AS production_tracking_enabled,
                COALESCE(e.production_day_hours,8) AS production_day_hours,
                COALESCE(e.production_value_low,800) AS production_value_low,
-               COALESCE(e.production_value_target,900) AS production_value_target,
+               COALESCE(e.production_value_target,1000) AS production_value_target,
                COALESCE(e.production_value_high,1000) AS production_value_high
         FROM estimate_line_items li
         JOIN estimate_working_sheets e ON e.id=li.estimate_id
@@ -137,15 +144,6 @@ def _job_stage_options(ctx: dict[str, Any], job_id: int) -> dict[str, int | None
     for _, row in stages.iterrows():
         options[str(row["stage_name"])] = int(row["id"])
     return options
-
-
-def _normalised_work_unit(value: Any) -> str:
-    unit = str(value or "item").strip().casefold().replace("²", "2")
-    if unit in {"m2", "sqm", "sq m", "square metre", "square metres"}:
-        return "m²"
-    if unit in {"lm", "lin m", "linear m", "lineal m", "lineal metre", "lineal metres"}:
-        return "lineal m"
-    return str(value or "item").strip() or "item"
 
 
 def _render_required_work_status(
@@ -284,23 +282,33 @@ def _paint_calculator(ctx: dict[str, Any], job_id: int) -> None:
         return fallback if text.casefold() == "nan" else text
 
     stage_options = _job_stage_options(ctx, job_id)
-    if selected_line:
-        selected_stage_id = (
-            int(selected_line["job_stage_id"])
-            if pd.notna(selected_line.get("job_stage_id")) else None
+    if len(stage_options) == 1:
+        st.info(
+            "This job has no named stages yet, so only Whole Job is available. "
+            "Add stages under Job Lookup / Links → Stages / POs, then return here."
         )
-        selected_stage_name = clean_text(selected_line.get("stage_name"), "Whole Job")
+    original_stage_name = (
+        clean_text(selected_line.get("stage_name"), "Whole Job")
+        if selected_line else "Whole Job"
+    )
+    if original_stage_name not in stage_options:
+        original_stage_name = "Whole Job"
+    selected_stage_name = st.selectbox(
+        "Job stage for progress tracking",
+        list(stage_options.keys()),
+        index=list(stage_options.keys()).index(original_stage_name),
+        key=f"v4_stage_{job_id}_{source_key}",
+        help=(
+            "Choose the stage whose timesheet hours should be compared with this work. "
+            "Saving a take-off coating system also saves this stage against its take-off line."
+        ),
+    )
+    selected_stage_id = stage_options[selected_stage_name]
+    if selected_line:
         st.caption(
             f"Take-off source: {clean_text(selected_line.get('section'), 'Take-off')} · "
-            f"{selected_stage_name}. Values can be adjusted before saving without changing the original line."
+            f"currently assigned to {original_stage_name}. Values can be adjusted before saving."
         )
-    else:
-        selected_stage_name = st.selectbox(
-            "Job stage for progress tracking",
-            list(stage_options.keys()),
-            key=f"v4_manual_stage_{job_id}",
-        )
-        selected_stage_id = stage_options[selected_stage_name]
 
     left, right = st.columns(2)
     area_name = left.text_input(
@@ -332,34 +340,58 @@ def _paint_calculator(ctx: dict[str, Any], job_id: int) -> None:
         key=f"v4_colour_{job_id}_{source_key}",
     )
 
-    if selected_line:
-        work_unit = _normalised_work_unit(selected_line.get("unit"))
-        right.text_input(
-            "Take-off unit",
-            value=work_unit,
-            disabled=True,
-            key=f"v4_unit_{job_id}_{source_key}",
-        )
-    else:
-        work_unit = right.selectbox(
-            "Work unit",
-            ["m²", "lineal m", "item"],
-            key=f"v4_unit_{job_id}_{source_key}",
-        )
-    default_quantity = float(selected_line.get("qty") or 0) if selected_line else 0.0
-    quantity_label = "Area (m²)" if work_unit == "m²" else (
-        "Length (lineal m)" if work_unit == "lineal m" else "Work quantity"
+    measurement_context = " ".join(
+        clean_text(selected_line.get(field))
+        for field in ("section", "item_description", "work_location")
+    ) if selected_line else area_name
+    default_measurement_basis = recommended_measurement_basis(
+        selected_line.get("unit") if selected_line else "m²",
+        stage_name=selected_stage_name,
+        context=measurement_context,
     )
+    measurement_basis = right.selectbox(
+        "Measurement basis",
+        list(MEASUREMENT_BASIS_OPTIONS),
+        index=list(MEASUREMENT_BASIS_OPTIONS).index(default_measurement_basis),
+        key=f"v4_measurement_basis_{job_id}_{source_key}_{selected_stage_id or 'whole'}",
+        help=(
+            "Internal work normally uses the building's floor m². External work normally "
+            "uses the actual painted substrate m². You can override the suggested basis."
+        ),
+    )
+    work_unit = work_unit_for_measurement_basis(measurement_basis)
+    default_quantity = float(selected_line.get("qty") or 0) if selected_line else 0.0
+    quantity_label = {
+        EXTERNAL_SUBSTRATE_AREA: "External substrate area (m²)",
+        INTERNAL_FLOOR_AREA: "Internal floor area (m²)",
+        "Lineal m": "Length (lineal m)",
+        "Item": "Number of items",
+    }[measurement_basis]
     work_quantity = float(right.number_input(
         quantity_label,
         min_value=0.0,
         value=default_quantity,
-        step=10.0 if work_unit != "item" else 1.0,
+        step=1.0 if measurement_basis == "Item" else 10.0,
         key=f"v4_work_qty_{job_id}_{source_key}",
     ))
-    if work_unit == "m²":
+    if measurement_basis == EXTERNAL_SUBSTRATE_AREA:
         area_sqm = work_quantity
-    elif work_unit == "lineal m":
+    elif measurement_basis == INTERNAL_FLOOR_AREA:
+        area_sqm = float(right.number_input(
+            "Painted substrate area for litre calculation (m²)",
+            min_value=0.0,
+            value=0.0,
+            step=10.0,
+            key=f"v4_floor_painted_area_{job_id}_{source_key}",
+            help=(
+                "Floor area can calculate the work value and target hours, but paint litres "
+                "must use the actual combined wall, ceiling and other painted surface area."
+            ),
+        ))
+        right.caption(
+            "The floor m² rate drives the $1,000/day progress target; the painted substrate m² drives paint litres."
+        )
+    elif measurement_basis == "Lineal m":
         painted_width = float(right.number_input(
             "Painted width / height per lineal metre (m)",
             min_value=0.01,
@@ -383,7 +415,7 @@ def _paint_calculator(ctx: dict[str, Any], job_id: int) -> None:
         value=float(selected_line.get("unit_rate") or 0) if selected_line else 0.0,
         step=1.0,
         key=f"v4_unit_rate_{job_id}_{source_key}",
-        help="Used to convert the $800–$1,000 painter-day target into required daily quantity.",
+        help="Used to convert the $1,000 completed-work target into the required daily quantity.",
     ))
     coats = right.number_input(
         "Coats",
@@ -442,7 +474,8 @@ def _paint_calculator(ctx: dict[str, Any], job_id: int) -> None:
         {
             "source_key": source_key, "area_name": area_name, "substrate": substrate,
             "product": product, "colour": colour, "area_sqm": area_sqm,
-            "work_quantity": work_quantity, "work_unit": work_unit, "unit_rate": unit_rate,
+            "work_quantity": work_quantity, "work_unit": work_unit,
+            "measurement_basis": measurement_basis, "unit_rate": unit_rate,
             "coats": int(coats), "coverage": float(coverage), "waste": float(waste),
             "stock": stock, "prices": prices, "job_stage_id": selected_stage_id,
         },
@@ -481,6 +514,7 @@ def _paint_calculator(ctx: dict[str, Any], job_id: int) -> None:
                     "colour": colour, "area_sqm": area_sqm, "coats": int(coats),
                     "coverage": float(coverage), "waste": float(waste),
                     "work_quantity": work_quantity, "work_unit": work_unit,
+                    "measurement_basis": measurement_basis,
                     "unit_rate": unit_rate, "job_stage_id": selected_stage_id,
                     "stage_name": selected_stage_name,
                     "source_line_id": int(selected_line["id"]) if selected_line else None,
@@ -572,6 +606,18 @@ def _paint_calculator(ctx: dict[str, Any], job_id: int) -> None:
                 timestamp,
             ),
         )
+        if saved_form.get("source_line_id") is not None:
+            ctx["execute"](
+                """
+                UPDATE estimate_line_items
+                SET job_stage_id=?, unit=?
+                WHERE id=? AND estimate_id=?
+                """,
+                (
+                    saved_form.get("job_stage_id"), saved_form["work_unit"],
+                    int(saved_form["source_line_id"]), int(saved_form["estimate_id"]),
+                ),
+            )
         ctx["record_audit_event"](
             "paint_system_created",
             "paint_system",
@@ -580,6 +626,8 @@ def _paint_calculator(ctx: dict[str, Any], job_id: int) -> None:
                 "job_id": job_id,
                 "required_litres": quantity["required_litres"],
                 "source_line_id": saved_form.get("source_line_id"),
+                "job_stage_id": saved_form.get("job_stage_id"),
+                "measurement_basis": saved_form.get("measurement_basis"),
                 "expected_progress_percent": saved_form.get("tracking", {}).get("expected_percent", 0),
             },
         )

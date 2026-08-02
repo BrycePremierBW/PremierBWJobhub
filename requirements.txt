@@ -1,8 +1,9 @@
-streamlit>=1.50,<2
+streamlit>=1.60,<2
 pandas>=2.0,<3
 psycopg2-binary>=2.9,<3
 plotly>=5.18,<7
 Pillow>=10,<13
 requests>=2.31,<3
 pypdf>=5,<7
+reportlab>=4,<5
 openpyxl>=3.1,<4

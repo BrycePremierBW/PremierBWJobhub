@@ -7,13 +7,12 @@ import shutil
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 import fitz  # PyMuPDF
 import pandas as pd
 import requests
 import streamlit as st
-from PIL import Image
 
 APP_NAME = "PB PlanReader"
 DEFAULT_COVERAGE_M2_PER_L = 12.0
@@ -621,12 +620,12 @@ def overview_page(job_id: str):
         st.markdown("<div class='pb-card'>", unsafe_allow_html=True)
         st.subheader("Drawing / page register gathered from PDFs")
         df = pd.DataFrame(pages)
-        st.dataframe(df, use_container_width=True, height=320)
+        st.dataframe(df, width="stretch", height=320)
         st.markdown("</div>", unsafe_allow_html=True)
     if snippets:
         st.markdown("<div class='pb-card'>", unsafe_allow_html=True)
         st.subheader("Painting / finish lines found")
-        st.dataframe(pd.DataFrame(snippets).head(200), use_container_width=True, height=320)
+        st.dataframe(pd.DataFrame(snippets).head(200), width="stretch", height=320)
         st.markdown("</div>", unsafe_allow_html=True)
     if job.get("ai_summary"):
         st.markdown("<div class='pb-card'>", unsafe_allow_html=True)
@@ -655,7 +654,7 @@ def takeoff_page(job_id: str):
             df[col] = 0.0 if col in ["qty_m2", "lineal_m", "count", "coats", "rate_ex_gst", "labour_hours", "paint_litres"] else ""
     edited = st.data_editor(
         df[required_cols],
-        use_container_width=True,
+        width="stretch",
         num_rows="dynamic",
         height=520,
         column_config={
@@ -709,7 +708,7 @@ def images_page(job_id: str):
         cols = st.columns(3)
         for i, img_path in enumerate(imgs[:120]):
             with cols[i % 3]:
-                st.image(str(img_path), caption=img_path.name, use_container_width=True)
+                st.image(str(img_path), caption=img_path.name, width="stretch")
                 file_download_button(img_path, "Download image")
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -724,7 +723,7 @@ def files_page(job_id: str):
         st.markdown("</div>", unsafe_allow_html=True)
         return
     df = pd.DataFrame(files)
-    st.dataframe(df[[c for c in ["name", "category", "file_type", "size_kb", "uploaded_at", "path"] if c in df.columns]], use_container_width=True, height=340)
+    st.dataframe(df[[c for c in ["name", "category", "file_type", "size_kb", "uploaded_at", "path"] if c in df.columns]], width="stretch", height=340)
     st.markdown("### Remove files attached to the wrong job")
     choices = {f"{i+1}. {f.get('name')} - {f.get('category')}": i for i, f in enumerate(files)}
     selected = st.multiselect("Select files to remove from this job", list(choices.keys()))

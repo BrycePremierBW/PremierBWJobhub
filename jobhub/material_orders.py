@@ -14,7 +14,6 @@ try:
     from reportlab.lib.units import mm
     from reportlab.platypus import (
         Image as RLImage,
-        PageBreak,
         Paragraph,
         SimpleDocTemplate,
         Spacer,
