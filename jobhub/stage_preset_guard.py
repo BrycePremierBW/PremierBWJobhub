@@ -1,14 +1,16 @@
 """Stage preset helpers for Premier Brushworks JobHub.
 
 This guard keeps the stage workflow safe by adding the requested Premier
-Brushworks stage presets to the existing Add Stage form without rewriting the
-large Streamlit app file.
+Brushworks stage presets to the existing Add Stage form. The stage form uses
+Streamlit column widgets (``a1.text_input`` / ``a3.number_input``), so this
+module patches both the top-level ``st`` helpers and DeltaGenerator column
+methods.
 """
 
 from __future__ import annotations
 
 import sys
-from typing import Any
+from typing import Any, Callable
 
 
 STAGE_PRESETS: list[tuple[str, float]] = [
@@ -61,74 +63,139 @@ def _sync_percent_state(st: Any, choice: str) -> None:
         st.session_state[_LAST_STAGE_CHOICE_KEY] = choice
 
 
+def _render_stage_name_selector(
+    st: Any,
+    selectbox_fn: Callable[..., Any],
+    text_input_fn: Callable[..., Any],
+    caption_fn: Callable[..., Any] | None,
+    preset_labels: list[str],
+) -> str:
+    if callable(caption_fn):
+        caption_fn(
+            "Stage selection: choose a standard Premier Brushworks stage, "
+            "or choose Add item not listed to type a custom stage."
+        )
+    choice = selectbox_fn(
+        "Stage selection",
+        preset_labels,
+        key=_STAGE_CHOICE_KEY,
+        help="Standard internal painting stage split: 30%, 30%, 30%, 10%.",
+    )
+    st.session_state["pb_stage_preset_selected_name"] = choice
+    _sync_percent_state(st, choice)
+    if _preset_percent(choice) is not None:
+        return str(choice)
+    return str(
+        text_input_fn(
+            "Custom Stage Name",
+            value=str(st.session_state.get(_STAGE_CUSTOM_KEY, "") or ""),
+            key=_STAGE_CUSTOM_KEY,
+            placeholder="Type the custom stage name",
+        )
+        or ""
+    )
+
+
+def _stage_percent_kwargs(st: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
+    selected = str(st.session_state.get("pb_stage_preset_selected_name") or "")
+    percent = _preset_percent(selected)
+    new_kwargs = dict(kwargs)
+    new_kwargs.setdefault("key", _STAGE_PERCENT_KEY)
+    if percent is not None:
+        _sync_percent_state(st, selected)
+        new_kwargs["value"] = float(percent)
+        new_kwargs.setdefault(
+            "help",
+            "Auto-filled from the selected standard stage. You can still change it before saving.",
+        )
+    elif selected == ADD_CUSTOM_STAGE:
+        new_kwargs.setdefault("help", "Enter the job percentage for the custom stage.")
+    return new_kwargs
+
+
 def install_stage_preset_guard() -> bool:
     st = sys.modules.get("streamlit")
     if st is None:
         return False
 
+    installed = False
+    preset_labels = [name for name, _ in STAGE_PRESETS] + [ADD_CUSTOM_STAGE]
+
+    # Patch top-level st.* calls for any non-column form layouts.
     original_text_input = getattr(st, "text_input", None)
     original_number_input = getattr(st, "number_input", None)
     original_selectbox = getattr(st, "selectbox", None)
     original_caption = getattr(st, "caption", None)
 
     if (
-        original_text_input is None
-        or original_number_input is None
-        or original_selectbox is None
-        or getattr(original_text_input, "_pb_stage_preset_guard", False)
+        original_text_input is not None
+        and original_number_input is not None
+        and original_selectbox is not None
+        and not getattr(original_text_input, "_pb_stage_preset_guard", False)
     ):
-        return False
-
-    preset_labels = [name for name, _ in STAGE_PRESETS] + [ADD_CUSTOM_STAGE]
-
-    def pb_stage_preset_text_input(label: Any, *args: Any, **kwargs: Any):
-        if _is_add_stage_name_input(label, kwargs):
-            if callable(original_caption):
-                original_caption(
-                    "Stage selection: choose a standard Premier Brushworks stage, "
-                    "or choose Add item not listed to type a custom stage."
+        def pb_stage_preset_text_input(label: Any, *args: Any, **kwargs: Any):
+            if _is_add_stage_name_input(label, kwargs):
+                return _render_stage_name_selector(
+                    st,
+                    original_selectbox,
+                    original_text_input,
+                    original_caption,
+                    preset_labels,
                 )
-            choice = original_selectbox(
-                "Stage selection",
-                preset_labels,
-                key=_STAGE_CHOICE_KEY,
-                help="Standard internal painting stage split: 30%, 30%, 30%, 10%.",
-            )
-            st.session_state["pb_stage_preset_selected_name"] = choice
-            _sync_percent_state(st, choice)
-            percent = _preset_percent(choice)
-            if percent is not None:
-                return choice
-            custom = original_text_input(
-                "Custom Stage Name",
-                value=str(st.session_state.get(_STAGE_CUSTOM_KEY, "") or ""),
-                key=_STAGE_CUSTOM_KEY,
-                placeholder="Type the custom stage name",
-            )
-            return custom
-        return original_text_input(label, *args, **kwargs)
+            return original_text_input(label, *args, **kwargs)
 
-    def pb_stage_preset_number_input(label: Any, *args: Any, **kwargs: Any):
-        if _is_add_stage_percent_input(label, kwargs):
-            selected = str(st.session_state.get("pb_stage_preset_selected_name") or "")
-            percent = _preset_percent(selected)
-            kwargs = dict(kwargs)
-            kwargs.setdefault("key", _STAGE_PERCENT_KEY)
-            if percent is not None:
-                _sync_percent_state(st, selected)
-                kwargs["value"] = float(percent)
-                kwargs.setdefault(
-                    "help",
-                    "Auto-filled from the selected standard stage. You can still change it before saving.",
-                )
-            elif selected == ADD_CUSTOM_STAGE:
-                kwargs.setdefault("help", "Enter the job percentage for the custom stage.")
-        return original_number_input(label, *args, **kwargs)
+        def pb_stage_preset_number_input(label: Any, *args: Any, **kwargs: Any):
+            if _is_add_stage_percent_input(label, kwargs):
+                kwargs = _stage_percent_kwargs(st, kwargs)
+            return original_number_input(label, *args, **kwargs)
 
-    pb_stage_preset_text_input._pb_stage_preset_guard = True
-    pb_stage_preset_text_input._pb_original_text_input = original_text_input
-    pb_stage_preset_number_input._pb_stage_preset_guard = True
-    pb_stage_preset_number_input._pb_original_number_input = original_number_input
-    st.text_input = pb_stage_preset_text_input
-    st.number_input = pb_stage_preset_number_input
-    return True
+        pb_stage_preset_text_input._pb_stage_preset_guard = True
+        pb_stage_preset_text_input._pb_original_text_input = original_text_input
+        pb_stage_preset_number_input._pb_stage_preset_guard = True
+        pb_stage_preset_number_input._pb_original_number_input = original_number_input
+        st.text_input = pb_stage_preset_text_input
+        st.number_input = pb_stage_preset_number_input
+        installed = True
+
+    # Patch DeltaGenerator methods so column widgets such as a1.text_input and
+    # a3.number_input get the same preset behaviour.
+    delta_module = sys.modules.get("streamlit.delta_generator")
+    delta_cls = getattr(delta_module, "DeltaGenerator", None) if delta_module is not None else None
+    if delta_cls is not None:
+        dg_text_input = getattr(delta_cls, "text_input", None)
+        dg_number_input = getattr(delta_cls, "number_input", None)
+        dg_selectbox = getattr(delta_cls, "selectbox", None)
+        dg_caption = getattr(delta_cls, "caption", None)
+
+        if (
+            dg_text_input is not None
+            and dg_number_input is not None
+            and dg_selectbox is not None
+            and not getattr(dg_text_input, "_pb_stage_preset_guard", False)
+        ):
+            def pb_dg_stage_preset_text_input(self: Any, label: Any, *args: Any, **kwargs: Any):
+                if _is_add_stage_name_input(label, kwargs):
+                    caption_fn = (lambda message: dg_caption(self, message)) if callable(dg_caption) else None
+                    return _render_stage_name_selector(
+                        st,
+                        lambda *a, **k: dg_selectbox(self, *a, **k),
+                        lambda *a, **k: dg_text_input(self, *a, **k),
+                        caption_fn,
+                        preset_labels,
+                    )
+                return dg_text_input(self, label, *args, **kwargs)
+
+            def pb_dg_stage_preset_number_input(self: Any, label: Any, *args: Any, **kwargs: Any):
+                if _is_add_stage_percent_input(label, kwargs):
+                    kwargs = _stage_percent_kwargs(st, kwargs)
+                return dg_number_input(self, label, *args, **kwargs)
+
+            pb_dg_stage_preset_text_input._pb_stage_preset_guard = True
+            pb_dg_stage_preset_text_input._pb_original_text_input = dg_text_input
+            pb_dg_stage_preset_number_input._pb_stage_preset_guard = True
+            pb_dg_stage_preset_number_input._pb_original_number_input = dg_number_input
+            delta_cls.text_input = pb_dg_stage_preset_text_input
+            delta_cls.number_input = pb_dg_stage_preset_number_input
+            installed = True
+
+    return installed
