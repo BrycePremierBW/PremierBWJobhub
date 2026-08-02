@@ -21,6 +21,7 @@ ADD_CUSTOM_STAGE = "Add item not listed"
 _STAGE_CHOICE_KEY = "pb_stage_preset_stage_name_choice"
 _STAGE_CUSTOM_KEY = "pb_stage_preset_custom_stage_name"
 _STAGE_PERCENT_KEY = "pb_stage_preset_job_percent"
+_LAST_STAGE_CHOICE_KEY = "pb_stage_preset_last_choice"
 
 
 def _is_add_stage_name_input(label: Any, kwargs: dict[str, Any]) -> bool:
@@ -44,6 +45,20 @@ def _preset_percent(stage_name: str) -> float | None:
         if stage_name == preset_name:
             return percent
     return None
+
+
+def _sync_percent_state(st: Any, choice: str) -> None:
+    percent = _preset_percent(choice)
+    if st.session_state.get(_LAST_STAGE_CHOICE_KEY) != choice:
+        if percent is not None:
+            st.session_state[_STAGE_PERCENT_KEY] = float(percent)
+            st.session_state["pb_stage_preset_selected_percent"] = float(percent)
+        elif choice == ADD_CUSTOM_STAGE:
+            st.session_state[_STAGE_PERCENT_KEY] = float(
+                st.session_state.get(_STAGE_PERCENT_KEY, 0.0) or 0.0
+            )
+            st.session_state["pb_stage_preset_selected_percent"] = 0.0
+        st.session_state[_LAST_STAGE_CHOICE_KEY] = choice
 
 
 def install_stage_preset_guard() -> bool:
@@ -80,11 +95,10 @@ def install_stage_preset_guard() -> bool:
                 help="Standard internal painting stage split: 30%, 30%, 30%, 10%.",
             )
             st.session_state["pb_stage_preset_selected_name"] = choice
+            _sync_percent_state(st, choice)
             percent = _preset_percent(choice)
             if percent is not None:
-                st.session_state["pb_stage_preset_selected_percent"] = float(percent)
                 return choice
-            st.session_state["pb_stage_preset_selected_percent"] = 0.0
             custom = original_text_input(
                 "Custom Stage Name",
                 value=str(st.session_state.get(_STAGE_CUSTOM_KEY, "") or ""),
@@ -99,15 +113,15 @@ def install_stage_preset_guard() -> bool:
             selected = str(st.session_state.get("pb_stage_preset_selected_name") or "")
             percent = _preset_percent(selected)
             kwargs = dict(kwargs)
+            kwargs.setdefault("key", _STAGE_PERCENT_KEY)
             if percent is not None:
+                _sync_percent_state(st, selected)
                 kwargs["value"] = float(percent)
-                kwargs.setdefault("key", _STAGE_PERCENT_KEY)
                 kwargs.setdefault(
                     "help",
                     "Auto-filled from the selected standard stage. You can still change it before saving.",
                 )
             elif selected == ADD_CUSTOM_STAGE:
-                kwargs.setdefault("key", _STAGE_PERCENT_KEY)
                 kwargs.setdefault("help", "Enter the job percentage for the custom stage.")
         return original_number_input(label, *args, **kwargs)
 
