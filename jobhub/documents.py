@@ -900,7 +900,7 @@ def render_smart_plan_set_import(job_id, key_prefix="smart_plan_set", expanded=F
                 st.warning("AI take-off is unavailable: " + ai_msg)
             ai_confirmed = bool(confirm_ai_api_spend("Confirm: use OpenAI/Ollama AI for plan set extraction", key=f"{key_prefix}_ai_confirm_{job_id}"))
 
-        if st.button("Import new plan set", key=f"{key_prefix}_button_{job_id}", use_container_width=True):
+        if st.button("Import new plan set", key=f"{key_prefix}_button_{job_id}", width="stretch"):
             if not uploaded_files:
                 st.error("Choose at least one file first.")
                 return
@@ -1006,7 +1006,7 @@ def render_quick_pdf_import_buttons(job_id, categories=None, title="Quick PDF Im
                         key=uploader_key,
                     )
                     if uploaded_pdfs:
-                        if st.button(f"Save {category} PDF(s)", key=f"{uploader_key}_save", use_container_width=True):
+                        if st.button(f"Save {category} PDF(s)", key=f"{uploader_key}_save", width="stretch"):
                             saved = 0
                             for uploaded_pdf in uploaded_pdfs:
                                 try:

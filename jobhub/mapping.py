@@ -308,7 +308,7 @@ function animate(){ requestAnimationFrame(animate); controls.update(); updateLab
         .replace("__SELECTED_JSON__", selected_json)
         .replace("__SUMMARY_JSON__", summary_json)
     )
-    components.html(html_doc, height=930, scrolling=False)
+    st.iframe(html_doc, height=930)
 
 def building_surface_colour(substrate="", labour_category="", area_type=""):
     s = f"{substrate} {labour_category} {area_type}".lower()
@@ -711,7 +711,7 @@ function sourceRows(){{return surfaces.some(s=>s.selected)?surfaces.filter(s=>s.
 function showSurface(s){{document.getElementById('info').innerHTML=`<strong>${{s.code}} — ${{s.name}}</strong><div class="small">${{s.elevation}} • ${{s.level}} • ${{s.surface_type}}</div><div class="small">${{s.substrate}} • ${{s.labour}}</div><div style="margin-top:10px;display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:12px;"><div><b>${{Number(s.m2||0).toLocaleString(undefined,{{maximumFractionDigits:1}})}}m²</b><br><span class="small">substrate</span></div><div><b>${{Number(s.completed_pct||0).toFixed(1)}}%</b><br><span class="small">complete</span></div><div><b>${{fmtMoney(s.value)}}</b><br><span class="small">section value</span></div><div><b>${{fmtMoney(s.billable)}}</b><br><span class="small">billable now</span></div><div><b>${{Number(s.labour_hours||0).toFixed(1)}}h</b><br><span class="small">labour</span></div><div><b>${{Number(s.paint_litres||0).toFixed(1)}}L</b><br><span class="small">paint</span></div></div><div class="small" style="margin-top:10px;">Status: ${{s.status}}</div>`;}}
 function buildList(){{const list=document.getElementById('sectionList');list.innerHTML='';surfaces.slice(0,180).forEach(s=>{{const div=document.createElement('div');div.className='sectionRow';div.innerHTML=`<div class="sectionCode">${{s.selected?'🔵 ':''}}${{s.code}} — ${{s.name}}</div><div class="sectionMeta">${{s.elevation}} • ${{s.surface_type}} • ${{Number(s.m2||0).toFixed(1)}}m² • ${{fmtMoney(s.value)}} • ${{s.status}}</div>`;div.onclick=()=>showSurface(s);list.appendChild(div);}});}}updateMetrics();buildList();const raycaster=new THREE.Raycaster();const mouse=new THREE.Vector2();let lastClicked=null;renderer.domElement.addEventListener('click',event=>{{const rect=renderer.domElement.getBoundingClientRect();mouse.x=((event.clientX-rect.left)/rect.width)*2-1;mouse.y=-((event.clientY-rect.top)/rect.height)*2+1;raycaster.setFromCamera(mouse,camera);const hits=raycaster.intersectObjects(meshes,false);if(hits.length){{if(lastClicked)lastClicked.scale.set(1,1,1);const mesh=hits[0].object;mesh.scale.set(1.06,1.06,1.06);lastClicked=mesh;showSurface(mesh.userData);}}}});window.addEventListener('resize',()=>{{camera.aspect=container.clientWidth/container.clientHeight;camera.updateProjectionMatrix();renderer.setSize(container.clientWidth,container.clientHeight);}});function animate(){{requestAnimationFrame(animate);controls.update();renderer.render(scene,camera);}}animate();</script></body></html>
 """
-    components.html(html_doc, height=740, scrolling=False)
+    st.iframe(html_doc, height=740)
 
 def building_mapper_page(default_job_id=None):
     pb_page_header("3D Building Mapper", "Map take-off sections into a plan-shaped 3D progress model that can be adjusted to closely match the building drawings.", "Plan Trace Model")
@@ -743,21 +743,21 @@ def building_mapper_page(default_job_id=None):
         q1, q2, q3 = st.columns(3)
         level_height = q1.number_input("Typical level height m", min_value=2.1, value=2.7, step=0.1, key=f"building_mapper_level_height_{selected_job_id}_{package_id}")
         roof_style = q2.selectbox("Roof style", ["Flat roof", "Skillion roof", "Gable roof"], key=f"building_mapper_roof_style_{selected_job_id}_{package_id}")
-        if q3.button("Rebuild to plan shape", key=f"building_mapper_rebuild_plan_shape_{selected_job_id}_{package_id}", use_container_width=True):
+        if q3.button("Rebuild to plan shape", key=f"building_mapper_rebuild_plan_shape_{selected_job_id}_{package_id}", width="stretch"):
             count = generate_plan_shape_surfaces_from_takeoff(selected_job_id, package_id, plan_length, plan_depth, int(level_count), level_height, mapper_template, roof_style, reset_existing=True)
             st.success(f"Plan-shaped model rebuilt with {count} mapped surface(s).")
             st.rerun()
         st.info("For best results, use dimensions straight from the plan: overall building length, overall depth, number of levels and typical wall height. Then fine-tune each surface in the mapped surface schedule below.")
     cols = st.columns(3)
-    if cols[0].button("Generate building-shaped model from take-off", key=f"building_mapper_generate_{selected_job_id}_{package_id}", use_container_width=True):
+    if cols[0].button("Generate building-shaped model from take-off", key=f"building_mapper_generate_{selected_job_id}_{package_id}", width="stretch"):
         count = generate_building_surfaces_from_takeoff(selected_job_id, package_id, reset_existing=False)
         st.success(f"Building mapper has {count} mapped surface(s).")
         st.rerun()
-    if cols[1].button("Rebuild / reset mapped model", key=f"building_mapper_rebuild_{selected_job_id}_{package_id}", use_container_width=True):
+    if cols[1].button("Rebuild / reset mapped model", key=f"building_mapper_rebuild_{selected_job_id}_{package_id}", width="stretch"):
         count = generate_building_surfaces_from_takeoff(selected_job_id, package_id, reset_existing=True)
         st.success(f"Rebuilt {count} mapped surface(s) from the take-off.")
         st.rerun()
-    if cols[2].button("Open Progress / Billing", key=f"building_mapper_open_progress_{selected_job_id}_{package_id}", use_container_width=True):
+    if cols[2].button("Open Progress / Billing", key=f"building_mapper_open_progress_{selected_job_id}_{package_id}", width="stretch"):
         st.session_state["go_to_menu"] = "Progress / Billing Model"
         st.rerun()
     surfaces = building_model_surfaces_df(selected_job_id, package_id)
@@ -1046,7 +1046,7 @@ document.getElementById('totalBillable').innerText = money(totalBillable);
 </body>
 </html>
 """
-    components.html(html_doc, height=760, scrolling=False)
+    st.iframe(html_doc, height=760)
 
 def create_grid_zones_from_progress_sections(job_id, package_id, document_id, view_name="Plan / Elevation", reset_existing=False):
     if reset_existing:
@@ -1156,7 +1156,7 @@ def building_progress_mapper_page(default_job_id=None):
             key=f"actual_mapper_pdf_converter_upload_{selected_job_id}",
         )
         st.caption("Blank page selection converts every page. For big drawing sets, enter only the pages you need so the app stays fast. PNG is best quality; JPEG is smaller.")
-        if st.button("Convert PDF page(s) to mapper image(s)", key=f"actual_mapper_pdf_convert_btn_{selected_job_id}", use_container_width=True):
+        if st.button("Convert PDF page(s) to mapper image(s)", key=f"actual_mapper_pdf_convert_btn_{selected_job_id}", width="stretch"):
             saved_count = maybe_convert_uploaded_pdf_to_mapper_images(
                 selected_job_id,
                 uploaded_pdf_plans,
@@ -1266,7 +1266,7 @@ def building_progress_mapper_page(default_job_id=None):
                 st.markdown(f"**{doc_row.get('Type', 'Drawing')}**")
                 st.caption(str(doc_row.get("File Name") or ""))
                 if file_path and os.path.exists(file_path):
-                    st.image(file_path, use_container_width=True)
+                    st.image(file_path, width="stretch")
                 else:
                     st.warning("Image file missing")
     doc_options = {f"{int(r['ID'])} - {r['Type']} - {r['File Name']}": int(r["ID"]) for _, r in image_docs.iterrows()}
@@ -1277,15 +1277,15 @@ def building_progress_mapper_page(default_job_id=None):
 
     st.markdown("### 3. Create and position mapped zones")
     zc1, zc2, zc3 = st.columns(3)
-    if zc1.button("Auto-create zones from take-off", key=f"actual_mapper_auto_zones_{selected_job_id}_{package_id}_{document_id}", use_container_width=True):
+    if zc1.button("Auto-create zones from take-off", key=f"actual_mapper_auto_zones_{selected_job_id}_{package_id}_{document_id}", width="stretch"):
         created = create_grid_zones_from_progress_sections(selected_job_id, package_id, document_id, view_name=str(selected_doc.get("Type") or "Drawing"), reset_existing=False)
         st.success(f"Created {created} new mapped zone(s). Move them into place using the zone schedule below.")
         st.rerun()
-    if zc2.button("Reset zones for this drawing", key=f"actual_mapper_reset_zones_{selected_job_id}_{package_id}_{document_id}", use_container_width=True):
+    if zc2.button("Reset zones for this drawing", key=f"actual_mapper_reset_zones_{selected_job_id}_{package_id}_{document_id}", width="stretch"):
         created = create_grid_zones_from_progress_sections(selected_job_id, package_id, document_id, view_name=str(selected_doc.get("Type") or "Drawing"), reset_existing=True)
         st.success(f"Reset and created {created} mapped zone(s).")
         st.rerun()
-    if zc3.button("Open Progress / Billing", key=f"actual_mapper_open_progress_{selected_job_id}_{package_id}", use_container_width=True):
+    if zc3.button("Open Progress / Billing", key=f"actual_mapper_open_progress_{selected_job_id}_{package_id}", width="stretch"):
         st.session_state["go_to_menu"] = "Progress / Billing Model"
         st.rerun()
 
@@ -1529,14 +1529,14 @@ def render_progress_billing_model(job_id, package_id=None, key_prefix="progress_
 
     st.markdown("### Mark Selected Work")
     action_col1, action_col2, action_col3 = st.columns(3)
-    if action_col1.button("Mark Selected as Complete", key=f"{key_prefix}_mark_selected_complete_{job_id}_{package_id}", disabled=not bool(selected_ids), use_container_width=True):
+    if action_col1.button("Mark Selected as Complete", key=f"{key_prefix}_mark_selected_complete_{job_id}_{package_id}", disabled=not bool(selected_ids), width="stretch"):
         for _, row in selected_df.iterrows():
             update_progress_section(int(row["ID"]), app_float(row["Total m2"]), app_float(row["Section Value Ex GST"]), "Complete", str(row.get("Notes") or ""))
         st.success("Selected sections marked as complete and will remain highlighted green.")
         refresh()
 
     bulk_percent = action_col2.number_input("Set selected to %", min_value=0.0, max_value=100.0, value=100.0, step=5.0, key=f"{key_prefix}_bulk_percent_{job_id}_{package_id}")
-    if action_col2.button("Apply % to Selected", key=f"{key_prefix}_apply_selected_percent_{job_id}_{package_id}", disabled=not bool(selected_ids), use_container_width=True):
+    if action_col2.button("Apply % to Selected", key=f"{key_prefix}_apply_selected_percent_{job_id}_{package_id}", disabled=not bool(selected_ids), width="stretch"):
         for _, row in selected_df.iterrows():
             completed_m2 = app_float(row["Total m2"]) * bulk_percent / 100.0
             status = "Complete" if bulk_percent >= 99.99 else "In Progress" if bulk_percent > 0 else "Not Started"
@@ -1545,7 +1545,7 @@ def render_progress_billing_model(job_id, package_id=None, key_prefix="progress_
         refresh()
 
     selected_group_m2 = action_col3.number_input("Completed m² across selected", min_value=0.0, value=0.0, step=1.0, key=f"{key_prefix}_bulk_group_m2_{job_id}_{package_id}")
-    if action_col3.button("Apply m² Across Selected", key=f"{key_prefix}_apply_selected_m2_{job_id}_{package_id}", disabled=not bool(selected_ids), use_container_width=True):
+    if action_col3.button("Apply m² Across Selected", key=f"{key_prefix}_apply_selected_m2_{job_id}_{package_id}", disabled=not bool(selected_ids), width="stretch"):
         total_selected_m2 = float(selected_df["Total m2"].sum()) if not selected_df.empty else 0.0
         if total_selected_m2 <= 0:
             st.error("Selected sections have no measurable m².")
@@ -1860,4 +1860,3 @@ def three_d_model_viewer_page(default_job_id=None):
         st.dataframe(sections.drop(columns=["ID", "Package ID", "Takeoff Line ID"], errors="ignore"), width="stretch", hide_index=True)
     else:
         st.info("No sections to show.")
-

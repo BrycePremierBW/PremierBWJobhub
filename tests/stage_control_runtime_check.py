@@ -142,7 +142,7 @@ cursor.execute(
         55000,
         8,
         800,
-        900,
+        1000,
         1000,
         "Production Target Included",
         now,
@@ -190,7 +190,7 @@ cursor.execute(
         55000,
         444.44,
         8,
-        900,
+        1000,
         1,
         now,
         "admin",
@@ -302,10 +302,17 @@ cursor.execute(
 connection.commit()
 connection.close()
 
-for route in ("Job Folders", "Staff Requests", "Estimate Working Sheet", "Job Progress Tracker"):
+for route in (
+    "Dashboard", "Job Folders", "Staff Requests", "Estimate Working Sheet",
+    "Job Progress Tracker",
+):
     admin.session_state["go_to_menu"] = route
     admin.run(timeout=90)
     assert not admin.exception, f"{route}: {[item.value for item in admin.exception]}"
+    if route == "Dashboard":
+        dashboard_text = [str(item.value) for item in admin.markdown]
+        assert any("Crucial Jobs" in value for value in dashboard_text)
+        assert any("Overhead & Profit" in value for value in dashboard_text)
 
 metric_labels = {metric.label for metric in admin.metric}
 assert "Take-off Target Hours" in metric_labels or "Actual Job Progress" in metric_labels

@@ -42,6 +42,29 @@ class SourceStructureTests(unittest.TestCase):
         self.assertIn("max-width: 100vw !important", source)
         self.assertIn("-webkit-overflow-scrolling: touch !important", source)
 
+    def test_operations_dashboard_contains_requested_widgets_and_settings(self):
+        source = (ROOT / "pb_jobhub_app.py").read_text(encoding="utf-8")
+        self.assertIn("def render_operational_dashboard", source)
+        for label in (
+            "Crucial Jobs", "Paint to Order", "Today’s Staff", "Tasks to Complete",
+            "Job Progress", "Active Site Blockers", "Timesheets", "Overhead & Profit",
+            "Overdue Claims",
+        ):
+            self.assertIn(label, source)
+        self.assertIn("def save_operating_settings", source)
+        self.assertIn("overhead_recovery_metrics", source)
+
+    def test_job_folder_uses_editable_schedule_and_weighted_progress(self):
+        app_source = (ROOT / "pb_jobhub_app.py").read_text(encoding="utf-8")
+        scheduler_source = (ROOT / "pb_jobhub_visual_scheduler.py").read_text(encoding="utf-8")
+        tracker_source = (ROOT / "jobhub_progress_tracker.py").read_text(encoding="utf-8")
+        self.assertIn("render_job_folder_schedule_editor(job_id, get_current_user())", app_source)
+        self.assertIn("def render_job_folder_schedule_editor", scheduler_source)
+        self.assertIn("replace_conflicts_for_assignment_edit", scheduler_source)
+        for field in ("prepped_sealed", "prep_spray_finished", "cut_rolled", "defects"):
+            self.assertIn(field, tracker_source)
+        self.assertIn("_render_custom_internal_items", tracker_source)
+
 
 if __name__ == "__main__":
     unittest.main()

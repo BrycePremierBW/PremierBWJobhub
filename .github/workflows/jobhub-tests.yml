@@ -29,7 +29,12 @@ jobs:
           jobhub_core.py
           jobhub
           jobhub_v2
-          jobhub_v3
           jobhub_v4
       - name: Run JobHub tests
         run: python -m unittest discover -s tests -p "test_*.py" -v
+      - name: Run material order workflow
+        run: python tests/material_order_workflow_test.py
+      - name: Render every JobHub route
+        run: python tests/smoke_test.py
+      - name: Run populated staged-job workflow
+        run: python tests/stage_control_runtime_check.py

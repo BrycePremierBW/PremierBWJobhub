@@ -57,7 +57,7 @@ def render_dashboard():
 
     with m1:
         pb_metric_card("Active Jobs", active_jobs_count, f"{jobs_count} jobs in the register", "green")
-        if st.button("Open job folders", key="tidy_dash_jobs", use_container_width=True):
+        if st.button("Open job folders", key="tidy_dash_jobs", width="stretch"):
             st.session_state["go_to_menu"] = "Job Folders"
             st.rerun()
 
@@ -68,7 +68,7 @@ def render_dashboard():
             "Submitted and awaiting review",
             "orange" if pending_timesheets else "green",
         )
-        if st.button("Review timesheets", key="tidy_dash_timesheets", use_container_width=True):
+        if st.button("Review timesheets", key="tidy_dash_timesheets", width="stretch"):
             st.session_state["go_to_menu"] = "Timesheets"
             st.rerun()
 
@@ -79,7 +79,7 @@ def render_dashboard():
             "Not yet approved, rejected or invoiced",
             "orange" if open_variations else "green",
         )
-        if st.button("Open variations", key="tidy_dash_variations", use_container_width=True):
+        if st.button("Open variations", key="tidy_dash_variations", width="stretch"):
             st.session_state["go_to_menu"] = "Control Centre"
             st.session_state["go_to_control_centre_section"] = "Variations Register"
             st.rerun()
@@ -91,7 +91,7 @@ def render_dashboard():
             pb_money(overdue_value),
             "red" if overdue_claims else "green",
         )
-        if st.button("Open claims", key="tidy_dash_claims", use_container_width=True):
+        if st.button("Open claims", key="tidy_dash_claims", width="stretch"):
             st.session_state["go_to_menu"] = "Control Centre"
             st.session_state["go_to_control_centre_section"] = "Invoice / Claim Tracker"
             st.rerun()
@@ -99,20 +99,20 @@ def render_dashboard():
     st.markdown("#### Quick access")
     q1, q2, q3, q4 = st.columns(4)
 
-    if q1.button("Add or edit a job", key="tidy_quick_jobs", use_container_width=True):
+    if q1.button("Add or edit a job", key="tidy_quick_jobs", width="stretch"):
         st.session_state["go_to_menu"] = "Jobs"
         st.rerun()
 
-    if q2.button("Staff scheduling", key="tidy_quick_schedule", use_container_width=True):
+    if q2.button("Staff scheduling", key="tidy_quick_schedule", width="stretch"):
         st.session_state["go_to_menu"] = "Control Centre"
         st.session_state["go_to_control_centre_section"] = "Staff Scheduling Board"
         st.rerun()
 
-    if q3.button("Materials & costs", key="tidy_quick_materials", use_container_width=True):
+    if q3.button("Materials & costs", key="tidy_quick_materials", width="stretch"):
         st.session_state["go_to_menu"] = "Material Costs"
         st.rerun()
 
-    if q4.button("Reports & export", key="tidy_quick_reports", use_container_width=True):
+    if q4.button("Reports & export", key="tidy_quick_reports", width="stretch"):
         st.session_state["go_to_menu"] = "Reports / Export"
         st.rerun()
 
@@ -138,7 +138,7 @@ def render_dashboard():
         if active.empty:
             st.info("No open jobs found.")
         else:
-            st.dataframe(active, use_container_width=True, hide_index=True)
+            st.dataframe(active, width="stretch", hide_index=True)
 
     with tab_upcoming:
         upcoming = df_query("""
@@ -156,7 +156,7 @@ def render_dashboard():
         if upcoming.empty:
             st.info("No upcoming work is currently recorded.")
         else:
-            st.dataframe(upcoming, use_container_width=True, hide_index=True)
+            st.dataframe(upcoming, width="stretch", hide_index=True)
 
     with tab_attention:
         missing_details = df_query("""
@@ -184,7 +184,7 @@ def render_dashboard():
         if missing_details.empty:
             st.success("No open jobs are missing a leading hand or start date.")
         else:
-            st.dataframe(missing_details, use_container_width=True, hide_index=True)
+            st.dataframe(missing_details, width="stretch", hide_index=True)
 
 
 # =============================

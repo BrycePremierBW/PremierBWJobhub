@@ -17,14 +17,12 @@ circular import).
 
 from __future__ import annotations
 
-import csv
 import json
-import os
 import re
 import traceback
 import zipfile
 from datetime import date, datetime
-from io import BytesIO, StringIO
+from io import BytesIO
 from pathlib import Path
 from typing import Any, Callable
 
@@ -712,7 +710,7 @@ def render_job_control(ctx: dict[str, Any]) -> None:
             )
             finish = st.date_input("Forecast completion date", value=date.today()).isoformat()
             notes = st.text_area("Progress notes / recovery actions")
-            submitted = st.form_submit_button("Save Progress Forecast", use_container_width=True)
+            submitted = st.form_submit_button("Save Progress Forecast", width="stretch")
         if submitted:
             try:
                 _save_progress(ctx, job_id, progress, remaining, finish, notes)
@@ -742,7 +740,7 @@ def render_job_control(ctx: dict[str, Any]) -> None:
         st.dataframe(
             position,
             hide_index=True,
-            use_container_width=True,
+            width="stretch",
             column_config={"Amount Ex GST": st.column_config.NumberColumn(format="$%.2f")},
         )
 
@@ -757,7 +755,7 @@ def render_job_control(ctx: dict[str, Any]) -> None:
     st.dataframe(
         portfolio,
         hide_index=True,
-        use_container_width=True,
+        width="stretch",
         column_config={
             "Revised Contract": st.column_config.NumberColumn(format="$%.2f"),
             "Cost to Date": st.column_config.NumberColumn(format="$%.2f"),
@@ -968,7 +966,7 @@ def render_procurement(ctx: dict[str, Any]) -> None:
                 source_lines,
                 num_rows="dynamic",
                 hide_index=True,
-                use_container_width=True,
+                width="stretch",
                 key="enterprise_po_lines",
                 disabled=["material_entry_id", "product_id", "Line Total Ex GST"],
                 column_config={
@@ -991,7 +989,7 @@ def render_procurement(ctx: dict[str, Any]) -> None:
                 status_options = ["Requested", "Approved", "Ordered"] if _management(ctx) else ["Requested"]
                 status = st.selectbox("Initial status", status_options)
                 notes = st.text_area("Delivery instructions / notes")
-                submit_po = st.form_submit_button("Create Purchase Order", use_container_width=True)
+                submit_po = st.form_submit_button("Create Purchase Order", width="stretch")
             if submit_po:
                 try:
                     po_id = _create_purchase_order(
@@ -1022,7 +1020,7 @@ def render_procurement(ctx: dict[str, Any]) -> None:
             st.info("No purchase orders have been created yet.")
         else:
             st.dataframe(
-                po_df.drop(columns=["id"]), hide_index=True, use_container_width=True,
+                po_df.drop(columns=["id"]), hide_index=True, width="stretch",
                 column_config={
                     "Subtotal Ex GST": st.column_config.NumberColumn(format="$%.2f"),
                     "Total Inc GST": st.column_config.NumberColumn(format="$%.2f"),
@@ -1046,7 +1044,7 @@ def render_procurement(ctx: dict[str, Any]) -> None:
             edited_lines = st.data_editor(
                 lines,
                 hide_index=True,
-                use_container_width=True,
+                width="stretch",
                 key=f"enterprise_receive_po_{po_id}",
                 disabled=["id", "Product Code", "Description", "Colour", "Ordered Qty", "Unit", "Unit Price Ex GST", "Line Total Ex GST"],
                 column_config={
@@ -1059,7 +1057,7 @@ def render_procurement(ctx: dict[str, Any]) -> None:
                 "PO status", ["Requested", "Approved", "Ordered", "Part Received", "Received", "Closed", "Cancelled"],
                 key=f"enterprise_po_status_{po_id}",
             )
-            if st.button("Save Receiving / Status", key=f"enterprise_po_save_{po_id}", use_container_width=True):
+            if st.button("Save Receiving / Status", key=f"enterprise_po_save_{po_id}", width="stretch"):
                 try:
                     conn = ctx["connect"]()
                     cur = conn.cursor()
@@ -1133,7 +1131,7 @@ def render_procurement(ctx: dict[str, Any]) -> None:
                 po_lines,
                 num_rows="dynamic",
                 hide_index=True,
-                use_container_width=True,
+                width="stretch",
                 key=f"enterprise_invoice_lines_{po_id}",
                 disabled=["matched_po_line_id", "PO Line Total Ex GST"],
                 column_config={
@@ -1157,7 +1155,7 @@ def render_procurement(ctx: dict[str, Any]) -> None:
                 status = st.selectbox("Invoice status", ["Received", "Matched", "Approved", "Paid", "Disputed"])
                 uploaded = st.file_uploader("Supplier invoice PDF", type=["pdf"], key="enterprise_supplier_invoice_pdf")
                 notes = st.text_area("Invoice notes")
-                submit_invoice = st.form_submit_button("Save Supplier Invoice Match", use_container_width=True)
+                submit_invoice = st.form_submit_button("Save Supplier Invoice Match", width="stretch")
             if submit_invoice:
                 try:
                     if not invoice_no.strip():
@@ -1250,7 +1248,7 @@ def render_procurement(ctx: dict[str, Any]) -> None:
             if not invoice_register.empty:
                 st.markdown("#### Supplier invoice register")
                 st.dataframe(
-                    invoice_register, hide_index=True, use_container_width=True,
+                    invoice_register, hide_index=True, width="stretch",
                     column_config={
                         "Subtotal Ex GST": st.column_config.NumberColumn(format="$%.2f"),
                         "Variance Ex GST": st.column_config.NumberColumn(format="$%.2f"),
@@ -1273,7 +1271,7 @@ def render_procurement(ctx: dict[str, Any]) -> None:
             output.getvalue(),
             file_name=f"PB_JobHub_Purchasing_{_today()}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
+            width="stretch",
         )
 
 
@@ -1342,7 +1340,7 @@ def _render_form_submission(ctx: dict[str, Any], key_prefix: str, default_job_id
                 answers[field_key] = st.text_area(label, key=f"{key_prefix}_{field_key}")
         signature = st.text_input("Submitted / signed by", value=_user(ctx).get("employee_name") or _user(ctx).get("username", ""))
         acknowledgement = st.checkbox("I confirm this record is accurate.")
-        submitted = st.form_submit_button("Submit Form", use_container_width=True)
+        submitted = st.form_submit_button("Submit Form", width="stretch")
     if submitted:
         try:
             if not acknowledgement:
@@ -1403,7 +1401,7 @@ def render_compliance(ctx: dict[str, Any]) -> None:
         if forms.empty:
             st.info("No digital forms have been submitted yet.")
             return
-        st.dataframe(forms.drop(columns=["id", "answers_json"]), hide_index=True, use_container_width=True)
+        st.dataframe(forms.drop(columns=["id", "answers_json"]), hide_index=True, width="stretch")
         labels = {f"#{int(r['id'])} — {r['Form Type']} — {r['Job No']} — {r['Date']}": int(r["id"]) for _, r in forms.iterrows()}
         selected = st.selectbox("Open form", list(labels), key="enterprise_form_register")
         form_id = labels[selected]
@@ -1415,7 +1413,7 @@ def render_compliance(ctx: dict[str, Any]) -> None:
         st.json(answers)
         if _management(ctx):
             status = st.selectbox("Approval status", ["Submitted", "Approved", "Requires Action", "Closed"], key=f"enterprise_form_status_{form_id}")
-            if st.button("Save Form Status", key=f"enterprise_form_status_save_{form_id}", use_container_width=True):
+            if st.button("Save Form Status", key=f"enterprise_form_status_save_{form_id}", width="stretch"):
                 user = _user(ctx)
                 _execute(
                     ctx,
@@ -1477,7 +1475,7 @@ def render_field_mode(ctx: dict[str, Any]) -> None:
     if today_schedule.empty:
         st.info("No schedule entries are assigned to you today.")
     else:
-        st.dataframe(today_schedule.drop(columns=["id", "job_id"]), hide_index=True, use_container_width=True)
+        st.dataframe(today_schedule.drop(columns=["id", "job_id"]), hide_index=True, width="stretch")
 
     active = _active_clock(ctx, employee_id)
     if active.empty:
@@ -1490,7 +1488,7 @@ def render_field_mode(ctx: dict[str, Any]) -> None:
         selected = st.selectbox("Clock onto job", ordered_labels, key="field_mode_clock_job")
         work_type = st.selectbox("Work type", ["Painting", "Preparation", "Travel", "Supervision", "Touch-ups", "Other"], key="field_mode_work_type")
         clock_notes = st.text_input("Clock-in note", key="field_mode_clock_note")
-        if st.button("▶ Clock On", key="field_mode_clock_on", use_container_width=True):
+        if st.button("▶ Clock On", key="field_mode_clock_on", width="stretch"):
             try:
                 job_id = jobs[selected]
                 _execute(
@@ -1517,7 +1515,7 @@ def render_field_mode(ctx: dict[str, Any]) -> None:
             break_minutes = st.number_input("Unpaid break minutes", min_value=0.0, max_value=240.0, value=0.0, step=5.0)
             travel_minutes = st.number_input("Travel minutes included", min_value=0.0, max_value=600.0, value=0.0, step=5.0)
             notes = st.text_area("Daily work completed / notes")
-            submit_clock = st.form_submit_button("■ Clock Off & Submit Timesheet", use_container_width=True)
+            submit_clock = st.form_submit_button("■ Clock Off & Submit Timesheet", width="stretch")
         if submit_clock:
             try:
                 now_dt = datetime.now()
@@ -1604,7 +1602,7 @@ def render_field_mode(ctx: dict[str, Any]) -> None:
                     (job_id,),
                 )
                 if not colours.empty:
-                    st.dataframe(colours, hide_index=True, use_container_width=True)
+                    st.dataframe(colours, hide_index=True, width="stretch")
 
         st.markdown("#### Quick progress photos")
         uploaded_photos = st.file_uploader(
@@ -1613,7 +1611,7 @@ def render_field_mode(ctx: dict[str, Any]) -> None:
         )
         photo_category = st.selectbox("Photo category", ["Progress", "Before", "After", "Defect", "Safety", "Delivery"], key=f"field_mode_photo_category_{job_id}")
         photo_caption = st.text_input("Caption", key=f"field_mode_photo_caption_{job_id}")
-        if st.button("Save Photos to Job", key=f"field_mode_save_photos_{job_id}", use_container_width=True):
+        if st.button("Save Photos to Job", key=f"field_mode_save_photos_{job_id}", width="stretch"):
             if not uploaded_photos:
                 ctx["pb_error"]("Select at least one photo first.")
             else:
@@ -1802,7 +1800,7 @@ def render_system_control(ctx: dict[str, Any]) -> None:
         unresolved_df = _query(ctx, "SELECT COUNT(*) AS c FROM app_error_events WHERE COALESCE(resolved_at, '') = ''")
         unresolved = int(unresolved_df.iloc[0]["c"] or 0) if not unresolved_df.empty else 0
         h3.metric("Unresolved logged errors", unresolved)
-        st.dataframe(pd.DataFrame(counts), hide_index=True, use_container_width=True)
+        st.dataframe(pd.DataFrame(counts), hide_index=True, width="stretch")
         errors = _query(
             ctx,
             """
@@ -1817,12 +1815,12 @@ def render_system_control(ctx: dict[str, Any]) -> None:
         if errors.empty:
             st.success("No application errors have been recorded by the new enterprise workflows.")
         else:
-            st.dataframe(errors.drop(columns=["id"]), hide_index=True, use_container_width=True)
+            st.dataframe(errors.drop(columns=["id"]), hide_index=True, width="stretch")
             if _role(ctx) == "admin":
                 labels = {f"#{int(r['id'])} — {r['Area']} — {r['Message'][:70]}": int(r["id"]) for _, r in errors.iterrows()}
                 selected = st.selectbox("Resolve logged error", list(labels), key="enterprise_error_resolve")
                 resolution = st.text_area("Resolution notes", key="enterprise_error_resolution")
-                if st.button("Mark Error Resolved", key="enterprise_error_resolve_button", use_container_width=True):
+                if st.button("Mark Error Resolved", key="enterprise_error_resolve_button", width="stretch"):
                     error_id = labels[selected]
                     _execute(
                         ctx,
@@ -1850,19 +1848,19 @@ def render_system_control(ctx: dict[str, Any]) -> None:
             if action_filter.strip():
                 haystack = audit.astype(str).agg(" ".join, axis=1).str.lower()
                 audit = audit[haystack.str.contains(action_filter.strip().lower(), na=False)]
-            st.dataframe(audit, hide_index=True, use_container_width=True)
+            st.dataframe(audit, hide_index=True, width="stretch")
             st.download_button(
                 "Download Audit Trail CSV",
                 audit.to_csv(index=False).encode("utf-8-sig"),
                 file_name=f"PB_JobHub_Audit_Trail_{_today()}.csv",
                 mime="text/csv",
-                use_container_width=True,
+                width="stretch",
             )
 
     with tab_backup:
         st.info("A lightweight database export is created automatically once per day when JobHub is used. Full backups include all stored job files and can be much larger.")
         b1, b2 = st.columns(2)
-        if b1.button("Create Data Backup Now", key="enterprise_backup_data", use_container_width=True):
+        if b1.button("Create Data Backup Now", key="enterprise_backup_data", width="stretch"):
             try:
                 path = create_backup(ctx, False, "Manual_Data", _user(ctx).get("username", ""))
                 ctx["pb_success"](f"Data backup created: {path.name}")
@@ -1870,7 +1868,7 @@ def render_system_control(ctx: dict[str, Any]) -> None:
             except Exception as exc:
                 log_error(ctx["connect"], _user(ctx).get("username", ""), "manual_data_backup", exc)
                 ctx["pb_error"](f"Backup failed: {exc}")
-        if b2.button("Create Full Backup Including Job Files", key="enterprise_backup_full", use_container_width=True):
+        if b2.button("Create Full Backup Including Job Files", key="enterprise_backup_full", width="stretch"):
             try:
                 path = create_backup(ctx, True, "Manual_Full", _user(ctx).get("username", ""))
                 ctx["pb_success"](f"Full backup created: {path.name}")
@@ -1887,7 +1885,7 @@ def render_system_control(ctx: dict[str, Any]) -> None:
             """,
         )
         if not backups.empty:
-            st.dataframe(backups.drop(columns=["id"]), hide_index=True, use_container_width=True)
+            st.dataframe(backups.drop(columns=["id"]), hide_index=True, width="stretch")
             labels = {f"{r['Created']} — {r['Type']} — {Path(str(r['File'])).name}": str(r["File"]) for _, r in backups.iterrows()}
             selected = st.selectbox("Download existing backup", list(labels), key="enterprise_backup_download_select")
             backup_path = Path(labels[selected])
@@ -1897,7 +1895,7 @@ def render_system_control(ctx: dict[str, Any]) -> None:
                     backup_path.read_bytes(),
                     file_name=backup_path.name,
                     mime="application/zip",
-                    use_container_width=True,
+                    width="stretch",
                 )
             else:
                 st.warning("The selected backup record exists, but the physical file is no longer on this server.")
@@ -1909,7 +1907,7 @@ def render_system_control(ctx: dict[str, Any]) -> None:
             _xero_export_zip(ctx),
             file_name=f"PB_JobHub_Xero_Ready_{_today()}.zip",
             mime="application/zip",
-            use_container_width=True,
+            width="stretch",
         )
 
 
