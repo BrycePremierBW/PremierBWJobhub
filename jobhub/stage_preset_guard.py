@@ -13,17 +13,27 @@ import sys
 from typing import Any, Callable
 
 
-STAGE_PRESETS: list[tuple[str, float]] = [
-    ("Internal prep and spray Sealer", 30.0),
-    ("prep and spray finish coats", 30.0),
-    ("cut and roll walls and paint doors", 30.0),
-    ("touch ups", 10.0),
-]
+STAGE_PRESET_SECTIONS: dict[str, list[tuple[str, float]]] = {
+    "Internal": [
+        ("Internal prep and spray Sealer", 30.0),
+        ("prep and spray finish coats", 30.0),
+        ("cut and roll walls and paint doors", 30.0),
+        ("touch ups", 10.0),
+    ],
+    "External": [
+        ("upper scaff work", 45.0),
+        ("lower", 45.0),
+        ("touch ups", 10.0),
+    ],
+}
+
 ADD_CUSTOM_STAGE = "Add item not listed"
+_STAGE_SECTION_KEY = "pb_stage_preset_section"
 _STAGE_CHOICE_KEY = "pb_stage_preset_stage_name_choice"
 _STAGE_CUSTOM_KEY = "pb_stage_preset_custom_stage_name"
 _STAGE_PERCENT_KEY = "pb_stage_preset_job_percent"
 _LAST_STAGE_CHOICE_KEY = "pb_stage_preset_last_choice"
+_LAST_STAGE_SECTION_KEY = "pb_stage_preset_last_section"
 
 
 def _is_add_stage_name_input(label: Any, kwargs: dict[str, Any]) -> bool:
@@ -42,16 +52,39 @@ def _is_add_stage_percent_input(label: Any, kwargs: dict[str, Any]) -> bool:
     )
 
 
-def _preset_percent(stage_name: str) -> float | None:
-    for preset_name, percent in STAGE_PRESETS:
-        if stage_name == preset_name:
-            return percent
+def _stage_sections() -> list[str]:
+    return list(STAGE_PRESET_SECTIONS.keys())
+
+
+def _preset_labels(section: str) -> list[str]:
+    presets = STAGE_PRESET_SECTIONS.get(section) or STAGE_PRESET_SECTIONS["Internal"]
+    return [name for name, _ in presets] + [ADD_CUSTOM_STAGE]
+
+
+def _preset_percent(stage_name: str, section: str | None = None) -> float | None:
+    sections = [section] if section in STAGE_PRESET_SECTIONS else _stage_sections()
+    for section_name in sections:
+        for preset_name, percent in STAGE_PRESET_SECTIONS[section_name]:
+            if stage_name == preset_name:
+                return percent
     return None
 
 
-def _sync_percent_state(st: Any, choice: str) -> None:
-    percent = _preset_percent(choice)
-    if st.session_state.get(_LAST_STAGE_CHOICE_KEY) != choice:
+def _normalise_stage_state(st: Any, section: str) -> None:
+    labels = _preset_labels(section)
+    if st.session_state.get(_LAST_STAGE_SECTION_KEY) != section:
+        st.session_state[_STAGE_CHOICE_KEY] = labels[0]
+        st.session_state[_LAST_STAGE_SECTION_KEY] = section
+        st.session_state[_LAST_STAGE_CHOICE_KEY] = None
+    elif st.session_state.get(_STAGE_CHOICE_KEY) not in labels:
+        st.session_state[_STAGE_CHOICE_KEY] = labels[0]
+        st.session_state[_LAST_STAGE_CHOICE_KEY] = None
+
+
+def _sync_percent_state(st: Any, section: str, choice: str) -> None:
+    percent = _preset_percent(choice, section)
+    state_key = f"{section}:{choice}"
+    if st.session_state.get(_LAST_STAGE_CHOICE_KEY) != state_key:
         if percent is not None:
             st.session_state[_STAGE_PERCENT_KEY] = float(percent)
             st.session_state["pb_stage_preset_selected_percent"] = float(percent)
@@ -60,7 +93,7 @@ def _sync_percent_state(st: Any, choice: str) -> None:
                 st.session_state.get(_STAGE_PERCENT_KEY, 0.0) or 0.0
             )
             st.session_state["pb_stage_preset_selected_percent"] = 0.0
-        st.session_state[_LAST_STAGE_CHOICE_KEY] = choice
+        st.session_state[_LAST_STAGE_CHOICE_KEY] = state_key
 
 
 def _render_stage_name_selector(
@@ -68,22 +101,40 @@ def _render_stage_name_selector(
     selectbox_fn: Callable[..., Any],
     text_input_fn: Callable[..., Any],
     caption_fn: Callable[..., Any] | None,
-    preset_labels: list[str],
 ) -> str:
     if callable(caption_fn):
         caption_fn(
-            "Stage selection: choose a standard Premier Brushworks stage, "
-            "or choose Add item not listed to type a custom stage."
+            "Stage section: choose Internal or External, then select a standard "
+            "Premier Brushworks stage or choose Add item not listed."
         )
+
+    section_options = _stage_sections()
+    current_section = str(st.session_state.get(_STAGE_SECTION_KEY) or "Internal")
+    if current_section not in section_options:
+        current_section = "Internal"
+        st.session_state[_STAGE_SECTION_KEY] = current_section
+    section = selectbox_fn(
+        "Stage section",
+        section_options,
+        index=section_options.index(current_section),
+        key=_STAGE_SECTION_KEY,
+        help="Internal shows sealer, finish coats, walls/doors and touch-ups. External shows upper scaffold, lower and touch-ups.",
+    )
+
+    _normalise_stage_state(st, str(section))
+    labels = _preset_labels(str(section))
     choice = selectbox_fn(
         "Stage selection",
-        preset_labels,
+        labels,
+        index=labels.index(st.session_state.get(_STAGE_CHOICE_KEY, labels[0])),
         key=_STAGE_CHOICE_KEY,
-        help="Standard internal painting stage split: 30%, 30%, 30%, 10%.",
+        help="The selected stage automatically fills the Job % allowance.",
     )
-    st.session_state["pb_stage_preset_selected_name"] = choice
-    _sync_percent_state(st, choice)
-    if _preset_percent(choice) is not None:
+    st.session_state["pb_stage_preset_selected_section"] = str(section)
+    st.session_state["pb_stage_preset_selected_name"] = str(choice)
+    _sync_percent_state(st, str(section), str(choice))
+
+    if _preset_percent(str(choice), str(section)) is not None:
         return str(choice)
     return str(
         text_input_fn(
@@ -97,12 +148,13 @@ def _render_stage_name_selector(
 
 
 def _stage_percent_kwargs(st: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
+    section = str(st.session_state.get("pb_stage_preset_selected_section") or "Internal")
     selected = str(st.session_state.get("pb_stage_preset_selected_name") or "")
-    percent = _preset_percent(selected)
+    percent = _preset_percent(selected, section)
     new_kwargs = dict(kwargs)
     new_kwargs.setdefault("key", _STAGE_PERCENT_KEY)
     if percent is not None:
-        _sync_percent_state(st, selected)
+        _sync_percent_state(st, section, selected)
         new_kwargs["value"] = float(percent)
         new_kwargs.setdefault(
             "help",
@@ -119,7 +171,6 @@ def install_stage_preset_guard() -> bool:
         return False
 
     installed = False
-    preset_labels = [name for name, _ in STAGE_PRESETS] + [ADD_CUSTOM_STAGE]
 
     # Patch top-level st.* calls for any non-column form layouts.
     original_text_input = getattr(st, "text_input", None)
@@ -140,7 +191,6 @@ def install_stage_preset_guard() -> bool:
                     original_selectbox,
                     original_text_input,
                     original_caption,
-                    preset_labels,
                 )
             return original_text_input(label, *args, **kwargs)
 
@@ -181,7 +231,6 @@ def install_stage_preset_guard() -> bool:
                         lambda *a, **k: dg_selectbox(self, *a, **k),
                         lambda *a, **k: dg_text_input(self, *a, **k),
                         caption_fn,
-                        preset_labels,
                     )
                 return dg_text_input(self, label, *args, **kwargs)
 
