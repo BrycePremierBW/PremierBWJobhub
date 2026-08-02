@@ -86,6 +86,7 @@ class SourceStructureTests(unittest.TestCase):
             self.assertIn(label, source)
         self.assertIn("def save_operating_settings", source)
         self.assertIn("overhead_recovery_metrics", source)
+        self.assertIn("today_text = jobhub_today().isoformat()", source)
         self.assertIn("def pb_dashboard_navigation_tile", source)
         self.assertIn("def pb_dashboard_widget_link", source)
         for target in (
@@ -107,6 +108,16 @@ class SourceStructureTests(unittest.TestCase):
         for field in ("prepped_sealed", "prep_spray_finished", "cut_rolled", "defects"):
             self.assertIn(field, tracker_source)
         self.assertIn("_render_custom_internal_items", tracker_source)
+
+    def test_estimate_pricing_uses_one_simple_daily_target(self):
+        app_source = (ROOT / "pb_jobhub_app.py").read_text(encoding="utf-8")
+        production_source = (ROOT / "jobhub_production.py").read_text(encoding="utf-8")
+        self.assertIn('col6.metric("Labour Rate", "$1,000 / painter per 8-hour day")', app_source)
+        self.assertIn("contingency_percent = 0.0", app_source)
+        self.assertNotIn('"Contingency % (optional)"', app_source)
+        self.assertNotIn('"Low value / day"', app_source)
+        self.assertNotIn('"High value / day"', app_source)
+        self.assertIn("contingency_amount = 0.0", production_source)
 
 
 if __name__ == "__main__":
