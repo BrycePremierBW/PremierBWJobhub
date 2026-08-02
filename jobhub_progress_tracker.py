@@ -6,6 +6,8 @@ from io import BytesIO
 import pandas as pd
 import streamlit as st
 
+from jobhub_production import expected_progress, line_production_metrics
+
 
 INTERNAL_STAGES = [
     ("sealer", "Sealer", 15.0),
@@ -351,6 +353,91 @@ def _summary(context, job_id, settings):
     }
 
 
+def _timesheet_expected_progress(context, job_id, estimate_id):
+    """Calculate the progress that submitted hours should have earned on the take-off."""
+    baseline = context["df_query"](
+        """
+        SELECT id,estimate_id,COALESCE(production_day_hours,8) AS day_hours,
+               COALESCE(production_value_target,900) AS value_target
+        FROM estimate_baselines
+        WHERE job_id=? AND COALESCE(active,1)=1
+        ORDER BY locked_at DESC,id DESC LIMIT 1
+        """,
+        (int(job_id),),
+    )
+    baseline_id = int(baseline.iloc[0]["id"]) if not baseline.empty else None
+    if not estimate_id and not baseline_id:
+        return None
+    if baseline_id:
+        production = {
+            "day_hours": float(baseline.iloc[0]["day_hours"] or 8),
+            "value_low": 800.0,
+            "value_target": float(baseline.iloc[0]["value_target"] or 900),
+            "value_high": 1000.0,
+        }
+        lines = context["df_query"](
+            """
+            SELECT COALESCE(qty,0) AS qty,COALESCE(unit,'item') AS unit,
+                   COALESCE(unit_rate,0) AS unit_rate,COALESCE(line_total,0) AS line_total,
+                   COALESCE(estimated_labour_hours,0) AS estimated_labour_hours
+            FROM estimate_baseline_lines
+            WHERE baseline_id=? AND COALESCE(production_tracking_enabled,1)=1
+            """,
+            (baseline_id,),
+        )
+    else:
+        settings_df = context["df_query"](
+            """
+            SELECT COALESCE(production_day_hours,8) AS day_hours,
+                   COALESCE(production_value_low,800) AS value_low,
+                   COALESCE(production_value_target,900) AS value_target,
+                   COALESCE(production_value_high,1000) AS value_high
+            FROM estimate_working_sheets WHERE id=?
+            """,
+            (int(estimate_id),),
+        )
+        if settings_df.empty:
+            return None
+        production = settings_df.iloc[0]
+        lines = context["df_query"](
+            """
+            SELECT COALESCE(qty,0) AS qty,COALESCE(unit,'item') AS unit,
+                   COALESCE(unit_rate,0) AS unit_rate,COALESCE(line_total,0) AS line_total,
+                   COALESCE(estimated_labour_hours,0) AS estimated_labour_hours
+            FROM estimate_line_items
+            WHERE estimate_id=? AND COALESCE(production_tracking_enabled,1)=1
+            """,
+            (int(estimate_id),),
+        )
+    target_hours = 0.0
+    for _, line in lines.iterrows():
+        metrics = line_production_metrics(
+            quantity=line["qty"], unit_rate=line["unit_rate"], line_total=line["line_total"],
+            unit=line["unit"], day_hours=production["day_hours"],
+            value_low=production["value_low"], value_target=production["value_target"],
+            value_high=production["value_high"],
+        )
+        target_hours += float(
+            metrics["labour_hours_at_target"] or line["estimated_labour_hours"] or 0
+        )
+    if target_hours <= 0:
+        return None
+    actual_df = context["df_query"](
+        """
+        SELECT COALESCE(SUM(total_hours),0) AS actual_hours
+        FROM timesheet_entries
+        WHERE job_id=? AND COALESCE(status,'Submitted') <> 'Rejected'
+        """,
+        (int(job_id),),
+    )
+    actual_hours = float(actual_df.iloc[0]["actual_hours"] or 0) if not actual_df.empty else 0.0
+    result = expected_progress(actual_hours, target_hours)
+    result["estimate_id"] = int(estimate_id) if estimate_id else None
+    result["baseline_id"] = baseline_id
+    result["source"] = "Locked baseline" if baseline_id else "Current estimate"
+    return result
+
+
 def _render_status_editor(context, df, table, id_column, stages, username, key_prefix):
     if df.empty:
         st.info("No rows have been created yet.")
@@ -483,6 +570,22 @@ def render_progress_tracker(context):
             context["pb_rerun"]()
 
     settings = _setting(context, job_id)
+    production_estimate_id = (
+        int(settings.get("linked_estimate_id"))
+        if settings.get("linked_estimate_id")
+        else (int(estimates.iloc[0]["id"]) if not estimates.empty else None)
+    )
+    productivity = _timesheet_expected_progress(context, job_id, production_estimate_id)
+    if productivity:
+        st.markdown("### Timesheet productivity check")
+        p1, p2, p3 = st.columns(3)
+        p1.metric("Take-off Target Hours", f"{productivity['budget_hours']:,.1f}")
+        p2.metric("Timesheet Hours Used", f"{productivity['actual_hours']:,.1f}")
+        p3.metric("Should Be Complete", f"{productivity['raw_expected_percent']:,.1f}%")
+        st.caption(
+            f"Calculated from tracked take-off lines using the {productivity['source'].lower()} "
+            "and its completed-work value target per 8-hour painter-day."
+        )
     if not settings:
         st.info("Save the tracker setup above to create this job's dwelling rows.")
         return
@@ -494,7 +597,18 @@ def render_progress_tracker(context):
         )
     dwellings, external, totals = _summary(context, job_id, settings)
     estimate_value = float(job.get("contract_value") or 0)
-    if settings.get("linked_estimate_id"):
+    baseline_value = context["df_query"](
+        """
+        SELECT COALESCE(total_ex_gst,0) AS total_ex_gst
+        FROM estimate_baselines
+        WHERE job_id=? AND COALESCE(active,1)=1
+        ORDER BY locked_at DESC,id DESC LIMIT 1
+        """,
+        (int(job_id),),
+    )
+    if not baseline_value.empty and float(baseline_value.iloc[0]["total_ex_gst"] or 0) > 0:
+        estimate_value = float(baseline_value.iloc[0]["total_ex_gst"] or 0)
+    elif settings.get("linked_estimate_id"):
         chosen = estimates[estimates["id"] == int(settings["linked_estimate_id"])]
         if not chosen.empty:
             estimate_value = float(chosen.iloc[0]["total_ex_gst"] or estimate_value)
@@ -507,6 +621,19 @@ def render_progress_tracker(context):
     c4.metric("Earned Value", f"${earned_value:,.0f}")
     c5.metric("Remaining Value", f"${max(0, estimate_value-earned_value):,.0f}")
     st.progress(min(max(totals["overall_pct"] / 100, 0.0), 1.0))
+    if productivity:
+        progress_variance = totals["overall_pct"] - productivity["raw_expected_percent"]
+        if progress_variance >= -2:
+            comparison = "ahead of" if progress_variance >= 0 else "within tolerance of"
+            st.success(
+                f"Recorded physical progress is {abs(progress_variance):.1f} percentage points "
+                f"{comparison} the timesheet expectation."
+            )
+        else:
+            st.warning(
+                f"Recorded physical progress is {abs(progress_variance):.1f} percentage points behind "
+                "what the used hours should have completed."
+            )
 
     internal_tab, external_tab, summary_tab = st.tabs(
         ["Internal Dwellings", "External Substrates", "Summary / Export"]

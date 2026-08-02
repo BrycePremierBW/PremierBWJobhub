@@ -25,7 +25,8 @@ routes = [
     "Estimate Working Sheet", "Job Costs / Forecasting",
     "Import Take-off / Model File", "Progress / Billing Model", "3D Model Viewer",
     "Reports / Export", "Builders & Clients", "Employees", "Products",
-    "User Access", "JobHub AI Assistant", "App Builder AI",
+    "User Access", "Staff Requests", "Staff Scheduler", "Painting Intelligence",
+    "Job Progress Tracker", "JobHub AI Assistant", "App Builder AI",
 ]
 
 at = AppTest.from_file(str(ROOT / "pb_jobhub_app.py"), default_timeout=60)

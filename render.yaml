@@ -26,3 +26,9 @@ services:
         value: "false"
       - key: JOBHUB_ENABLE_SELF_EDIT
         value: "false"
+      - key: ONESIGNAL_APP_ID
+        sync: false
+      - key: ONESIGNAL_REST_API_KEY
+        sync: false
+      - key: JOBHUB_PUBLIC_URL
+        sync: false

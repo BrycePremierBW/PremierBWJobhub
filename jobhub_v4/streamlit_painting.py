@@ -14,6 +14,14 @@ from .handover import build_handover_manifest, build_handover_zip
 from .paint import calculate_paint_quantity, colour_order_allowed, optimise_pack_mix
 from .revisions import compare_revisions
 from .schema import ensure_v4_schema
+from jobhub_production import (
+    DEFAULT_DAY_HOURS,
+    DEFAULT_VALUE_HIGH,
+    DEFAULT_VALUE_LOW,
+    DEFAULT_VALUE_TARGET,
+    expected_progress,
+    line_production_metrics,
+)
 
 
 def _now() -> str:
@@ -58,32 +66,339 @@ def _records(frame: pd.DataFrame) -> list[dict[str, Any]]:
     return json.loads(frame.to_json(orient="records", date_format="iso"))
 
 
+def _takeoff_lines_for_job(ctx: dict[str, Any], job_id: int) -> pd.DataFrame:
+    """Use the latest imported take-off estimate, falling back to the latest job estimate."""
+    imported = ctx["df_query"](
+        """
+        SELECT estimate_id
+        FROM takeoff_pack_imports
+        WHERE job_id=? AND estimate_id IS NOT NULL
+        ORDER BY imported_at DESC, id DESC
+        LIMIT 1
+        """,
+        (job_id,),
+    )
+    if not imported.empty:
+        estimate_id = int(imported.iloc[0]["estimate_id"])
+    else:
+        estimates = ctx["df_query"](
+            """
+            SELECT id
+            FROM estimate_working_sheets
+            WHERE job_id=? AND COALESCE(archived,0)=0
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (job_id,),
+        )
+        if estimates.empty:
+            return pd.DataFrame()
+        estimate_id = int(estimates.iloc[0]["id"])
+    return ctx["df_query"](
+        """
+        SELECT li.id, li.estimate_id, li.job_stage_id,
+               COALESCE(js.stage_name,'Whole Job') AS stage_name,
+               COALESCE(li.section,'Take-off') AS section,
+               COALESCE(li.item_description,'') AS item_description,
+               COALESCE(li.qty,0) AS qty, COALESCE(li.unit,'item') AS unit,
+               COALESCE(li.unit_rate,0) AS unit_rate,
+               COALESCE(li.line_total,0) AS line_total,
+               COALESCE(li.estimated_labour_hours,0) AS estimated_labour_hours,
+               COALESCE(li.substrate,'') AS substrate,
+               COALESCE(li.work_location,'') AS work_location,
+               COALESCE(li.coating_system,'') AS coating_system,
+               COALESCE(li.colour_finish,'') AS colour_finish,
+               COALESCE(li.production_tracking_enabled,1) AS production_tracking_enabled,
+               COALESCE(e.production_day_hours,8) AS production_day_hours,
+               COALESCE(e.production_value_low,800) AS production_value_low,
+               COALESCE(e.production_value_target,900) AS production_value_target,
+               COALESCE(e.production_value_high,1000) AS production_value_high
+        FROM estimate_line_items li
+        JOIN estimate_working_sheets e ON e.id=li.estimate_id
+        LEFT JOIN job_stages js ON js.id=li.job_stage_id
+        WHERE li.estimate_id=?
+        ORDER BY li.id
+        """,
+        (estimate_id,),
+    )
+
+
+def _job_stage_options(ctx: dict[str, Any], job_id: int) -> dict[str, int | None]:
+    stages = ctx["df_query"](
+        """
+        SELECT id, stage_name
+        FROM job_stages
+        WHERE job_id=?
+        ORDER BY sequence_order, id
+        """,
+        (job_id,),
+    )
+    options: dict[str, int | None] = {"Whole Job": None}
+    for _, row in stages.iterrows():
+        options[str(row["stage_name"])] = int(row["id"])
+    return options
+
+
+def _normalised_work_unit(value: Any) -> str:
+    unit = str(value or "item").strip().casefold().replace("²", "2")
+    if unit in {"m2", "sqm", "sq m", "square metre", "square metres"}:
+        return "m²"
+    if unit in {"lm", "lin m", "linear m", "lineal m", "lineal metre", "lineal metres"}:
+        return "lineal m"
+    return str(value or "item").strip() or "item"
+
+
+def _render_required_work_status(
+    ctx: dict[str, Any],
+    job_id: int,
+    takeoff_lines: pd.DataFrame,
+    selected_line: dict[str, Any] | None,
+    stage_id: int | None,
+    stage_name: str,
+    work_quantity: float,
+    work_unit: str,
+    unit_rate: float,
+) -> dict[str, float]:
+    """Show the quantity that should be complete for hours already submitted."""
+    if selected_line:
+        day_hours = float(selected_line.get("production_day_hours") or DEFAULT_DAY_HOURS)
+        value_low = float(selected_line.get("production_value_low") or DEFAULT_VALUE_LOW)
+        value_target = float(selected_line.get("production_value_target") or DEFAULT_VALUE_TARGET)
+        value_high = float(selected_line.get("production_value_high") or DEFAULT_VALUE_HIGH)
+    else:
+        day_hours = DEFAULT_DAY_HOURS
+        value_low = DEFAULT_VALUE_LOW
+        value_target = DEFAULT_VALUE_TARGET
+        value_high = DEFAULT_VALUE_HIGH
+
+    selected_metrics = line_production_metrics(
+        quantity=work_quantity,
+        unit_rate=unit_rate,
+        unit=work_unit,
+        day_hours=day_hours,
+        value_low=value_low,
+        value_target=value_target,
+        value_high=value_high,
+    )
+    scope = takeoff_lines[
+        takeoff_lines["production_tracking_enabled"].fillna(1).astype(int) == 1
+    ].copy() if not takeoff_lines.empty else pd.DataFrame()
+    if stage_id is not None and not scope.empty:
+        scope = scope[scope["job_stage_id"].fillna(0).astype(int) == int(stage_id)]
+
+    target_hours = 0.0
+    selected_id = int(selected_line["id"]) if selected_line else None
+    selected_found = False
+    for _, line in scope.iterrows():
+        is_selected = selected_id is not None and int(line["id"]) == selected_id
+        metrics = line_production_metrics(
+            quantity=work_quantity if is_selected else line["qty"],
+            unit_rate=unit_rate if is_selected else line["unit_rate"],
+            line_total=None if is_selected else line["line_total"],
+            unit=work_unit if is_selected else line["unit"], day_hours=day_hours, value_low=value_low,
+            value_target=value_target, value_high=value_high,
+        )
+        line_hours = float(metrics["labour_hours_at_target"])
+        if line_hours <= 0:
+            line_hours = float(line["estimated_labour_hours"] or 0)
+        target_hours += line_hours
+        selected_found = selected_found or is_selected
+    if not selected_found:
+        target_hours += float(selected_metrics["labour_hours_at_target"])
+
+    if stage_id is None:
+        hours = ctx["df_query"](
+            """
+            SELECT COALESCE(SUM(total_hours),0) AS actual_hours
+            FROM timesheet_entries
+            WHERE job_id=? AND COALESCE(status,'Submitted') <> 'Rejected'
+            """,
+            (job_id,),
+        )
+    else:
+        hours = ctx["df_query"](
+            """
+            SELECT COALESCE(SUM(total_hours),0) AS actual_hours
+            FROM timesheet_entries
+            WHERE job_id=? AND job_stage_id=?
+              AND COALESCE(status,'Submitted') <> 'Rejected'
+            """,
+            (job_id, stage_id),
+        )
+    actual_hours = float(hours.iloc[0]["actual_hours"] or 0) if not hours.empty else 0.0
+    progress = expected_progress(actual_hours, target_hours)
+    expected_quantity = float(work_quantity) * progress["expected_percent"] / 100.0
+
+    st.markdown("#### Required-work check")
+    p1, p2, p3, p4 = st.columns(4)
+    p1.metric(f"Target {work_unit} / 8h", f"{float(selected_metrics['units_per_day_target']):,.2f}")
+    p2.metric(f"{stage_name} Target Hours", f"{target_hours:,.1f}")
+    p3.metric("Timesheet Hours Used", f"{actual_hours:,.1f}")
+    p4.metric("Should Be Complete", f"{progress['raw_expected_percent']:,.1f}%")
+    if target_hours > 0:
+        st.info(
+            f"Based on ${value_target:,.0f} of completed work per {day_hours:g}-hour painter-day, "
+            f"about {expected_quantity:,.2f} of {work_quantity:,.2f} {work_unit} should be complete by now."
+        )
+    elif unit_rate <= 0:
+        st.warning("Enter a unit rate above $0 to calculate the required daily quantity and expected progress.")
+    return {
+        "target_hours": target_hours,
+        "actual_hours": actual_hours,
+        "expected_percent": float(progress["raw_expected_percent"]),
+    }
+
+
 def _paint_calculator(ctx: dict[str, Any], job_id: int) -> None:
     st.subheader("Paint quantity and pack optimisation")
     st.caption(
-        "Calculate coating-system litres, use warehouse stock first and select "
-        "the lowest-cost 4 L / 10 L / 15 L supplier mix."
+        "Select measured work from this job's take-off, or choose Manual entry. Both "
+        "routes calculate coating litres, pack mix and the work progress expected from timesheets."
     )
+
+    takeoff_lines = _takeoff_lines_for_job(ctx, job_id)
+    source_options: dict[str, dict[str, Any] | None] = {}
+    if not takeoff_lines.empty:
+        for _, line in takeoff_lines.iterrows():
+            location = str(line["work_location"] or "").strip()
+            description = str(line["item_description"] or "").strip()
+            label_name = location or description or f"Take-off line {int(line['id'])}"
+            source_options[
+                f"{label_name} · {float(line['qty'] or 0):,.2f} {line['unit']} · "
+                f"{line['stage_name']} (line #{int(line['id'])})"
+            ] = line.to_dict()
+    source_options["Manual entry"] = None
+    selected_source = st.selectbox(
+        "Work source",
+        list(source_options.keys()),
+        key=f"v4_work_source_{job_id}",
+        help="Imported take-off lines are listed first. Choose Manual entry to add work not included in the take-off.",
+    )
+    selected_line = source_options[selected_source]
+    source_key = str(int(selected_line["id"])) if selected_line else "manual"
+
+    def clean_text(value: Any, fallback: str = "") -> str:
+        if value is None or (isinstance(value, float) and pd.isna(value)):
+            return fallback
+        text = str(value).strip()
+        return fallback if text.casefold() == "nan" else text
+
+    stage_options = _job_stage_options(ctx, job_id)
+    if selected_line:
+        selected_stage_id = (
+            int(selected_line["job_stage_id"])
+            if pd.notna(selected_line.get("job_stage_id")) else None
+        )
+        selected_stage_name = clean_text(selected_line.get("stage_name"), "Whole Job")
+        st.caption(
+            f"Take-off source: {clean_text(selected_line.get('section'), 'Take-off')} · "
+            f"{selected_stage_name}. Values can be adjusted before saving without changing the original line."
+        )
+    else:
+        selected_stage_name = st.selectbox(
+            "Job stage for progress tracking",
+            list(stage_options.keys()),
+            key=f"v4_manual_stage_{job_id}",
+        )
+        selected_stage_id = stage_options[selected_stage_name]
+
     left, right = st.columns(2)
-    area_name = left.text_input("Area / location", key="v4_area_name")
-    substrate = left.text_input("Substrate", key="v4_substrate")
-    product = left.text_input("Paint product", key="v4_product")
-    colour = left.text_input("Colour", key="v4_colour")
-    area_sqm = right.number_input("Area (m²)", min_value=0.0, step=10.0, key="v4_area")
+    area_name = left.text_input(
+        "Area / location",
+        value=(
+            clean_text(selected_line.get("work_location"))
+            or clean_text(selected_line.get("item_description"))
+            if selected_line else ""
+        ),
+        key=f"v4_area_name_{job_id}_{source_key}",
+    )
+    substrate = left.text_input(
+        "Substrate",
+        value=clean_text(selected_line.get("substrate")) if selected_line else "",
+        key=f"v4_substrate_{job_id}_{source_key}",
+    )
+    product = left.text_input(
+        "Paint product",
+        value=(
+            clean_text(selected_line.get("coating_system"))
+            or clean_text(selected_line.get("item_description"))
+            if selected_line else ""
+        ),
+        key=f"v4_product_{job_id}_{source_key}",
+    )
+    colour = left.text_input(
+        "Colour",
+        value=clean_text(selected_line.get("colour_finish")) if selected_line else "",
+        key=f"v4_colour_{job_id}_{source_key}",
+    )
+
+    if selected_line:
+        work_unit = _normalised_work_unit(selected_line.get("unit"))
+        right.text_input(
+            "Take-off unit",
+            value=work_unit,
+            disabled=True,
+            key=f"v4_unit_{job_id}_{source_key}",
+        )
+    else:
+        work_unit = right.selectbox(
+            "Work unit",
+            ["m²", "lineal m", "item"],
+            key=f"v4_unit_{job_id}_{source_key}",
+        )
+    default_quantity = float(selected_line.get("qty") or 0) if selected_line else 0.0
+    quantity_label = "Area (m²)" if work_unit == "m²" else (
+        "Length (lineal m)" if work_unit == "lineal m" else "Work quantity"
+    )
+    work_quantity = float(right.number_input(
+        quantity_label,
+        min_value=0.0,
+        value=default_quantity,
+        step=10.0 if work_unit != "item" else 1.0,
+        key=f"v4_work_qty_{job_id}_{source_key}",
+    ))
+    if work_unit == "m²":
+        area_sqm = work_quantity
+    elif work_unit == "lineal m":
+        painted_width = float(right.number_input(
+            "Painted width / height per lineal metre (m)",
+            min_value=0.01,
+            value=1.0,
+            step=0.05,
+            key=f"v4_lineal_width_{job_id}_{source_key}",
+        ))
+        area_sqm = work_quantity * painted_width
+        right.caption(f"Converted painted area: {area_sqm:,.2f} m²")
+    else:
+        area_sqm = float(right.number_input(
+            "Painted area for litre calculation (m²)",
+            min_value=0.0,
+            value=0.0,
+            step=10.0,
+            key=f"v4_item_area_{job_id}_{source_key}",
+        ))
+    unit_rate = float(right.number_input(
+        f"Sell rate per {work_unit} ex GST",
+        min_value=0.0,
+        value=float(selected_line.get("unit_rate") or 0) if selected_line else 0.0,
+        step=1.0,
+        key=f"v4_unit_rate_{job_id}_{source_key}",
+        help="Used to convert the $800–$1,000 painter-day target into required daily quantity.",
+    ))
     coats = right.number_input(
         "Coats",
         min_value=1,
         max_value=10,
         value=2,
         step=1,
-        key="v4_coats",
+        key=f"v4_coats_{job_id}_{source_key}",
     )
     coverage = right.number_input(
         "Coverage (m²/L/coat)",
         min_value=0.1,
         value=12.0,
         step=0.5,
-        key="v4_coverage",
+        key=f"v4_coverage_{job_id}_{source_key}",
     )
     waste = right.number_input(
         "Waste allowance (%)",
@@ -91,7 +406,12 @@ def _paint_calculator(ctx: dict[str, Any], job_id: int) -> None:
         max_value=100.0,
         value=10.0,
         step=1.0,
-        key="v4_waste",
+        key=f"v4_waste_{job_id}_{source_key}",
+    )
+
+    tracking = _render_required_work_status(
+        ctx, job_id, takeoff_lines, selected_line, selected_stage_id,
+        selected_stage_name, work_quantity, work_unit, unit_rate,
     )
 
     st.markdown("#### Warehouse stock and supplier pricing")
@@ -106,7 +426,7 @@ def _paint_calculator(ctx: dict[str, Any], job_id: int) -> None:
                     "Warehouse packs",
                     min_value=0,
                     step=1,
-                    key=f"v4_stock_{size}",
+                    key=f"v4_stock_{job_id}_{source_key}_{size}",
                 )
             )
             prices[size] = float(
@@ -114,38 +434,72 @@ def _paint_calculator(ctx: dict[str, Any], job_id: int) -> None:
                     "Supplier price ex GST",
                     min_value=0.0,
                     step=1.0,
-                    key=f"v4_price_{size}",
+                    key=f"v4_price_{job_id}_{source_key}_{size}",
                 )
             )
 
-    if not st.button("Calculate paint and packs", type="primary", key="v4_calculate"):
-        return
-    try:
-        quantity = calculate_paint_quantity(
-            area_sqm=area_sqm,
-            coats=coats,
-            coverage_sqm_per_litre=coverage,
-            waste_percent=waste,
-        )
-        plan = optimise_pack_mix(
-            required_litres=quantity["required_litres"],
-            warehouse_stock=stock,
-            supplier_prices=prices,
-        )
-    except ValueError as exc:
-        st.error(str(exc))
-        return
-
-    st.session_state["v4_last_calculation"] = {
-        "quantity": quantity,
-        "plan": plan,
-        "form": {
-            "area_name": area_name,
-            "substrate": substrate,
-            "product": product,
-            "colour": colour,
+    calculation_fingerprint = json.dumps(
+        {
+            "source_key": source_key, "area_name": area_name, "substrate": substrate,
+            "product": product, "colour": colour, "area_sqm": area_sqm,
+            "work_quantity": work_quantity, "work_unit": work_unit, "unit_rate": unit_rate,
+            "coats": int(coats), "coverage": float(coverage), "waste": float(waste),
+            "stock": stock, "prices": prices, "job_stage_id": selected_stage_id,
         },
-    }
+        sort_keys=True,
+        default=str,
+    )
+
+    if st.button(
+        "Calculate paint, packs and required work",
+        type="primary",
+        key=f"v4_calculate_{job_id}_{source_key}",
+    ):
+        try:
+            quantity = calculate_paint_quantity(
+                area_sqm=area_sqm,
+                coats=coats,
+                coverage_sqm_per_litre=coverage,
+                waste_percent=waste,
+            )
+            plan = optimise_pack_mix(
+                required_litres=quantity["required_litres"],
+                warehouse_stock=stock,
+                supplier_prices=prices,
+            )
+        except ValueError as exc:
+            st.error(str(exc))
+        else:
+            st.session_state["v4_last_calculation"] = {
+                "job_id": job_id,
+                "source_key": source_key,
+                "input_fingerprint": calculation_fingerprint,
+                "quantity": quantity,
+                "plan": plan,
+                "form": {
+                    "area_name": area_name, "substrate": substrate, "product": product,
+                    "colour": colour, "area_sqm": area_sqm, "coats": int(coats),
+                    "coverage": float(coverage), "waste": float(waste),
+                    "work_quantity": work_quantity, "work_unit": work_unit,
+                    "unit_rate": unit_rate, "job_stage_id": selected_stage_id,
+                    "stage_name": selected_stage_name,
+                    "source_line_id": int(selected_line["id"]) if selected_line else None,
+                    "estimate_id": int(selected_line["estimate_id"]) if selected_line else None,
+                    "tracking": tracking,
+                },
+            }
+
+    calculation = st.session_state.get("v4_last_calculation")
+    if (
+        not calculation
+        or int(calculation.get("job_id") or 0) != int(job_id)
+        or str(calculation.get("source_key") or "") != source_key
+        or calculation.get("input_fingerprint") != calculation_fingerprint
+    ):
+        return
+    quantity = calculation["quantity"]
+    plan = calculation["plan"]
+    saved_form = calculation["form"]
     metric_columns = st.columns(4)
     metric_columns[0].metric("Required", f"{quantity['required_litres']:.2f} L")
     metric_columns[1].metric("Supplied", f"{plan['supplied_litres']:.0f} L")
@@ -161,7 +515,7 @@ def _paint_calculator(ctx: dict[str, Any], job_id: int) -> None:
         ORDER BY updated_at DESC
         LIMIT 1
         """,
-        (job_id, colour),
+        (job_id, saved_form["colour"]),
     )
     if approval.empty:
         allowed, reason = False, "No colour approval is recorded for this colour."
@@ -177,8 +531,17 @@ def _paint_calculator(ctx: dict[str, Any], job_id: int) -> None:
     else:
         st.warning(reason)
 
-    if st.button("Save coating system", key="v4_save_system"):
-        if not area_name.strip() or not product.strip():
+    add_manual_to_tracking = False
+    if saved_form.get("source_line_id") is None:
+        add_manual_to_tracking = st.checkbox(
+            "Add this manual work to the job's estimate / take-off tracking",
+            value=True,
+            key=f"v4_add_manual_tracking_{job_id}_{source_key}",
+            help="The item will appear in this dropdown next time and continue comparing timesheet hours with required work.",
+        )
+
+    if st.button("Save coating system", key=f"v4_save_system_{job_id}_{source_key}"):
+        if not str(saved_form["area_name"]).strip() or not str(saved_form["product"]).strip():
             st.error("Area / location and paint product are required.")
             return
         timestamp = _now()
@@ -194,14 +557,14 @@ def _paint_calculator(ctx: dict[str, Any], job_id: int) -> None:
             (
                 system_id,
                 job_id,
-                area_name.strip(),
-                substrate.strip(),
-                product.strip(),
-                colour.strip(),
-                area_sqm,
-                int(coats),
-                coverage,
-                waste,
+                str(saved_form["area_name"]).strip(),
+                str(saved_form["substrate"]).strip(),
+                str(saved_form["product"]).strip(),
+                str(saved_form["colour"]).strip(),
+                float(saved_form["area_sqm"]),
+                int(saved_form["coats"]),
+                float(saved_form["coverage"]),
+                float(saved_form["waste"]),
                 quantity["required_litres"],
                 json.dumps(plan),
                 _current_user_name(ctx),
@@ -213,9 +576,78 @@ def _paint_calculator(ctx: dict[str, Any], job_id: int) -> None:
             "paint_system_created",
             "paint_system",
             system_id,
-            {"job_id": job_id, "required_litres": quantity["required_litres"]},
+            {
+                "job_id": job_id,
+                "required_litres": quantity["required_litres"],
+                "source_line_id": saved_form.get("source_line_id"),
+                "expected_progress_percent": saved_form.get("tracking", {}).get("expected_percent", 0),
+            },
         )
+        if add_manual_to_tracking and saved_form.get("source_line_id") is None:
+            estimate_id = saved_form.get("estimate_id")
+            if estimate_id is None:
+                latest = ctx["df_query"](
+                    """
+                    SELECT id FROM estimate_working_sheets
+                    WHERE job_id=? AND COALESCE(archived,0)=0
+                    ORDER BY id DESC LIMIT 1
+                    """,
+                    (job_id,),
+                )
+                estimate_id = int(latest.iloc[0]["id"]) if not latest.empty else None
+            if estimate_id is None:
+                job_row = ctx["df_query"]("SELECT job_no FROM jobs WHERE id=?", (job_id,))
+                job_no = str(job_row.iloc[0]["job_no"] or f"JOB-{job_id}") if not job_row.empty else f"JOB-{job_id}"
+                conn = ctx["connect"]()
+                try:
+                    cur = conn.cursor()
+                    insert_sql = """
+                        INSERT INTO estimate_working_sheets
+                        (job_id,estimate_no,estimate_date,revision,status,created_at,updated_at,notes)
+                        VALUES (?,?,?,?,?,?,?,?)
+                    """
+                    if ctx.get("USE_POSTGRES"):
+                        insert_sql += " RETURNING id"
+                    cur.execute(insert_sql, (
+                        job_id, f"{job_no}-PI-01", datetime.now().date().isoformat(),
+                        "Painting Intelligence", "Draft", timestamp, timestamp,
+                        "Created from a manual Painting Intelligence work item.",
+                    ))
+                    estimate_id = int(cur.fetchone()[0]) if ctx.get("USE_POSTGRES") else int(cur.lastrowid)
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+                    raise
+                finally:
+                    conn.close()
+            target_metrics = line_production_metrics(
+                quantity=saved_form["work_quantity"], unit_rate=saved_form["unit_rate"],
+                unit=saved_form["work_unit"],
+            )
+            ctx["execute"](
+                """
+                INSERT INTO estimate_line_items
+                (estimate_id,job_stage_id,production_tracking_enabled,section,item_description,
+                 qty,unit,unit_rate,line_total,estimated_labour_hours,substrate,work_location,
+                 coating_system,colour_finish,source_pack,notes)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    int(estimate_id), saved_form.get("job_stage_id"), 1, "Painting Intelligence",
+                    f"{saved_form['area_name']} — {saved_form['product']}",
+                    float(saved_form["work_quantity"]), saved_form["work_unit"],
+                    float(saved_form["unit_rate"]),
+                    round(float(saved_form["work_quantity"]) * float(saved_form["unit_rate"]), 2),
+                    float(target_metrics["labour_hours_at_target"]), saved_form["substrate"],
+                    saved_form["area_name"], saved_form["product"], saved_form["colour"],
+                    "Manual Painting Intelligence", "Saved from Paint & packs.",
+                ),
+            )
+            recalc = ctx.get("recalc_estimate_totals")
+            if recalc:
+                recalc(int(estimate_id))
         ctx["pb_success"]("Coating system and pack plan saved.")
+        ctx["pb_rerun"]()
 
 
 def _colour_approvals(ctx: dict[str, Any], job_id: int) -> None:
