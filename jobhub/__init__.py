@@ -1,5 +1,6 @@
 """Premier Brushworks JobHub application package."""
 
+from .ai_menu_guard import install_ai_menu_guard
 from .mobile_sidebar_guard import install_mobile_sidebar_guard
 from .navigation_state_guard import install_navigation_state_guard
 from .notification_wording_guard import install_notification_wording_guard
@@ -16,3 +17,4 @@ install_mobile_sidebar_guard()
 install_navigation_state_guard()
 install_stage_selection_guard()
 install_stage_preset_guard()
+install_ai_menu_guard()
