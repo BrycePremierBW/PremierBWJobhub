@@ -10,6 +10,7 @@
   "orientation": "any",
   "background_color": "#F7F3ED",
   "theme_color": "#8B6F47",
+  "gcm_sender_id": "482941778795",
   "icons": [
     {
       "src": "/app/static/PB_JobHub_Icon.png",
