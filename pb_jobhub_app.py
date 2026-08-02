@@ -80,7 +80,7 @@ MAX_TAKEOFF_PACK_FILES = 300
 MAX_IMAGE_PIXELS = 25_000_000
 Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 
-PB_JOBHUB_BUILD = "2026.08.03-mobile-push-production-v4"
+PB_JOBHUB_BUILD = "2026.08.03-mobile-sidebar-production-v5"
 PLANNING_LABOUR_RATE = 60.0
 
 
@@ -565,32 +565,41 @@ def apply_pb_branding():
         }
 
 
-        /* PB_JOBHUB_SIDEBAR_SCROLL_GUARD_V2
-           Keep the complete navigation readable and independently scrollable. */
+        /* PB_JOBHUB_SIDEBAR_SCROLL_GUARD_V3
+           Keep one touch-friendly navigation scroller. Dynamic viewport units
+           prevent the installed iPhone app's browser chrome from trapping the
+           bottom of the menu. */
         section[data-testid="stSidebar"] {
-            height: 100svh !important;
-            max-height: 100svh !important;
+            height: 100dvh !important;
+            max-height: 100dvh !important;
             overflow: hidden !important;
         }
 
-        section[data-testid="stSidebar"] > div,
-        section[data-testid="stSidebar"] [data-testid="stSidebarContent"] {
-            height: 100svh !important;
-            max-height: 100svh !important;
-            overflow-y: auto !important;
-            overflow-x: hidden !important;
-            overscroll-behavior-y: contain !important;
-            scrollbar-gutter: stable !important;
-            scroll-behavior: auto !important;
-            padding-bottom: 2rem !important;
+        section[data-testid="stSidebar"] > div {
+            height: 100% !important;
+            max-height: 100% !important;
+            min-height: 0 !important;
+            overflow: hidden !important;
         }
 
-        section[data-testid="stSidebar"] > div::-webkit-scrollbar,
+        section[data-testid="stSidebar"] [data-testid="stSidebarContent"] {
+            height: 100% !important;
+            max-height: 100% !important;
+            min-height: 0 !important;
+            overflow-y: auto !important;
+            overflow-x: hidden !important;
+            overscroll-behavior-y: auto !important;
+            scrollbar-gutter: stable !important;
+            scroll-behavior: auto !important;
+            -webkit-overflow-scrolling: touch !important;
+            touch-action: pan-y !important;
+            padding-bottom: calc(2rem + env(safe-area-inset-bottom)) !important;
+        }
+
         section[data-testid="stSidebar"] [data-testid="stSidebarContent"]::-webkit-scrollbar {
             width: 11px;
         }
 
-        section[data-testid="stSidebar"] > div::-webkit-scrollbar-thumb,
         section[data-testid="stSidebar"] [data-testid="stSidebarContent"]::-webkit-scrollbar-thumb {
             background: rgba(216, 200, 184, 0.58);
             border: 3px solid transparent;
@@ -1124,38 +1133,45 @@ def pb_sidebar_header():
 
 
 def pb_scroll_sidebar_to_top():
-    """Best-effort browser scroll reset after a navigation change.
-
-    The CSS scroll guard remains the primary fix.  This helper simply prevents
-    Streamlit from preserving an awkward sidebar scroll offset between pages.
-    """
-    st.iframe(
+    """Reset navigation scroll and close the mobile sidebar after selection."""
+    st.html(
         """
         <script>
         (() => {
+          const sidebar = document.querySelector('section[data-testid="stSidebar"]');
+          if (!sidebar) return;
+
           const reset = () => {
-            try {
-              const doc = window.parent.document;
-              const sidebar = doc.querySelector('section[data-testid="stSidebar"]');
-              if (!sidebar) return;
-              const candidates = [sidebar, sidebar.firstElementChild,
-                sidebar.querySelector('[data-testid="stSidebarContent"]')];
-              candidates.filter(Boolean).forEach((node) => {
-                node.scrollTop = 0;
-                if (node.scrollTo) node.scrollTo({top: 0, left: 0, behavior: 'auto'});
-              });
-            } catch (error) {
-              // Browser sandbox restrictions are harmless; CSS still keeps the menu usable.
+            const scroller = sidebar.querySelector('[data-testid="stSidebarContent"]');
+            [sidebar, scroller].filter(Boolean).forEach((node) => {
+              node.scrollTop = 0;
+              if (node.scrollTo) node.scrollTo({top: 0, left: 0, behavior: 'auto'});
+            });
+          };
+
+          const closeMobileSidebar = () => {
+            if (!window.matchMedia('(max-width: 768px)').matches) return;
+            const closeButton = sidebar.querySelector([
+              '[data-testid="stSidebarCollapseButton"] button',
+              'button[data-testid="stSidebarCollapseButton"]',
+              'button[aria-label="Close sidebar"]',
+              'button[aria-label="close sidebar"]',
+              'button[title="Close sidebar"]',
+              'button[data-testid="stBaseButton-headerNoPadding"]'
+            ].join(','));
+            if (closeButton && sidebar.getBoundingClientRect().width > 0) {
+              closeButton.click();
             }
           };
+
           reset();
           setTimeout(reset, 80);
-          setTimeout(reset, 250);
+          setTimeout(closeMobileSidebar, 140);
+          setTimeout(closeMobileSidebar, 320);
         })();
         </script>
         """,
-        height=1,
-        width=1,
+        unsafe_allow_javascript=True,
     )
 
 

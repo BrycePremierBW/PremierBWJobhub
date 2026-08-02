@@ -12,12 +12,27 @@ class NavigationVisibilityRegressionTests(unittest.TestCase):
         cls.source = APP_SOURCE.read_text(encoding="utf-8")
 
     def test_sidebar_has_independent_vertical_scroll(self):
-        self.assertIn("PB_JOBHUB_SIDEBAR_SCROLL_GUARD_V2", self.source)
+        self.assertIn("PB_JOBHUB_SIDEBAR_SCROLL_GUARD_V3", self.source)
         self.assertRegex(
             self.source,
             r'\[data-testid="stSidebarContent"\][^{]*\{[^}]*overflow-y:\s*auto\s*!important',
         )
-        self.assertIn("padding-bottom: 2rem !important", self.source)
+        self.assertIn("height: 100dvh !important", self.source)
+        self.assertIn("-webkit-overflow-scrolling: touch !important", self.source)
+        self.assertIn("touch-action: pan-y !important", self.source)
+        self.assertIn("env(safe-area-inset-bottom)", self.source)
+
+    def test_mobile_navigation_closes_sidebar_from_top_level_page(self):
+        start = self.source.index("def pb_scroll_sidebar_to_top")
+        end = self.source.index("def pb_page_header", start)
+        helper = self.source[start:end]
+        self.assertIn("st.html(", helper)
+        self.assertIn("unsafe_allow_javascript=True", helper)
+        self.assertNotIn("st.iframe(", helper)
+        self.assertIn("closeMobileSidebar", helper)
+        self.assertIn('stSidebarCollapseButton', helper)
+        self.assertIn("button[aria-label=\"Close sidebar\"]", helper)
+        self.assertIn("window.matchMedia('(max-width: 768px)')", helper)
 
     def test_submenus_use_visible_radio_lists_not_clipped_dropdowns(self):
         for label in (
