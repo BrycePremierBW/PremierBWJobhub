@@ -49,6 +49,20 @@ from jobhub_core import (
     validate_public_http_url,
     verify_password,
 )
+from jobhub_production import (
+    DEFAULT_DAY_HOURS,
+    DEFAULT_VALUE_HIGH,
+    DEFAULT_VALUE_LOW,
+    DEFAULT_VALUE_TARGET,
+    crew_duration_days,
+    claimable_value,
+    expected_progress,
+    measured_progress,
+    line_production_metrics,
+    production_sell_pricing,
+    production_variance,
+    validate_production_targets,
+)
 # PB_FULL_VISUAL_STAFF_SCHEDULER_V1
 
 MAX_PHOTO_UPLOAD_BYTES = 15 * 1024 * 1024
@@ -61,7 +75,7 @@ MAX_TAKEOFF_PACK_FILES = 300
 MAX_IMAGE_PIXELS = 25_000_000
 Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 
-PB_JOBHUB_BUILD = "2026.07.28-dataframe-id-fix-v1"
+PB_JOBHUB_BUILD = "2026.08.02-stage-control-claims-production-v2"
 PLANNING_LABOUR_RATE = 60.0
 
 
@@ -1214,6 +1228,82 @@ def init_db():
     """)
 
     cur.execute("""
+    CREATE TABLE IF NOT EXISTS job_purchase_orders (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_id INTEGER NOT NULL,
+        po_number TEXT NOT NULL,
+        description TEXT,
+        amount_ex_gst REAL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'Active',
+        received_date TEXT,
+        notes TEXT,
+        created_at TEXT,
+        updated_at TEXT,
+        UNIQUE(job_id, po_number),
+        FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
+    )
+    """)
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_job_purchase_orders_job "
+        "ON job_purchase_orders(job_id, po_number)"
+    )
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS job_stages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_id INTEGER NOT NULL,
+        purchase_order_id INTEGER,
+        stage_name TEXT NOT NULL,
+        sequence_order INTEGER NOT NULL DEFAULT 1,
+        job_percent REAL NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'Planned',
+        start_date TEXT,
+        end_date TEXT,
+        budget_hours REAL DEFAULT 0,
+        notes TEXT,
+        created_at TEXT,
+        updated_at TEXT,
+        UNIQUE(job_id, stage_name),
+        FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+        FOREIGN KEY(purchase_order_id) REFERENCES job_purchase_orders(id)
+    )
+    """)
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_job_stages_job_order "
+        "ON job_stages(job_id, sequence_order, id)"
+    )
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS job_stage_templates (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        template_name TEXT NOT NULL UNIQUE,
+        notes TEXT,
+        active INTEGER NOT NULL DEFAULT 1,
+        created_by TEXT,
+        created_at TEXT,
+        updated_at TEXT
+    )
+    """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS job_stage_template_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        template_id INTEGER NOT NULL,
+        stage_name TEXT NOT NULL,
+        sequence_order INTEGER NOT NULL DEFAULT 1,
+        job_percent REAL NOT NULL DEFAULT 0,
+        default_status TEXT NOT NULL DEFAULT 'Planned',
+        budget_hours REAL DEFAULT 0,
+        po_mode TEXT NOT NULL DEFAULT 'Unallocated',
+        notes TEXT,
+        FOREIGN KEY(template_id) REFERENCES job_stage_templates(id) ON DELETE CASCADE
+    )
+    """)
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_job_stage_template_items_order "
+        "ON job_stage_template_items(template_id, sequence_order, id)"
+    )
+
+    cur.execute("""
     CREATE TABLE IF NOT EXISTS products (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         product_code TEXT UNIQUE,
@@ -1260,6 +1350,9 @@ def init_db():
             existing_columns = [row[1] for row in cur.fetchall()]
             if column not in existing_columns:
                 cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+    ensure_column("job_stages", "purchase_order_id", "INTEGER")
+    ensure_column("job_stages", "job_percent", "REAL NOT NULL DEFAULT 0")
 
     ensure_column("material_entries", "custom_product_code", "TEXT")
     ensure_column("material_entries", "custom_product_name", "TEXT")
@@ -1353,6 +1446,7 @@ def init_db():
     CREATE TABLE IF NOT EXISTS timesheet_entries (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         job_id INTEGER NOT NULL,
+        job_stage_id INTEGER,
         employee_id INTEGER NOT NULL,
         work_date TEXT,
         start_time TEXT,
@@ -1365,9 +1459,12 @@ def init_db():
         status TEXT DEFAULT 'Submitted',
         notes TEXT,
         FOREIGN KEY(job_id) REFERENCES jobs(id),
+        FOREIGN KEY(job_stage_id) REFERENCES job_stages(id),
         FOREIGN KEY(employee_id) REFERENCES employees(id)
     )
     """)
+
+    ensure_column("timesheet_entries", "job_stage_id", "INTEGER")
 
 
 
@@ -1428,25 +1525,56 @@ def init_db():
     ensure_column("estimate_working_sheets", "archived", "INTEGER DEFAULT 0")
     ensure_column("estimate_working_sheets", "archived_at", "TEXT")
     ensure_column("estimate_working_sheets", "archived_by", "TEXT")
+    ensure_column("estimate_working_sheets", "production_day_hours", "REAL DEFAULT 8")
+    ensure_column("estimate_working_sheets", "production_value_low", "REAL DEFAULT 800")
+    ensure_column("estimate_working_sheets", "production_value_target", "REAL DEFAULT 900")
+    ensure_column("estimate_working_sheets", "production_value_high", "REAL DEFAULT 1000")
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS estimate_line_items (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         estimate_id INTEGER NOT NULL,
+        job_stage_id INTEGER,
+        production_tracking_enabled INTEGER DEFAULT 1,
         section TEXT,
         item_description TEXT,
         qty REAL DEFAULT 0,
         unit TEXT,
         unit_rate REAL DEFAULT 0,
         line_total REAL DEFAULT 0,
+        estimated_labour_hours REAL DEFAULT 0,
+        material_allowance REAL DEFAULT 0,
+        substrate TEXT,
+        work_location TEXT,
+        coating_system TEXT,
+        colour_finish TEXT,
+        source_pack TEXT,
         notes TEXT,
-        FOREIGN KEY(estimate_id) REFERENCES estimate_working_sheets(id)
+        FOREIGN KEY(estimate_id) REFERENCES estimate_working_sheets(id),
+        FOREIGN KEY(job_stage_id) REFERENCES job_stages(id)
     )
     """)
+
+    ensure_column("estimate_line_items", "job_stage_id", "INTEGER")
+    ensure_column("estimate_line_items", "production_tracking_enabled", "INTEGER DEFAULT 1")
+    for column, definition in [
+        ("estimated_labour_hours", "REAL DEFAULT 0"),
+        ("material_allowance", "REAL DEFAULT 0"),
+        ("substrate", "TEXT"),
+        ("work_location", "TEXT"),
+        ("coating_system", "TEXT"),
+        ("colour_finish", "TEXT"),
+        ("source_pack", "TEXT"),
+    ]:
+        ensure_column("estimate_line_items", column, definition)
 
     cur.execute("CREATE INDEX IF NOT EXISTS idx_timesheet_entries_job_id ON timesheet_entries(job_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_estimate_working_sheets_job_id ON estimate_working_sheets(job_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_estimate_line_items_estimate_id ON estimate_line_items(estimate_id)")
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_estimate_line_items_job_stage "
+        "ON estimate_line_items(job_stage_id)"
+    )
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS job_photos (
@@ -1461,6 +1589,116 @@ def init_db():
         uploaded_at TEXT,
         notes TEXT,
         FOREIGN KEY(job_id) REFERENCES jobs(id)
+    )
+    """)
+    ensure_column("job_photos", "job_stage_id", "INTEGER")
+    ensure_column("job_photos", "stage_progress_update_id", "INTEGER")
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS estimate_baselines (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_id INTEGER NOT NULL,
+        estimate_id INTEGER NOT NULL,
+        baseline_name TEXT NOT NULL,
+        estimate_no TEXT,
+        revision TEXT,
+        total_ex_gst REAL DEFAULT 0,
+        total_inc_gst REAL DEFAULT 0,
+        labour_hours REAL DEFAULT 0,
+        production_day_hours REAL DEFAULT 8,
+        production_value_target REAL DEFAULT 900,
+        active INTEGER NOT NULL DEFAULT 1,
+        locked_at TEXT NOT NULL,
+        locked_by TEXT,
+        notes TEXT,
+        FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+        FOREIGN KEY(estimate_id) REFERENCES estimate_working_sheets(id)
+    )
+    """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS estimate_baseline_lines (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        baseline_id INTEGER NOT NULL,
+        source_line_id INTEGER,
+        job_stage_id INTEGER,
+        stage_name TEXT,
+        section TEXT,
+        item_description TEXT,
+        qty REAL DEFAULT 0,
+        unit TEXT,
+        unit_rate REAL DEFAULT 0,
+        line_total REAL DEFAULT 0,
+        estimated_labour_hours REAL DEFAULT 0,
+        substrate TEXT,
+        work_location TEXT,
+        coating_system TEXT,
+        colour_finish TEXT,
+        source_pack TEXT,
+        production_tracking_enabled INTEGER DEFAULT 1,
+        notes TEXT,
+        FOREIGN KEY(baseline_id) REFERENCES estimate_baselines(id) ON DELETE CASCADE,
+        FOREIGN KEY(job_stage_id) REFERENCES job_stages(id)
+    )
+    """)
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_estimate_baselines_job_locked "
+        "ON estimate_baselines(job_id, active, locked_at, id)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_estimate_baseline_lines_stage "
+        "ON estimate_baseline_lines(baseline_id, job_stage_id, id)"
+    )
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS stage_progress_updates (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_id INTEGER NOT NULL,
+        job_stage_id INTEGER,
+        estimate_line_item_id INTEGER,
+        update_date TEXT NOT NULL,
+        reported_by TEXT,
+        completed_quantity REAL DEFAULT 0,
+        unit TEXT,
+        unit_rate_snapshot REAL DEFAULT 0,
+        manual_progress_percent REAL,
+        crew_hours REAL DEFAULT 0,
+        crew_names TEXT,
+        work_type TEXT,
+        substrate TEXT,
+        coating_system TEXT,
+        blocker_type TEXT,
+        blocker_status TEXT DEFAULT 'None',
+        blocker_notes TEXT,
+        ready_for_inspection INTEGER DEFAULT 0,
+        notes TEXT,
+        created_at TEXT,
+        updated_at TEXT,
+        FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+        FOREIGN KEY(job_stage_id) REFERENCES job_stages(id),
+        FOREIGN KEY(estimate_line_item_id) REFERENCES estimate_line_items(id)
+    )
+    """)
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_stage_progress_updates_stage_date "
+        "ON stage_progress_updates(job_id, job_stage_id, update_date, id)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_stage_progress_updates_line "
+        "ON stage_progress_updates(estimate_line_item_id, update_date, id)"
+    )
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS job_alert_acknowledgements (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_id INTEGER NOT NULL,
+        job_stage_id INTEGER,
+        alert_key TEXT NOT NULL,
+        acknowledged_at TEXT NOT NULL,
+        acknowledged_by TEXT,
+        notes TEXT,
+        UNIQUE(job_id, job_stage_id, alert_key),
+        FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+        FOREIGN KEY(job_stage_id) REFERENCES job_stages(id)
     )
     """)
    
@@ -1543,11 +1781,34 @@ def init_db():
         FOREIGN KEY(job_id) REFERENCES jobs(id)
     )
     """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS invoice_claim_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        invoice_claim_id INTEGER NOT NULL,
+        job_stage_id INTEGER,
+        purchase_order_id INTEGER,
+        stage_name TEXT,
+        job_percent REAL DEFAULT 0,
+        progress_percent REAL DEFAULT 0,
+        stage_value_ex_gst REAL DEFAULT 0,
+        previously_claimed_ex_gst REAL DEFAULT 0,
+        amount_ex_gst REAL DEFAULT 0,
+        notes TEXT,
+        FOREIGN KEY(invoice_claim_id) REFERENCES invoice_claims(id) ON DELETE CASCADE,
+        FOREIGN KEY(job_stage_id) REFERENCES job_stages(id),
+        FOREIGN KEY(purchase_order_id) REFERENCES job_purchase_orders(id)
+    )
+    """)
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_invoice_claim_items_stage "
+        "ON invoice_claim_items(job_stage_id, invoice_claim_id)"
+    )
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS staff_schedule (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         job_id INTEGER,
+        job_stage_id INTEGER,
         employee_id INTEGER,
         schedule_date TEXT,
         start_time TEXT,
@@ -1556,9 +1817,19 @@ def init_db():
         notes TEXT,
         created_at TEXT,
         FOREIGN KEY(job_id) REFERENCES jobs(id),
+        FOREIGN KEY(job_stage_id) REFERENCES job_stages(id),
         FOREIGN KEY(employee_id) REFERENCES employees(id)
     )
     """)
+    ensure_column("staff_schedule", "job_stage_id", "INTEGER")
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_timesheet_entries_job_stage "
+        "ON timesheet_entries(job_id, job_stage_id)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_staff_schedule_job_stage "
+        "ON staff_schedule(job_id, job_stage_id)"
+    )
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS app_code_changes (
@@ -1613,6 +1884,58 @@ def init_db():
         read_at TEXT,
         FOREIGN KEY(recipient_user_id) REFERENCES app_users(id),
         FOREIGN KEY(job_id) REFERENCES jobs(id)
+    )
+    """)
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_app_notifications_recipient_unread "
+        "ON app_notifications(recipient_user_id, read_at, created_at)"
+    )
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS staff_requests (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        requested_by_user_id INTEGER,
+        employee_id INTEGER NOT NULL,
+        job_id INTEGER,
+        job_stage_id INTEGER,
+        request_type TEXT NOT NULL,
+        title TEXT NOT NULL,
+        instructions TEXT,
+        priority TEXT NOT NULL DEFAULT 'Normal',
+        due_at TEXT,
+        status TEXT NOT NULL DEFAULT 'Requested',
+        response_notes TEXT,
+        response_entity_type TEXT,
+        response_entity_id TEXT,
+        requested_at TEXT NOT NULL,
+        completed_at TEXT,
+        completed_by TEXT,
+        FOREIGN KEY(requested_by_user_id) REFERENCES app_users(id),
+        FOREIGN KEY(employee_id) REFERENCES employees(id),
+        FOREIGN KEY(job_id) REFERENCES jobs(id),
+        FOREIGN KEY(job_stage_id) REFERENCES job_stages(id)
+    )
+    """)
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_staff_requests_employee_status "
+        "ON staff_requests(employee_id, status, due_at, id)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_staff_requests_job_stage "
+        "ON staff_requests(job_id, job_stage_id, requested_at)"
+    )
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS push_notification_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        recipient_user_id INTEGER,
+        staff_request_id INTEGER,
+        provider TEXT,
+        delivery_status TEXT,
+        provider_message_id TEXT,
+        response_text TEXT,
+        sent_at TEXT,
+        FOREIGN KEY(recipient_user_id) REFERENCES app_users(id),
+        FOREIGN KEY(staff_request_id) REFERENCES staff_requests(id)
     )
     """)
 
@@ -2216,11 +2539,696 @@ def create_management_notifications(
             raise
         finally:
             conn.close()
+        send_phone_push(
+            [recipient["id"] for recipient in recipients],
+            title,
+            message,
+            launch_url=str(os.getenv("JOBHUB_PUBLIC_URL", "")).strip() or None,
+        )
         return len(recipients)
     except Exception:
         # A notification problem must never prevent a timesheet or material
         # request from being saved.
         return 0
+
+
+def phone_push_configured():
+    return bool(
+        str(os.getenv("ONESIGNAL_APP_ID", "")).strip()
+        and str(os.getenv("ONESIGNAL_REST_API_KEY", "")).strip()
+    )
+
+
+def phone_push_external_id(user_id):
+    """Stable OneSignal identity that does not expose or depend on usernames."""
+    return f"jobhub-user-{int(user_id)}"
+
+
+def send_phone_push(
+    recipient_user_ids,
+    title,
+    message,
+    *,
+    staff_request_id=None,
+    launch_url=None,
+):
+    """Best-effort OneSignal web push; persistent in-app notices remain primary."""
+    user_ids = sorted({int(value) for value in recipient_user_ids if value})
+    if not user_ids:
+        return {"status": "no_recipients", "message_id": ""}
+    app_id = str(os.getenv("ONESIGNAL_APP_ID", "")).strip()
+    api_key = str(os.getenv("ONESIGNAL_REST_API_KEY", "")).strip()
+    if not app_id or not api_key:
+        return {"status": "not_configured", "message_id": ""}
+
+    payload = {
+        "app_id": app_id,
+        "include_aliases": {
+            "external_id": [phone_push_external_id(user_id) for user_id in user_ids]
+        },
+        "target_channel": "push",
+        "headings": {"en": str(title or "JobHub")[:120]},
+        "contents": {"en": str(message or "You have a new JobHub request.")[:500]},
+    }
+    if launch_url:
+        payload["url"] = str(launch_url)
+
+    sent_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    status = "failed"
+    provider_message_id = ""
+    response_text = ""
+    try:
+        response = requests.post(
+            "https://api.onesignal.com/notifications",
+            headers={
+                "Authorization": f"Key {api_key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=12,
+        )
+        response_text = str(response.text or "")[:2000]
+        try:
+            response_json = response.json()
+        except Exception:
+            response_json = {}
+        provider_message_id = str(response_json.get("id") or "")
+        status = "sent" if response.ok and provider_message_id else "failed"
+    except Exception as exc:
+        response_text = str(exc)[:2000]
+
+    try:
+        rows = [
+            (
+                user_id,
+                int(staff_request_id) if staff_request_id else None,
+                "OneSignal",
+                status,
+                provider_message_id,
+                response_text,
+                sent_at,
+            )
+            for user_id in user_ids
+        ]
+        execute_many(
+            """
+            INSERT INTO push_notification_log
+            (recipient_user_id, staff_request_id, provider, delivery_status,
+             provider_message_id, response_text, sent_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+    except Exception:
+        pass
+    return {"status": status, "message_id": provider_message_id}
+
+
+def create_user_notifications(
+    recipient_user_ids,
+    event_type,
+    title,
+    message,
+    *,
+    job_id=None,
+    entity_type="",
+    entity_id="",
+    staff_request_id=None,
+    send_push=True,
+):
+    """Create employee/admin inbox messages and optionally mirror them to phones."""
+    user_ids = sorted({int(value) for value in recipient_user_ids if value})
+    if not user_ids:
+        return 0
+    user = get_current_user() or {}
+    created_by = str(user.get("employee_name") or user.get("username") or "JobHub")
+    created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    rows = [
+        (
+            user_id,
+            str(event_type or ""),
+            str(title or "Notification")[:200],
+            str(message or "")[:2000],
+            int(job_id) if job_id else None,
+            str(entity_type or ""),
+            str(entity_id or ""),
+            created_by,
+            created_at,
+            "",
+        )
+        for user_id in user_ids
+    ]
+    try:
+        execute_many(
+            """
+            INSERT INTO app_notifications
+            (recipient_user_id, event_type, title, message, job_id, entity_type,
+             entity_id, created_by, created_at, read_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+    except Exception:
+        return 0
+    if send_push:
+        send_phone_push(
+            user_ids,
+            title,
+            message,
+            staff_request_id=staff_request_id,
+            launch_url=str(os.getenv("JOBHUB_PUBLIC_URL", "")).strip() or None,
+        )
+    return len(user_ids)
+
+
+def render_phone_push_opt_in(user, key_prefix="phone_push"):
+    """Render the signed-in device permission control for OneSignal web push."""
+    user_id = user.get("id") if user else None
+    app_id = str(os.getenv("ONESIGNAL_APP_ID", "")).strip()
+    if not user_id:
+        st.info("This login is not linked to a notification identity.")
+        return
+    if not app_id:
+        st.info(
+            "Phone push is installed but waiting for the secure OneSignal App ID and REST API key. "
+            "In-app requests and notifications are already available."
+        )
+        return
+
+    external_id = phone_push_external_id(user_id)
+    app_id_js = json.dumps(app_id)
+    external_id_js = json.dumps(external_id)
+    components.html(
+        f"""
+        <script src="https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.page.js" defer></script>
+        <div style="font-family:Arial,sans-serif;padding:8px 2px">
+          <button id="pb-enable-push" style="border:1px solid #8B6F47;border-radius:999px;
+            background:#fff;padding:10px 18px;font-weight:700;cursor:pointer">
+            Enable phone notifications on this device
+          </button>
+          <div id="pb-push-status" style="margin-top:8px;color:#5f574f;font-size:13px"></div>
+        </div>
+        <script>
+          window.OneSignalDeferred = window.OneSignalDeferred || [];
+          let pbOneSignal = null;
+          const statusNode = document.getElementById("pb-push-status");
+          window.OneSignalDeferred.push(async function(OneSignal) {{
+            pbOneSignal = OneSignal;
+            try {{
+              await OneSignal.init({{
+                appId: {app_id_js},
+                serviceWorkerPath: "/app/static/OneSignalSDKWorker.js",
+                serviceWorkerParam: {{ scope: "/app/static/" }},
+                notifyButton: {{ enable: false }}
+              }});
+              await OneSignal.login({external_id_js});
+              statusNode.textContent = OneSignal.Notifications.permission
+                ? "Notifications are enabled for this JobHub login."
+                : "Tap the button, then allow notifications when your phone asks.";
+            }} catch (err) {{
+              statusNode.textContent = "Push setup could not start: " + String(err);
+            }}
+          }});
+          document.getElementById("pb-enable-push").addEventListener("click", async () => {{
+            if (!pbOneSignal) {{
+              statusNode.textContent = "Notification service is still loading. Try again in a moment.";
+              return;
+            }}
+            try {{
+              await pbOneSignal.login({external_id_js});
+              await pbOneSignal.Notifications.requestPermission();
+              statusNode.textContent = pbOneSignal.Notifications.permission
+                ? "Phone notifications are enabled."
+                : "Notification permission was not granted. Check this site's phone/browser settings.";
+            }} catch (err) {{
+              statusNode.textContent = "Could not enable notifications: " + String(err);
+            }}
+          }});
+        </script>
+        """,
+        height=105,
+    )
+
+
+STAFF_REQUEST_TYPES = [
+    "Timesheet",
+    "Stage progress update",
+    "Site progress photos",
+    "Before-work photos",
+    "Completion photos",
+    "Defect / touch-up photos",
+    "Inspection confirmation",
+    "Daily site diary",
+    "Material quantity / delivery confirmation",
+    "Colour approval / evidence",
+    "Safety / SWMS acknowledgement",
+    "Equipment check",
+    "Availability / leave information",
+    "Custom request",
+]
+
+
+def render_employee_requests(employee_id):
+    user = get_current_user() or {}
+    st.subheader("My Requests")
+    st.caption("Requests from admin or management remain here until you respond.")
+    render_phone_push_opt_in(user, key_prefix=f"employee_push_{employee_id}")
+
+    requests_df = safe_df_query(
+        """
+        SELECT r.id,r.request_type AS "Request Type",r.title AS "Request",
+               COALESCE(j.job_no || ' — ' || j.job_name,'General') AS "Job",
+               COALESCE(js.stage_name,'') AS "Stage",r.priority AS "Priority",
+               COALESCE(r.due_at,'') AS "Due",r.status AS "Status",
+               COALESCE(r.instructions,'') AS "Instructions",
+               COALESCE(r.response_notes,'') AS "My Response",
+               COALESCE(requester.username,'') AS "Requested By",
+               r.job_id,r.job_stage_id,r.requested_by_user_id,r.requested_at AS "Requested At"
+        FROM staff_requests r
+        LEFT JOIN jobs j ON j.id=r.job_id
+        LEFT JOIN job_stages js ON js.id=r.job_stage_id
+        LEFT JOIN app_users requester ON requester.id=r.requested_by_user_id
+        WHERE r.employee_id=?
+        ORDER BY CASE r.status WHEN 'Requested' THEN 0 WHEN 'In Progress' THEN 1 ELSE 2 END,
+                 CASE r.priority WHEN 'Urgent' THEN 0 WHEN 'High' THEN 1 ELSE 2 END,
+                 COALESCE(r.due_at,'9999-12-31'),r.id DESC
+        """,
+        (int(employee_id),),
+    )
+    if requests_df.empty:
+        st.info("You have no requests.")
+        return
+    open_count = int(requests_df[requests_df["Status"].isin(["Requested", "In Progress"])].shape[0])
+    overdue_count = 0
+    now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if "Due" in requests_df:
+        overdue_count = int(
+            (
+                requests_df["Due"].astype(str).ne("")
+                & requests_df["Due"].astype(str).lt(now_text)
+                & requests_df["Status"].isin(["Requested", "In Progress"])
+            ).sum()
+        )
+    m1, m2 = st.columns(2)
+    m1.metric("Open Requests", open_count)
+    m2.metric("Overdue", overdue_count)
+    event = st.dataframe(
+        requests_df.drop(columns=["job_id", "job_stage_id", "requested_by_user_id"], errors="ignore"),
+        width="stretch",
+        hide_index=True,
+        key=f"employee_requests_table_{employee_id}",
+        on_select="rerun",
+        selection_mode="single-row",
+        column_config={"id": None},
+    )
+    selected_rows = list(getattr(getattr(event, "selection", None), "rows", []) or [])
+    if not selected_rows:
+        st.caption("Select a request to respond or mark it complete.")
+        return
+    selected = requests_df.iloc[selected_rows[0]]
+    request_id = int(selected["id"])
+    st.markdown(f"#### {selected['Request']}")
+    if str(selected["Instructions"] or "").strip():
+        st.info(str(selected["Instructions"]))
+    request_type = str(selected["Request Type"] or "")
+    if request_type == "Timesheet":
+        st.caption("Submit the missing hours from the Submit Timesheet tab, then mark this request completed below.")
+    if request_type == "Stage progress update" and selected.get("job_id") and not pd.isna(selected["job_id"]):
+        with st.expander("Enter the requested stage progress now", expanded=True):
+            render_stage_updates_panel(
+                int(selected["job_id"]),
+                employee_mode=True,
+                key_prefix=f"employee_request_stage_{request_id}",
+            )
+
+    with st.form(f"employee_request_response_{request_id}"):
+        current_status = str(selected["Status"] or "Requested")
+        response_statuses = ["Requested", "In Progress", "Completed", "Unable to Complete"]
+        response_status = st.selectbox(
+            "Request Status",
+            response_statuses,
+            index=response_statuses.index(current_status) if current_status in response_statuses else 0,
+        )
+        response_notes = st.text_area(
+            "Response / Notes",
+            value=str(selected["My Response"] or ""),
+            placeholder="What was completed, where it was saved, or what is preventing completion",
+        )
+        response_photos = st.file_uploader(
+            "Attach supporting photos",
+            type=["jpg", "jpeg", "png", "webp"],
+            accept_multiple_files=True,
+            key=f"employee_request_photos_{request_id}",
+        )
+        save_response = st.form_submit_button(
+            "Save response",
+            type="primary",
+            use_container_width=True,
+        )
+    if save_response:
+        job_id = None if pd.isna(selected.get("job_id")) else int(selected["job_id"])
+        stage_id = None if pd.isna(selected.get("job_stage_id")) else int(selected["job_stage_id"])
+        if response_photos and not job_id:
+            pb_error("Photos can only be attached when the request is linked to a job.")
+        else:
+            photo_failures = []
+            for uploaded in response_photos or []:
+                try:
+                    save_job_photo(
+                        job_id,
+                        uploaded,
+                        "Staff Request",
+                        str(selected["Request"] or request_type),
+                        response_notes.strip(),
+                        job_stage_id=stage_id,
+                    )
+                except Exception as exc:
+                    photo_failures.append(f"{uploaded.name}: {exc}")
+            completed_at = (
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                if response_status in {"Completed", "Unable to Complete"}
+                else ""
+            )
+            execute(
+                """
+                UPDATE staff_requests
+                SET status=?,response_notes=?,response_entity_type=?,completed_at=?,completed_by=?
+                WHERE id=? AND employee_id=?
+                """,
+                (
+                    response_status,
+                    response_notes.strip(),
+                    "job_photo" if response_photos else ("stage_progress_update" if request_type == "Stage progress update" else ""),
+                    completed_at,
+                    current_username() if completed_at else "",
+                    request_id,
+                    int(employee_id),
+                ),
+            )
+            requester_id = selected.get("requested_by_user_id")
+            if requester_id and not pd.isna(requester_id):
+                create_user_notifications(
+                    [int(requester_id)],
+                    "staff_request_response",
+                    f"{selected['Request']} — {response_status}",
+                    response_notes.strip() or f"{user.get('employee_name') or user.get('username')} updated the request.",
+                    job_id=job_id,
+                    entity_type="staff_request",
+                    entity_id=request_id,
+                    staff_request_id=request_id,
+                )
+            if photo_failures:
+                pb_error("Response saved, but some photos failed: " + "; ".join(photo_failures))
+            else:
+                pb_success("Your response was saved and management was notified.")
+            pb_rerun()
+
+
+def staff_requests_page():
+    st.header("Staff Requests")
+    st.caption(
+        "Request timesheets, photos, measured progress, inspections, site records or any custom item. "
+        "Employees receive an in-app notice and a phone push when enabled."
+    )
+    render_phone_push_opt_in(get_current_user() or {}, key_prefix="manager_push")
+    if phone_push_configured():
+        pb_success("Phone push provider is configured.")
+    else:
+        st.warning(
+            "Phone push code is installed, but ONESIGNAL_APP_ID and ONESIGNAL_REST_API_KEY are not both configured. "
+            "Requests will still appear instantly in each employee's JobHub inbox."
+        )
+
+    employees = safe_df_query(
+        """
+        SELECT e.id,e.name,COALESCE(e.status,'Active') AS status,u.id AS user_id,
+               COALESCE(u.username,'') AS username
+        FROM employees e
+        LEFT JOIN app_users u ON u.employee_id=e.id AND COALESCE(u.active,0)=1
+        WHERE LOWER(COALESCE(e.status,'active')) NOT IN ('inactive','terminated')
+        ORDER BY e.name
+        """
+    )
+    if employees.empty:
+        st.info("No active employees are available.")
+        return
+    employee_options = {
+        f"{row['name']}" + ("" if row["username"] else " — no active login"): int(row["id"])
+        for _, row in employees.iterrows()
+    }
+    jobs = safe_df_query(
+        """
+        SELECT id,job_no,job_name FROM jobs
+        WHERE LOWER(COALESCE(status,'')) NOT IN ('archived','cancelled','deleted')
+        ORDER BY job_no
+        """
+    )
+    job_options = {"General / no job": None}
+    job_options.update({f"{row['job_no']} — {row['job_name']}": int(row["id"]) for _, row in jobs.iterrows()})
+
+    with st.expander("Create staff request", expanded=True):
+        selected_employees = st.multiselect("Employees", list(employee_options.keys()))
+        r1, r2 = st.columns(2)
+        request_type = r1.selectbox("Request Type", STAFF_REQUEST_TYPES)
+        priority = r2.selectbox("Priority", ["Normal", "High", "Urgent"])
+        selected_job_label = st.selectbox("Job", list(job_options.keys()))
+        selected_job_id = job_options[selected_job_label]
+        stage_options = {"Whole job / no stage": None}
+        if selected_job_id:
+            stage_rows = safe_df_query(
+                "SELECT id,stage_name FROM job_stages WHERE job_id=? ORDER BY sequence_order,id",
+                (int(selected_job_id),),
+            )
+            stage_options.update({str(row["stage_name"]): int(row["id"]) for _, row in stage_rows.iterrows()})
+        selected_stage_label = st.selectbox("Job Stage", list(stage_options.keys()))
+        selected_stage_id = stage_options[selected_stage_label]
+        d1, d2 = st.columns(2)
+        due_date = d1.date_input("Due Date", value=date.today() + timedelta(days=1), format="DD/MM/YYYY")
+        due_time = d2.time_input("Due Time", value=time(16, 0))
+        request_title = st.text_input("Request Title", value=f"Please submit: {request_type}")
+        instructions = st.text_area(
+            "Instructions",
+            placeholder="Dates/hours required, photos needed, area to measure or anything the employee must include",
+        )
+        create_request = st.button(
+            "Send request and notify employees",
+            type="primary",
+            use_container_width=True,
+            key="create_staff_request_button",
+        )
+        if create_request:
+            errors = []
+            if not selected_employees:
+                errors.append("Select at least one employee.")
+            if not request_title.strip():
+                errors.append("Request Title is required.")
+            if errors:
+                for error in errors:
+                    pb_error(error)
+            else:
+                selected_ids = [employee_options[label] for label in selected_employees]
+                due_at = datetime.combine(due_date, due_time).strftime("%Y-%m-%d %H:%M:%S")
+                requester = get_current_user() or {}
+                created_ids = []
+                missing_logins = []
+                for employee_id in selected_ids:
+                    employee_row = employees[employees["id"].astype(int) == int(employee_id)].iloc[0]
+                    conn = connect()
+                    try:
+                        cur = conn.cursor()
+                        request_id = _insert_and_get_id(
+                            cur,
+                            """
+                            INSERT INTO staff_requests
+                            (requested_by_user_id,employee_id,job_id,job_stage_id,request_type,
+                             title,instructions,priority,due_at,status,requested_at)
+                            VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                            """,
+                            (
+                                int(requester.get("id")) if requester.get("id") else None,
+                                int(employee_id),
+                                int(selected_job_id) if selected_job_id else None,
+                                int(selected_stage_id) if selected_stage_id else None,
+                                request_type,
+                                request_title.strip(),
+                                instructions.strip(),
+                                priority,
+                                due_at,
+                                "Requested",
+                                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            ),
+                        )
+                        conn.commit()
+                    except Exception:
+                        try:
+                            conn.rollback()
+                        except Exception:
+                            pass
+                        raise
+                    finally:
+                        conn.close()
+                    created_ids.append(request_id)
+                    user_id = employee_row.get("user_id")
+                    if user_id and not pd.isna(user_id):
+                        job_text = "" if not selected_job_id else f" for {selected_job_label}"
+                        stage_text = "" if not selected_stage_id else f" — {selected_stage_label}"
+                        create_user_notifications(
+                            [int(user_id)],
+                            "staff_request",
+                            request_title.strip(),
+                            f"{priority} request{job_text}{stage_text}. Due {due_at}. {instructions.strip()}".strip(),
+                            job_id=selected_job_id,
+                            entity_type="staff_request",
+                            entity_id=request_id,
+                            staff_request_id=request_id,
+                        )
+                    else:
+                        missing_logins.append(str(employee_row["name"]))
+                record_audit_event(
+                    "staff_requests_created",
+                    "staff_request",
+                    ",".join(str(value) for value in created_ids),
+                    {"employee_count": len(created_ids), "request_type": request_type},
+                )
+                pb_success(f"Sent {len(created_ids)} staff request(s).")
+                if missing_logins:
+                    st.warning(
+                        "Saved requests but could not send inbox/push notifications to employees without active logins: "
+                        + ", ".join(missing_logins)
+                    )
+                pb_rerun()
+
+    requests_df = safe_df_query(
+        """
+        SELECT r.id,e.name AS "Employee",r.request_type AS "Type",r.title AS "Request",
+               COALESCE(j.job_no || ' — ' || j.job_name,'General') AS "Job",
+               COALESCE(js.stage_name,'') AS "Stage",r.priority AS "Priority",
+               COALESCE(r.due_at,'') AS "Due",r.status AS "Status",
+               COALESCE(r.response_notes,'') AS "Response",r.requested_at AS "Requested At",
+               r.employee_id,r.job_id,r.requested_by_user_id,u.id AS recipient_user_id
+        FROM staff_requests r
+        JOIN employees e ON e.id=r.employee_id
+        LEFT JOIN app_users u ON u.employee_id=e.id AND COALESCE(u.active,0)=1
+        LEFT JOIN jobs j ON j.id=r.job_id
+        LEFT JOIN job_stages js ON js.id=r.job_stage_id
+        ORDER BY CASE r.status WHEN 'Requested' THEN 0 WHEN 'In Progress' THEN 1 ELSE 2 END,
+                 CASE r.priority WHEN 'Urgent' THEN 0 WHEN 'High' THEN 1 ELSE 2 END,
+                 r.id DESC
+        """
+    )
+    if requests_df.empty:
+        st.info("No staff requests have been created yet.")
+        return
+    status_filter = st.multiselect(
+        "Request Status",
+        ["Requested", "In Progress", "Completed", "Unable to Complete", "Cancelled"],
+        default=["Requested", "In Progress"],
+        key="staff_request_status_filter",
+    )
+    visible = requests_df[requests_df["Status"].isin(status_filter)] if status_filter else requests_df
+    event = st.dataframe(
+        visible.drop(columns=["employee_id", "job_id", "requested_by_user_id", "recipient_user_id"], errors="ignore"),
+        width="stretch",
+        hide_index=True,
+        key="selectable_staff_requests_admin",
+        on_select="rerun",
+        selection_mode="single-row",
+        column_config={"id": None},
+    )
+    selected_rows = list(getattr(getattr(event, "selection", None), "rows", []) or [])
+    if not selected_rows:
+        st.caption("Select a request to remind the employee, change its status or delete it.")
+        return
+    selected = visible.iloc[selected_rows[0]]
+    request_id = int(selected["id"])
+    a1, a2, a3 = st.columns(3)
+    recipient_user_id = selected.get("recipient_user_id")
+    if a1.button(
+        "Send reminder",
+        disabled=not recipient_user_id or pd.isna(recipient_user_id),
+        use_container_width=True,
+        key=f"remind_staff_request_{request_id}",
+    ):
+        create_user_notifications(
+            [int(recipient_user_id)],
+            "staff_request_reminder",
+            f"Reminder: {selected['Request']}",
+            f"This {selected['Priority'].lower()} request is due {selected['Due']}.",
+            job_id=None if pd.isna(selected.get("job_id")) else int(selected["job_id"]),
+            entity_type="staff_request",
+            entity_id=request_id,
+            staff_request_id=request_id,
+        )
+        pb_success("Reminder sent.")
+    if a2.button("Reopen request", use_container_width=True, key=f"reopen_staff_request_{request_id}"):
+        execute(
+            "UPDATE staff_requests SET status='Requested',completed_at='',completed_by='' WHERE id=?",
+            (request_id,),
+        )
+        pb_success("Request reopened.")
+        pb_rerun()
+    cancel_label = "Cancel request" if str(selected["Status"]) != "Cancelled" else "Keep cancelled"
+    if a3.button(
+        cancel_label,
+        disabled=str(selected["Status"]) == "Cancelled",
+        use_container_width=True,
+        key=f"cancel_staff_request_{request_id}",
+    ):
+        execute(
+            "UPDATE staff_requests SET status='Cancelled',completed_at=?,completed_by=? WHERE id=?",
+            (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), current_username(), request_id),
+        )
+        pb_success("Request cancelled.")
+        pb_rerun()
+    confirm_delete = st.checkbox(
+        "Confirm permanent deletion of the selected request",
+        key=f"confirm_delete_staff_request_{request_id}",
+    )
+    if st.button(
+        "Delete selected request",
+        disabled=not confirm_delete,
+        use_container_width=True,
+        key=f"delete_staff_request_{request_id}",
+    ):
+        execute("DELETE FROM push_notification_log WHERE staff_request_id=?", (request_id,))
+        execute("DELETE FROM staff_requests WHERE id=?", (request_id,))
+        pb_success("Staff request deleted.")
+        pb_rerun()
+
+
+def notify_overdue_staff_requests():
+    """Send each overdue request alert once; safe to run on normal app rerenders."""
+    overdue = safe_df_query(
+        """
+        SELECT r.id,r.title,r.job_id,u.id AS recipient_user_id,r.due_at
+        FROM staff_requests r
+        JOIN app_users u ON u.employee_id=r.employee_id AND COALESCE(u.active,0)=1
+        WHERE r.status IN ('Requested','In Progress')
+          AND COALESCE(r.due_at,'')<>'' AND r.due_at<?
+          AND NOT EXISTS (
+              SELECT 1 FROM app_notifications n
+              WHERE n.recipient_user_id=u.id
+                AND n.event_type='staff_request_overdue'
+                AND n.entity_type='staff_request'
+                AND n.entity_id=CAST(r.id AS TEXT)
+          )
+        ORDER BY r.due_at,r.id
+        LIMIT 25
+        """,
+        (datetime.now().strftime("%Y-%m-%d %H:%M:%S"),),
+    )
+    for _, row in overdue.iterrows():
+        create_user_notifications(
+            [int(row["recipient_user_id"])],
+            "staff_request_overdue",
+            f"Overdue: {row['title']}",
+            f"This JobHub request was due {row['due_at']}.",
+            job_id=None if pd.isna(row.get("job_id")) else int(row["job_id"]),
+            entity_type="staff_request",
+            entity_id=int(row["id"]),
+            staff_request_id=int(row["id"]),
+        )
+    return len(overdue)
 
 
 def mark_notification_read(notification_id, user_id):
@@ -3506,6 +4514,13 @@ JOB_DIRECT_CHILD_TABLES = (
     "invoice_claims",
     "staff_schedule",
     "job_employee_access",
+    "staff_requests",
+    "stage_progress_updates",
+    "job_alert_acknowledgements",
+    "estimate_baselines",
+    "job_purchase_orders",
+    "job_stages",
+    "app_notifications",
 )
 
 
@@ -3533,6 +4548,23 @@ def linked_job_counts(job_id):
 
 def _delete_job_rows(cur, job_id):
     cur.execute("""
+        DELETE FROM push_notification_log
+        WHERE staff_request_id IN (SELECT id FROM staff_requests WHERE job_id=?)
+    """, (job_id,))
+    cur.execute("DELETE FROM staff_requests WHERE job_id=?", (job_id,))
+    cur.execute("""
+        DELETE FROM invoice_claim_items
+        WHERE invoice_claim_id IN (SELECT id FROM invoice_claims WHERE job_id=?)
+    """, (job_id,))
+    cur.execute("DELETE FROM job_alert_acknowledgements WHERE job_id=?", (job_id,))
+    cur.execute("UPDATE job_photos SET stage_progress_update_id=NULL WHERE job_id=?", (job_id,))
+    cur.execute("DELETE FROM stage_progress_updates WHERE job_id=?", (job_id,))
+    cur.execute("""
+        DELETE FROM estimate_baseline_lines
+        WHERE baseline_id IN (SELECT id FROM estimate_baselines WHERE job_id=?)
+    """, (job_id,))
+    cur.execute("DELETE FROM estimate_baselines WHERE job_id=?", (job_id,))
+    cur.execute("""
         DELETE FROM estimate_line_items
         WHERE estimate_id IN (
             SELECT id FROM estimate_working_sheets WHERE job_id = ?
@@ -3540,7 +4572,14 @@ def _delete_job_rows(cur, job_id):
     """, (job_id,))
     cur.execute("DELETE FROM estimate_working_sheets WHERE job_id = ?", (job_id,))
     for table in JOB_DIRECT_CHILD_TABLES:
+        if table in {
+            "staff_requests", "stage_progress_updates", "job_alert_acknowledgements",
+            "estimate_baselines", "job_purchase_orders", "job_stages",
+        }:
+            continue
         cur.execute(f"DELETE FROM {table} WHERE job_id = ?", (job_id,))
+    cur.execute("DELETE FROM job_stages WHERE job_id=?", (job_id,))
+    cur.execute("DELETE FROM job_purchase_orders WHERE job_id=?", (job_id,))
     cur.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
 
 
@@ -3905,8 +4944,9 @@ def employee_portal():
         st.warning("This login is not linked to an employee record. Ask admin to link it in User Access.")
         return
 
-    tab_jobs, tab_hours, tab_equipment, tab_forms, tab_photos, tab_password = st.tabs([
+    tab_jobs, tab_requests, tab_hours, tab_equipment, tab_forms, tab_photos, tab_password = st.tabs([
         "My Job Info",
+        "Requests",
         "Submit Timesheet",
         "View Equipment",
         "Generate Forms",
@@ -4031,6 +5071,9 @@ def employee_portal():
                             )
                     else:
                         st.warning("File path not found on disk.")
+
+    with tab_requests:
+        render_employee_requests(employee_id)
 
     with tab_hours:
         timesheets_page(employee_restricted=True)
@@ -5225,7 +6268,15 @@ def photo_data_to_bytes(photo_data):
     return base64.b64decode(photo_data.encode("utf-8"))
 
 
-def save_job_photo(job_id, uploaded_file, category, caption, notes):
+def save_job_photo(
+    job_id,
+    uploaded_file,
+    category,
+    caption,
+    notes,
+    job_stage_id=None,
+    stage_progress_update_id=None,
+):
     uploaded_by = ""
     try:
         user = get_current_user()
@@ -5238,8 +6289,9 @@ def save_job_photo(job_id, uploaded_file, category, caption, notes):
 
     execute("""
         INSERT INTO job_photos
-        (job_id, photo_name, photo_type, photo_data, category, caption, uploaded_by, uploaded_at, notes)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (job_id, photo_name, photo_type, photo_data, category, caption, uploaded_by,
+         uploaded_at, notes, job_stage_id, stage_progress_update_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         job_id,
         uploaded_file.name,
@@ -5250,6 +6302,8 @@ def save_job_photo(job_id, uploaded_file, category, caption, notes):
         uploaded_by,
         datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         notes,
+        int(job_stage_id) if job_stage_id else None,
+        int(stage_progress_update_id) if stage_progress_update_id else None,
     ))
 
 
@@ -5409,7 +6463,18 @@ def review_acceptance_checkbox(key_prefix, payload, label):
     return st.checkbox(label, key=accepted_key)
 
 
-def save_timesheet_entry(job_id, employee_id, work_date, start_time, finish_time, break_minutes, total_hours, work_type, notes):
+def save_timesheet_entry(
+    job_id,
+    employee_id,
+    work_date,
+    start_time,
+    finish_time,
+    break_minutes,
+    total_hours,
+    work_type,
+    notes,
+    job_stage_id=None,
+):
     user = get_current_user() or {}
     submitted_by = user.get("username", "")
     submitted_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -5418,14 +6483,15 @@ def save_timesheet_entry(job_id, employee_id, work_date, start_time, finish_time
         cur = conn.cursor()
         insert_sql = """
             INSERT INTO timesheet_entries
-            (job_id, employee_id, work_date, start_time, finish_time, break_minutes, total_hours,
+            (job_id, job_stage_id, employee_id, work_date, start_time, finish_time, break_minutes, total_hours,
              work_type, submitted_by, submitted_at, status, notes)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         if USE_POSTGRES:
             insert_sql += " RETURNING id"
         cur.execute(insert_sql, (
             job_id,
+            job_stage_id,
             employee_id,
             work_date,
             start_time,
@@ -5453,15 +6519,22 @@ def save_timesheet_entry(job_id, employee_id, work_date, start_time, finish_time
         "timesheet_submitted",
         "timesheet",
         timesheet_id,
-        {"job_id": job_id, "employee_id": employee_id, "hours": total_hours},
+        {
+            "job_id": job_id,
+            "job_stage_id": job_stage_id,
+            "employee_id": employee_id,
+            "hours": total_hours,
+        },
     )
     try:
         summary = df_query("""
-            SELECT j.job_no, j.job_name, e.name AS employee_name
+            SELECT j.job_no, j.job_name, e.name AS employee_name,
+                   COALESCE(js.stage_name, 'Whole Job') AS stage_name
             FROM jobs j
             JOIN employees e ON e.id = ?
+            LEFT JOIN job_stages js ON js.id = ?
             WHERE j.id = ?
-        """, (int(employee_id), int(job_id)))
+        """, (int(employee_id), job_stage_id, int(job_id)))
         if summary.empty:
             employee_label = f"Employee #{employee_id}"
             job_label = f"Job #{job_id}"
@@ -5469,6 +6542,7 @@ def save_timesheet_entry(job_id, employee_id, work_date, start_time, finish_time
             row = summary.iloc[0]
             employee_label = str(row["employee_name"] or f"Employee #{employee_id}")
             job_label = f"{row['job_no']} - {row['job_name']}".strip(" -")
+            job_label = f"{job_label} — {row['stage_name']}"
         create_management_notifications(
             "timesheet_submitted",
             "New timesheet submitted",
@@ -5570,6 +6644,7 @@ def update_timesheet_entry(
     total_hours,
     work_type,
     notes,
+    job_stage_id=None,
 ):
     """Edit a timesheet and transactionally keep its wage posting consistent."""
     timesheet_id = int(timesheet_id)
@@ -5582,12 +6657,13 @@ def update_timesheet_entry(
     total_hours = float(total_hours)
     work_type = str(work_type or "")
     notes = str(notes or "")
+    job_stage_id = int(job_stage_id) if job_stage_id is not None else None
 
     conn = connect()
     try:
         cur = conn.cursor()
         cur.execute("""
-            SELECT job_id, employee_id, work_date, start_time, finish_time,
+            SELECT job_id, job_stage_id, employee_id, work_date, start_time, finish_time,
                    break_minutes, total_hours, work_type,
                    COALESCE(status, 'Submitted'), notes
             FROM timesheet_entries
@@ -5599,6 +6675,7 @@ def update_timesheet_entry(
 
         (
             original_job_id,
+            original_job_stage_id,
             original_employee_id,
             original_work_date,
             original_start_time,
@@ -5640,12 +6717,13 @@ def update_timesheet_entry(
 
         cur.execute("""
             UPDATE timesheet_entries
-            SET job_id = ?, employee_id = ?, work_date = ?,
+            SET job_id = ?, job_stage_id = ?, employee_id = ?, work_date = ?,
                 start_time = ?, finish_time = ?, break_minutes = ?,
                 total_hours = ?, work_type = ?, notes = ?, status = ?
             WHERE id = ?
         """, (
             job_id,
+            job_stage_id,
             employee_id,
             work_date,
             start_time,
@@ -5725,6 +6803,7 @@ def update_timesheet_entry(
 
     before = {
         "job_id": original_job_id,
+        "job_stage_id": original_job_stage_id,
         "employee_id": original_employee_id,
         "work_date": original_work_date,
         "start_time": original_start_time,
@@ -5737,6 +6816,7 @@ def update_timesheet_entry(
     }
     after = {
         "job_id": job_id,
+        "job_stage_id": job_stage_id,
         "employee_id": employee_id,
         "work_date": work_date,
         "start_time": start_time,
@@ -5819,7 +6899,7 @@ def timesheet_status_filter(label, key, default="All"):
 def render_timesheet_edit_form(timesheet_id, key_prefix):
     """Render a reviewed edit form for one existing timesheet."""
     timesheet = df_query("""
-        SELECT t.id, t.job_id, t.employee_id, t.work_date, t.start_time,
+        SELECT t.id, t.job_id, t.job_stage_id, t.employee_id, t.work_date, t.start_time,
                t.finish_time, t.break_minutes, t.total_hours, t.work_type,
                COALESCE(t.status, 'Submitted') AS status, t.notes,
                j.job_no, j.job_name, e.name AS employee_name
@@ -5834,6 +6914,7 @@ def render_timesheet_edit_form(timesheet_id, key_prefix):
 
     row = timesheet.iloc[0]
     job_options = get_job_options()
+    job_stage_options = get_job_stage_options(job_options)
     employee_options = get_employee_options(active_only=False)
     if not job_options or not employee_options:
         pb_error("Jobs and employees must be available before a timesheet can be edited.")
@@ -5875,14 +6956,29 @@ def render_timesheet_edit_form(timesheet_id, key_prefix):
         "update the linked actual labour-cost posting."
     )
 
-    job_labels = list(job_options.keys())
+    job_stage_labels = list(job_stage_options.keys())
     employee_labels = list(employee_options.keys())
-    selected_job = st.selectbox(
-        "Job",
-        job_labels,
-        index=option_index(job_options, row["job_id"]),
+    current_stage_id = row["job_stage_id"]
+    current_job_stage_index = next(
+        (
+            index
+            for index, label in enumerate(job_stage_labels)
+            if int(job_stage_options[label]["job_id"]) == int(row["job_id"])
+            and (
+                job_stage_options[label]["job_stage_id"] is None
+                if pd.isna(current_stage_id)
+                else int(job_stage_options[label]["job_stage_id"] or 0) == int(current_stage_id)
+            )
+        ),
+        0,
+    )
+    selected_job_stage = st.selectbox(
+        "Job / Stage",
+        job_stage_labels,
+        index=current_job_stage_index,
         key=f"{key_prefix}_edit_job_{timesheet_id}",
     )
+    selected_job_choice = job_stage_options[selected_job_stage]
     selected_employee = st.selectbox(
         "Employee",
         employee_labels,
@@ -5947,7 +7043,8 @@ def render_timesheet_edit_form(timesheet_id, key_prefix):
 
     edit_payload = {
         "timesheet_id": int(timesheet_id),
-        "job_id": int(job_options[selected_job]),
+        "job_id": int(selected_job_choice["job_id"]),
+        "job_stage_id": selected_job_choice["job_stage_id"],
         "employee_id": int(employee_options[selected_employee]),
         "date": edited_date.isoformat(),
         "start": edited_start.strftime("%H:%M"),
@@ -5962,7 +7059,7 @@ def render_timesheet_edit_form(timesheet_id, key_prefix):
     st.markdown("#### Review Changes")
     st.dataframe(
         pd.DataFrame([{
-            "Job": selected_job,
+            "Job / Stage": selected_job_stage,
             "Employee": selected_employee,
             "Date": edited_date.isoformat(),
             "Start": edited_start.strftime("%H:%M"),
@@ -5995,7 +7092,7 @@ def render_timesheet_edit_form(timesheet_id, key_prefix):
         try:
             update_timesheet_entry(
                 timesheet_id,
-                job_options[selected_job],
+                selected_job_choice["job_id"],
                 employee_options[selected_employee],
                 edited_date.isoformat(),
                 edited_start.strftime("%H:%M"),
@@ -6004,6 +7101,7 @@ def render_timesheet_edit_form(timesheet_id, key_prefix):
                 edited_hours,
                 edited_work_type,
                 edited_notes,
+                selected_job_choice["job_stage_id"],
             )
         except Exception as exc:
             pb_error(str(exc))
@@ -6205,11 +7303,15 @@ def timesheet_entry_form(employee_id=None, employee_restricted=False, key_prefix
     else:
         employee_options = None
 
-    selected_job = st.selectbox(
-        "Job",
-        list(job_options.keys()),
+    job_stage_options = get_job_stage_options(job_options)
+    selected_job_stage = st.selectbox(
+        "Job / Stage",
+        list(job_stage_options.keys()),
         key=f"{key_prefix}_job",
     )
+    selected_job_choice = job_stage_options[selected_job_stage]
+    selected_job_id = int(selected_job_choice["job_id"])
+    selected_job_stage_id = selected_job_choice["job_stage_id"]
 
     if employee_restricted and employee_id is not None:
         employee_df = df_query("SELECT name FROM employees WHERE id = ?", (employee_id,))
@@ -6367,8 +7469,9 @@ def timesheet_entry_form(employee_id=None, employee_restricted=False, key_prefix
     notes = st.text_area("Notes", key=f"{key_prefix}_notes")
 
     review_payload = {
-        "job_id": job_options[selected_job],
-        "job": selected_job,
+        "job_id": selected_job_id,
+        "job_stage_id": selected_job_stage_id,
+        "job_stage": selected_job_stage,
         "employee_ids": selected_employee_ids,
         "employees": selected_employee_labels,
         "dates": [work_date.isoformat() for work_date in selected_work_dates],
@@ -6384,7 +7487,7 @@ def timesheet_entry_form(employee_id=None, employee_restricted=False, key_prefix
     with st.container(border=True):
         review_rows = [
             {
-                "Job": selected_job,
+                "Job / Stage": selected_job_stage,
                 "Employee": employee_label,
                 "Date": work_date.isoformat(),
                 "Start": start_text,
@@ -6455,7 +7558,7 @@ def timesheet_entry_form(employee_id=None, employee_restricted=False, key_prefix
                       AND COALESCE(status, 'Submitted') <> 'Rejected'
                     LIMIT 1
                 """, (
-                    job_options[selected_job],
+                    selected_job_id,
                     selected_employee_id,
                     work_date_value.isoformat(),
                     start_text,
@@ -6469,7 +7572,7 @@ def timesheet_entry_form(employee_id=None, employee_restricted=False, key_prefix
                     continue
                 try:
                     created_ids.append(save_timesheet_entry(
-                        job_options[selected_job],
+                        selected_job_id,
                         selected_employee_id,
                         work_date_value.isoformat(),
                         start_text,
@@ -6478,6 +7581,7 @@ def timesheet_entry_form(employee_id=None, employee_restricted=False, key_prefix
                         total_hours,
                         work_type,
                         notes,
+                        selected_job_stage_id,
                     ))
                 except Exception as exc:
                     skipped.append(
@@ -6487,7 +7591,7 @@ def timesheet_entry_form(employee_id=None, employee_restricted=False, key_prefix
         if created_ids:
             pb_success(
                 f"Created {len(created_ids)} timesheet{'s' if len(created_ids) != 1 else ''} "
-                f"and linked {'them' if len(created_ids) != 1 else 'it'} to {selected_job}."
+                f"and linked {'them' if len(created_ids) != 1 else 'it'} to {selected_job_stage}."
             )
         if skipped:
             st.warning("Skipped:\n\n" + "\n\n".join(f"• {item}" for item in skipped))
@@ -6511,11 +7615,13 @@ def timesheets_page(employee_restricted=False):
         with tab_my:
             my_df = df_query("""
                 SELECT t.id, t.work_date AS 'Date', j.job_no AS 'Job No', j.job_name AS 'Job Name',
+                       COALESCE(js.stage_name, 'Whole Job') AS 'Stage',
                        t.start_time AS 'Start', t.finish_time AS 'Finish', t.break_minutes AS 'Break Minutes',
                        t.total_hours AS 'Hours', t.work_type AS 'Work Type',
                        COALESCE(t.status, 'Submitted') AS 'Status', t.notes AS 'Notes'
                 FROM timesheet_entries t
                 JOIN jobs j ON j.id = t.job_id
+                LEFT JOIN job_stages js ON js.id = t.job_stage_id
                 WHERE t.employee_id = ?
                 ORDER BY t.work_date DESC, t.id DESC
                 LIMIT 100
@@ -6542,6 +7648,7 @@ def timesheets_page(employee_restricted=False):
     with tab_review:
         df = df_query("""
             SELECT t.id, t.work_date AS 'Date', j.job_no AS 'Job No', j.job_name AS 'Job Name', e.name AS 'Employee',
+                   COALESCE(js.stage_name, 'Whole Job') AS 'Stage',
                    t.start_time AS 'Start', t.finish_time AS 'Finish', t.break_minutes AS 'Break Minutes',
                    t.total_hours AS 'Hours', t.work_type AS 'Work Type',
                    COALESCE(t.status, 'Submitted') AS 'Status',
@@ -6549,6 +7656,7 @@ def timesheets_page(employee_restricted=False):
             FROM timesheet_entries t
             JOIN jobs j ON j.id = t.job_id
             JOIN employees e ON e.id = t.employee_id
+            LEFT JOIN job_stages js ON js.id = t.job_stage_id
             ORDER BY t.work_date DESC, t.id DESC
             LIMIT 500
         """)
@@ -6589,6 +7697,7 @@ def timesheets_page(employee_restricted=False):
             )
             by_job = df_query("""
                 SELECT t.id, t.work_date AS 'Date', e.name AS 'Employee',
+                       COALESCE(js.stage_name, 'Whole Job') AS 'Stage',
                        t.start_time AS 'Start', t.finish_time AS 'Finish',
                        t.break_minutes AS 'Break Minutes', t.total_hours AS 'Hours',
                        t.work_type AS 'Work Type',
@@ -6596,6 +7705,7 @@ def timesheets_page(employee_restricted=False):
                        t.notes AS 'Notes'
                 FROM timesheet_entries t
                 JOIN employees e ON e.id = t.employee_id
+                LEFT JOIN job_stages js ON js.id = t.job_stage_id
                 WHERE t.job_id = ?
                 ORDER BY t.work_date DESC, t.id DESC
             """, (selected_job_id,))
@@ -8350,23 +9460,25 @@ def import_takeoff_job_pack(
         access_allowance = _takeoff_float(summary.get("access_equipment_allowance"))
         subcontractor_allowance = _takeoff_float(summary.get("subcontractor_allowance"))
         sundries_allowance = _takeoff_float(summary.get("sundries_allowance"))
-        target_gp = _takeoff_float(summary.get("target_gp_percent"), 35.0)
+        # Take-off rates and the $900 painter-day target already include profit.
+        # Retain legacy manifest fields for compatibility, but do not add a
+        # second margin/markup percentage to imported estimates.
+        target_gp = 0.0
         contingency = _takeoff_float(summary.get("contingency_percent"))
         gst_percent = _takeoff_float(summary.get("gst_percent"), 10.0)
-        pricing_method = _takeoff_text(summary.get("pricing_method"), "Target Gross Margin")
+        pricing_method = "Production Target Included"
         line_total = _takeoff_float(summary.get("line_pricing_total")) if use_imported_line_pricing else 0.0
-        totals = calculate_estimate_pricing(
+        totals = production_sell_pricing(
             line_total=line_total,
             labour_hours=labour_hours,
-            labour_rate=labour_rate,
             material_allowance=material_allowance,
             access_equipment_allowance=access_allowance,
             subcontractor_allowance=subcontractor_allowance,
             sundries_allowance=sundries_allowance,
-            pricing_percent=target_gp,
             contingency_percent=contingency,
             gst_percent=gst_percent,
-            pricing_method=pricing_method,
+            day_hours=DEFAULT_DAY_HOURS,
+            value_target=DEFAULT_VALUE_TARGET,
         )
 
         if create_estimate:
@@ -9166,19 +10278,34 @@ def estimate_totals(
 ):
     line_df = df_query("SELECT COALESCE(SUM(line_total), 0) AS line_total FROM estimate_line_items WHERE estimate_id = ?", (estimate_id,))
     line_total = float(line_df.iloc[0]["line_total"] or 0) if not line_df.empty else 0.0
-    return calculate_estimate_pricing(
+    settings_df = safe_df_query(
+        """
+        SELECT COALESCE(production_day_hours, 8) AS day_hours,
+               COALESCE(production_value_target, 900) AS value_target
+        FROM estimate_working_sheets
+        WHERE id = ?
+        """,
+        (int(estimate_id),),
+    )
+    day_hours = DEFAULT_DAY_HOURS
+    value_target = DEFAULT_VALUE_TARGET
+    if not settings_df.empty:
+        day_hours = float(settings_df.iloc[0]["day_hours"] or DEFAULT_DAY_HOURS)
+        value_target = float(settings_df.iloc[0]["value_target"] or DEFAULT_VALUE_TARGET)
+    totals = production_sell_pricing(
         line_total=line_total,
         labour_hours=labour_hours,
-        labour_rate=PLANNING_LABOUR_RATE,
         material_allowance=material_allowance,
         access_equipment_allowance=access_equipment_allowance,
         subcontractor_allowance=subcontractor_allowance,
         sundries_allowance=sundries_allowance,
-        pricing_percent=margin_percent,
         contingency_percent=contingency_percent,
         gst_percent=gst_percent,
-        pricing_method=pricing_method,
+        day_hours=day_hours,
+        value_target=value_target,
     )
+    totals["labour_total"] = round(float(labour_hours or 0) * PLANNING_LABOUR_RATE, 2)
+    return totals
 
 
 def recalc_estimate_totals(estimate_id):
@@ -9191,7 +10318,7 @@ def recalc_estimate_totals(estimate_id):
         r["labour_hours"], r["labour_rate"], r["material_allowance"], r["access_equipment_allowance"],
         r["subcontractor_allowance"], r["sundries_allowance"], r["margin_percent"],
         r["contingency_percent"], r["gst_percent"],
-        r.get("pricing_method") or "Markup",
+        "Production Target Included",
     )
     execute("""
         UPDATE estimate_working_sheets
@@ -9212,6 +10339,9 @@ def permanently_delete_estimate_working_sheet(estimate_id):
     conn = connect()
     try:
         cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM estimate_baselines WHERE estimate_id=?", (int(estimate_id),))
+        if int(cur.fetchone()[0] or 0) > 0:
+            raise ValueError("A locked baseline references this estimate. Archive it instead of deleting it.")
         cur.execute("DELETE FROM estimate_line_items WHERE estimate_id = ?", (int(estimate_id),))
         cur.execute("DELETE FROM estimate_working_sheets WHERE id = ?", (int(estimate_id),))
         conn.commit()
@@ -9233,6 +10363,11 @@ def render_estimate_archive_delete_controls(selected_estimate_id, current):
     estimate_no = str(current.get("estimate_no") or f"Estimate {selected_estimate_id}")
     revision = str(current.get("revision") or "")
     estimate_label = f"{estimate_no} {revision}".strip()
+    baseline_count_df = safe_df_query(
+        "SELECT COUNT(*) AS c FROM estimate_baselines WHERE estimate_id=?",
+        (int(selected_estimate_id),),
+    )
+    baseline_count = int(baseline_count_df.iloc[0]["c"] or 0) if not baseline_count_df.empty else 0
 
     with st.expander("Manage Estimate Working Sheet", expanded=False):
         st.caption("Admin and Manager access only.")
@@ -9273,6 +10408,11 @@ def render_estimate_archive_delete_controls(selected_estimate_id, current):
                     refresh()
 
         st.divider()
+        if baseline_count:
+            st.info(
+                f"This estimate has {baseline_count} locked baseline snapshot(s). "
+                "It can be archived, but permanent deletion is disabled to preserve job history."
+            )
         pb_error("Permanent deletion cannot be undone. It removes the estimate and every linked line item.")
         delete_text = st.text_input(
             "Type DELETE to permanently remove this estimate",
@@ -9282,7 +10422,11 @@ def render_estimate_archive_delete_controls(selected_estimate_id, current):
             "I understand this estimate and its line items will be permanently deleted",
             key=f"delete_estimate_checkbox_{selected_estimate_id}",
         )
-        if st.button("Delete Estimate Permanently", key=f"delete_estimate_permanently_{selected_estimate_id}"):
+        if st.button(
+            "Delete Estimate Permanently",
+            key=f"delete_estimate_permanently_{selected_estimate_id}",
+            disabled=baseline_count > 0,
+        ):
             if str(delete_text or "").strip().upper() != "DELETE":
                 pb_error("Type DELETE exactly before permanently deleting the estimate.")
             elif not delete_confirmed:
@@ -9292,6 +10436,264 @@ def render_estimate_archive_delete_controls(selected_estimate_id, current):
                 st.session_state.pop("estimate_select", None)
                 pb_success(f"{estimate_label} deleted permanently.")
                 refresh()
+
+
+def render_estimate_production_progress(estimate_id, job_id, current):
+    """Convert take-off value into painter-day targets and earned progress."""
+    estimate_id = int(estimate_id)
+    job_id = int(job_id)
+    st.subheader("Production target and expected progress")
+    st.caption(
+        "Each measured line is converted to the quantity one painter should complete in an "
+        "8-hour day for $800, $900 and $1,000 of completed work. Timesheet hours then show "
+        "the percentage that should be complete by now."
+    )
+    render_estimate_baseline_panel(estimate_id, job_id, current)
+
+    day_hours = float(current.get("production_day_hours") or DEFAULT_DAY_HOURS)
+    value_low = float(current.get("production_value_low") or DEFAULT_VALUE_LOW)
+    value_target = float(current.get("production_value_target") or DEFAULT_VALUE_TARGET)
+    value_high = float(current.get("production_value_high") or DEFAULT_VALUE_HIGH)
+    with st.expander("Production settings", expanded=False):
+        with st.form(f"estimate_production_settings_{estimate_id}"):
+            s1, s2, s3, s4 = st.columns(4)
+            edit_day_hours = s1.number_input(
+                "Painter-day hours", min_value=1.0, max_value=24.0,
+                value=day_hours, step=0.5,
+            )
+            edit_low = s2.number_input(
+                "Low value / day", min_value=1.0, value=value_low, step=50.0,
+            )
+            edit_target = s3.number_input(
+                "Target value / day", min_value=1.0, value=value_target, step=50.0,
+            )
+            edit_high = s4.number_input(
+                "High value / day", min_value=1.0, value=value_high, step=50.0,
+            )
+            save_settings = st.form_submit_button(
+                "Save production settings", type="primary", use_container_width=True,
+            )
+        if save_settings:
+            try:
+                settings = validate_production_targets(
+                    day_hours=edit_day_hours,
+                    value_low=edit_low,
+                    value_target=edit_target,
+                    value_high=edit_high,
+                )
+            except ValueError as exc:
+                pb_error(str(exc))
+            else:
+                execute(
+                    """
+                    UPDATE estimate_working_sheets
+                    SET production_day_hours=?,production_value_low=?,production_value_target=?,
+                        production_value_high=?,updated_at=?
+                    WHERE id=?
+                    """,
+                    (
+                        settings["day_hours"], settings["value_low"],
+                        settings["value_target"], settings["value_high"],
+                        datetime.now().strftime("%Y-%m-%d %H:%M:%S"), estimate_id,
+                    ),
+                )
+                pb_success("Production settings saved.")
+                refresh()
+
+    lines = df_query(
+        """
+        SELECT li.id, li.job_stage_id, COALESCE(js.stage_name,'Whole Job') AS stage_name,
+               li.section, li.item_description, COALESCE(li.qty,0) AS qty,
+               COALESCE(li.unit,'item') AS unit, COALESCE(li.unit_rate,0) AS unit_rate,
+               COALESCE(li.line_total,0) AS line_total,
+               COALESCE(li.estimated_labour_hours,0) AS estimated_labour_hours,
+               COALESCE(li.production_tracking_enabled,1) AS production_tracking_enabled
+        FROM estimate_line_items li
+        LEFT JOIN job_stages js ON js.id=li.job_stage_id
+        WHERE li.estimate_id=?
+        ORDER BY li.id
+        """,
+        (estimate_id,),
+    )
+    if lines.empty:
+        st.info("Add or import take-off line items before calculating production targets.")
+        return
+
+    stages = safe_df_query(
+        """
+        SELECT id, stage_name, sequence_order
+        FROM job_stages
+        WHERE job_id=?
+        ORDER BY sequence_order, id
+        """,
+        (job_id,),
+    )
+    stage_options = ["Whole Job"] + stages["stage_name"].astype(str).tolist()
+    stage_id_by_name = {
+        str(row["stage_name"]): int(row["id"])
+        for _, row in stages.iterrows()
+    }
+    assignment_editor = pd.DataFrame({
+        "id": lines["id"].astype(int),
+        "Track": lines["production_tracking_enabled"].fillna(1).astype(int).astype(bool),
+        "Stage": lines["stage_name"].fillna("Whole Job").astype(str),
+        "Description": lines["item_description"].astype(str),
+        "Qty": lines["qty"].astype(float),
+        "Unit": lines["unit"].astype(str),
+        "Rate": lines["unit_rate"].astype(float),
+        "Value": lines["line_total"].astype(float),
+    })
+    with st.expander("Choose tracked lines and stages", expanded=False):
+        st.caption(
+            "Turn off non-production allowances. Assign each take-off line to a stage so "
+            "stage timesheets are compared with the correct work."
+        )
+        edited_assignments = st.data_editor(
+            assignment_editor,
+            hide_index=True,
+            use_container_width=True,
+            disabled=["id", "Description", "Qty", "Unit", "Rate", "Value"],
+            column_config={
+                "id": None,
+                "Track": st.column_config.CheckboxColumn("Track"),
+                "Stage": st.column_config.SelectboxColumn("Stage", options=stage_options, required=True),
+                "Rate": st.column_config.NumberColumn("Rate", format="$%.2f"),
+                "Value": st.column_config.NumberColumn("Value", format="$%.2f"),
+            },
+            key=f"estimate_production_assignments_{estimate_id}",
+        )
+        if st.button(
+            "Save tracked lines and stage assignments",
+            type="primary",
+            key=f"save_estimate_production_assignments_{estimate_id}",
+            use_container_width=True,
+        ):
+            for _, row in edited_assignments.iterrows():
+                stage_name = str(row["Stage"] or "Whole Job")
+                execute(
+                    """
+                    UPDATE estimate_line_items
+                    SET production_tracking_enabled=?,job_stage_id=?
+                    WHERE id=? AND estimate_id=?
+                    """,
+                    (
+                        1 if bool(row["Track"]) else 0,
+                        stage_id_by_name.get(stage_name),
+                        int(row["id"]), estimate_id,
+                    ),
+                )
+            pb_success("Production tracking selections saved.")
+            refresh()
+
+    tracked = lines[lines["production_tracking_enabled"].fillna(1).astype(int) == 1].copy()
+    if tracked.empty:
+        st.info("No estimate lines are currently included in production tracking.")
+        return
+
+    production_rows = []
+    for _, line in tracked.iterrows():
+        metrics = line_production_metrics(
+            quantity=line["qty"], unit_rate=line["unit_rate"], line_total=line["line_total"],
+            unit=line["unit"], day_hours=day_hours, value_low=value_low,
+            value_target=value_target, value_high=value_high,
+        )
+        fallback_hours = float(line["estimated_labour_hours"] or 0)
+        production_rows.append({
+            "Stage": str(line["stage_name"] or "Whole Job"),
+            "Description": str(line["item_description"] or ""),
+            "Qty": float(line["qty"] or 0),
+            "Unit": str(line["unit"] or "item"),
+            "$800 / 8h Qty": float(metrics["units_per_day_low"]),
+            "$900 / 8h Qty": float(metrics["units_per_day_target"]),
+            "$1,000 / 8h Qty": float(metrics["units_per_day_high"]),
+            "Target Hours": float(metrics["labour_hours_at_target"] or fallback_hours),
+            "Low-value Hours": float(metrics["labour_hours_at_low"] or fallback_hours),
+            "High-value Hours": float(metrics["labour_hours_at_high"] or fallback_hours),
+            "Work Value": float(metrics["work_value"]),
+        })
+    production_df = pd.DataFrame(production_rows)
+    target_hours = float(production_df["Target Hours"].sum())
+    low_hours = float(production_df["Low-value Hours"].sum())
+    high_hours = float(production_df["High-value Hours"].sum())
+    actual_df = df_query(
+        """
+        SELECT COALESCE(SUM(total_hours),0) AS actual_hours
+        FROM timesheet_entries
+        WHERE job_id=? AND COALESCE(status,'Submitted') <> 'Rejected'
+        """,
+        (job_id,),
+    )
+    actual_hours = float(actual_df.iloc[0]["actual_hours"] or 0) if not actual_df.empty else 0.0
+    progress = expected_progress(actual_hours, target_hours)
+    crew_size = int(st.number_input(
+        "Planned crew size", min_value=1, max_value=100, value=1, step=1,
+        key=f"estimate_production_crew_size_{estimate_id}",
+    ))
+    duration = crew_duration_days(target_hours, crew_size, day_hours) if target_hours > 0 else 0.0
+
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Target Painter Hours", f"{target_hours:,.1f}")
+    m2.metric("Expected Range", f"{high_hours:,.1f}–{low_hours:,.1f} h")
+    m3.metric(f"Duration · {crew_size} painter{'s' if crew_size != 1 else ''}", f"{duration:,.1f} days")
+    m4.metric("Timesheet Hours Used", f"{actual_hours:,.1f}")
+    m5.metric("Should Be Complete", f"{progress['raw_expected_percent']:,.1f}%")
+    if progress["hours_over_budget"] > 0:
+        st.warning(
+            f"Timesheets are {progress['hours_over_budget']:,.1f} hours beyond the $900/day target. "
+            "This scope should already be complete."
+        )
+    elif target_hours > 0:
+        st.info(
+            f"At {actual_hours:,.1f} hours used, approximately {progress['expected_percent']:,.1f}% "
+            f"of the tracked take-off work should be complete, with {progress['remaining_hours']:,.1f} target hours remaining."
+        )
+
+    st.markdown("#### Quantity required per painter per 8-hour day")
+    st.dataframe(
+        production_df.drop(columns=["Low-value Hours", "High-value Hours"]),
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "$800 / 8h Qty": st.column_config.NumberColumn(format="%.2f"),
+            "$900 / 8h Qty": st.column_config.NumberColumn(format="%.2f"),
+            "$1,000 / 8h Qty": st.column_config.NumberColumn(format="%.2f"),
+            "Target Hours": st.column_config.NumberColumn(format="%.1f"),
+            "Work Value": st.column_config.NumberColumn(format="$%.2f"),
+        },
+    )
+
+    stage_targets = production_df.groupby("Stage", as_index=False)["Target Hours"].sum()
+    actual_by_stage = df_query(
+        """
+        SELECT COALESCE(js.stage_name,'Whole Job') AS stage_name,
+               COALESCE(SUM(t.total_hours),0) AS actual_hours
+        FROM timesheet_entries t
+        LEFT JOIN job_stages js ON js.id=t.job_stage_id
+        WHERE t.job_id=? AND COALESCE(t.status,'Submitted') <> 'Rejected'
+        GROUP BY COALESCE(js.stage_name,'Whole Job')
+        """,
+        (job_id,),
+    )
+    actual_lookup = {
+        str(row["stage_name"]): float(row["actual_hours"] or 0)
+        for _, row in actual_by_stage.iterrows()
+    }
+    stage_targets["Timesheet Hours"] = stage_targets["Stage"].map(actual_lookup).fillna(0.0)
+    stage_targets["Should Be Complete %"] = stage_targets.apply(
+        lambda row: expected_progress(row["Timesheet Hours"], row["Target Hours"])["raw_expected_percent"],
+        axis=1,
+    )
+    st.markdown("#### Stage progress expected from timesheets")
+    st.dataframe(
+        stage_targets,
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "Target Hours": st.column_config.NumberColumn(format="%.1f"),
+            "Timesheet Hours": st.column_config.NumberColumn(format="%.1f"),
+            "Should Be Complete %": st.column_config.ProgressColumn(min_value=0.0, max_value=100.0, format="%.1f%%"),
+        },
+    )
 
 
 def estimate_working_sheet_page():
@@ -9360,7 +10762,7 @@ def estimate_working_sheet_page():
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     selected_job_id, estimate_no, estimate_date, revision, "Draft",
-                    0, PLANNING_LABOUR_RATE, 0, 0, 0, 0, 35, 0, 10, "Target Gross Margin",
+                    0, PLANNING_LABOUR_RATE, 0, 0, 0, 0, 0, 0, 10, "Production Target Included",
                     0, 0, 0, now, now, notes,
                 ))
                 record_audit_event("estimate_created", "estimate", estimate_no, {"job_id": selected_job_id})
@@ -9399,7 +10801,9 @@ def estimate_working_sheet_page():
 
     render_estimate_archive_delete_controls(selected_estimate_id, current)
 
-    tab_summary, tab_lines, tab_view = st.tabs(["Summary / Pricing", "Line Items", "View / Export"])
+    tab_summary, tab_lines, tab_production, tab_view = st.tabs(
+        ["Summary / Pricing", "Line Items", "Production / Progress", "View / Export"]
+    )
 
     with tab_summary:
         with st.form("estimate_summary_form"):
@@ -9429,34 +10833,21 @@ def estimate_working_sheet_page():
             subcontractor_allowance = col9.number_input("Subcontractor Allowance", min_value=0.0, step=100.0, value=float(current["subcontractor_allowance"] or 0))
             sundries_allowance = col10.number_input("Sundries / Consumables", min_value=0.0, step=50.0, value=float(current["sundries_allowance"] or 0))
 
-            col11, col12, col13, col14 = st.columns(4)
-            pricing_methods = ["Target Gross Margin", "Markup"]
-            current_pricing_method = str(current.get("pricing_method") or "Markup")
-            if current_pricing_method not in pricing_methods:
-                current_pricing_method = "Markup"
-            pricing_method = col11.selectbox(
-                "Pricing Method",
-                pricing_methods,
-                index=pricing_methods.index(current_pricing_method),
-                help="Gross margin divides by 1 − margin rate. Markup adds a percentage to cost.",
+            st.info(
+                f"Pricing uses the profit-inclusive ${float(current.get('production_value_target') or DEFAULT_VALUE_TARGET):,.0f} "
+                "completed-work target per painter per 8-hour day. No extra profit or markup percentage is added."
             )
-            pricing_label = (
-                "Target Gross Margin %"
-                if pricing_method == "Target Gross Margin"
-                else "Markup %"
+            col11, col12 = st.columns(2)
+            contingency_percent = col11.number_input(
+                "Contingency % (optional)", min_value=0.0, max_value=100.0,
+                step=1.0, value=float(current["contingency_percent"] or 0),
             )
-            margin_percent = col12.number_input(
-                pricing_label,
-                min_value=0.0,
-                max_value=99.0 if pricing_method == "Target Gross Margin" else 500.0,
-                step=1.0,
-                value=min(
-                    float(current["margin_percent"] or 0),
-                    99.0 if pricing_method == "Target Gross Margin" else 500.0,
-                ),
+            gst_percent = col12.number_input(
+                "GST %", min_value=0.0, max_value=100.0,
+                step=1.0, value=float(current["gst_percent"] or 10),
             )
-            contingency_percent = col13.number_input("Contingency %", min_value=0.0, max_value=100.0, step=1.0, value=float(current["contingency_percent"] or 0))
-            gst_percent = col14.number_input("GST %", min_value=0.0, max_value=100.0, step=1.0, value=float(current["gst_percent"] or 10))
+            pricing_method = "Production Target Included"
+            margin_percent = 0.0
             notes = st.text_area("Notes / Scope Notes", value=str(current["notes"] or ""))
 
             preview = estimate_totals(
@@ -9465,12 +10856,11 @@ def estimate_working_sheet_page():
                 margin_percent, contingency_percent, gst_percent, pricing_method,
             )
             st.markdown("### Pricing Preview")
-            c1, c2, c3, c4, c5 = st.columns(5)
-            c1.metric("Direct Cost", f"${preview['direct_total']:,.2f}")
-            c2.metric("Pricing Addition", f"${preview['margin_amount']:,.2f}")
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Take-off / Labour Sell Value", f"${preview['work_sell_value']:,.2f}")
+            c2.metric("Added Allowances", f"${preview['allowances_total']:,.2f}")
             c3.metric("Total Ex GST", f"${preview['total_ex_gst']:,.2f}")
             c4.metric("Total Inc GST", f"${preview['total_inc_gst']:,.2f}")
-            c5.metric("Achieved Gross Margin", f"{preview['achieved_margin_percent']:,.2f}%")
 
             saved = st.form_submit_button("Save Estimate Summary")
             if saved:
@@ -9505,36 +10895,64 @@ def estimate_working_sheet_page():
         render_rate_library_estimate_adder(selected_estimate_id)
 
         st.markdown("#### Add Manual Line Item")
+        stage_rows = safe_df_query(
+            """
+            SELECT id, stage_name
+            FROM job_stages
+            WHERE job_id=?
+            ORDER BY sequence_order, id
+            """,
+            (selected_job_id,),
+        )
+        manual_stage_options = {"Whole Job": None}
+        manual_stage_options.update({
+            str(row["stage_name"]): int(row["id"])
+            for _, row in stage_rows.iterrows()
+        })
         with st.form("add_estimate_line_form"):
             col1, col2 = st.columns(2)
             section = col1.selectbox("Section", ["Preliminaries", "Labour", "Materials", "Access / Equipment", "Subcontractor", "Variations", "Other"])
             item_description = col2.text_input("Item Description")
-            col3, col4, col5 = st.columns(3)
+            col3, col4, col5, col6 = st.columns(4)
             qty = col3.number_input("Qty", min_value=0.0, step=1.0)
             unit = col4.text_input("Unit", value="item")
             unit_rate = col5.number_input("Unit Rate", min_value=0.0, step=10.0)
+            manual_stage = col6.selectbox("Job Stage", list(manual_stage_options.keys()))
+            track_production = st.checkbox(
+                "Include this line in production tracking",
+                value=True,
+                help="Turn this off for allowances that do not represent measurable work.",
+            )
             line_notes = st.text_area("Line Notes")
             added = st.form_submit_button("Add Line Item")
             if added and item_description:
                 line_total = round(float(qty or 0) * float(unit_rate or 0), 2)
                 execute("""
                     INSERT INTO estimate_line_items
-                    (estimate_id, section, item_description, qty, unit, unit_rate, line_total, notes)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """, (selected_estimate_id, section, item_description, qty, unit, unit_rate, line_total, line_notes))
+                    (estimate_id, job_stage_id, production_tracking_enabled, section,
+                     item_description, qty, unit, unit_rate, line_total, notes)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    selected_estimate_id, manual_stage_options[manual_stage],
+                    1 if track_production else 0, section, item_description,
+                    qty, unit, unit_rate, line_total, line_notes,
+                ))
                 recalc_estimate_totals(selected_estimate_id)
                 pb_success("Line item added.")
                 refresh()
 
         lines_df = df_query("""
-            SELECT id, section AS 'Section', item_description AS 'Description', qty AS 'Qty', unit AS 'Unit',
-                   estimated_labour_hours AS 'Estimated Labour Hours', material_allowance AS 'Material Allowance',
-                   substrate AS 'Substrate', work_location AS 'Location', coating_system AS 'Coating System',
-                   colour_finish AS 'Colour / Finish', unit_rate AS 'Unit Rate', line_total AS 'Line Total',
-                   source_pack AS 'Source Pack', notes AS 'Notes'
-            FROM estimate_line_items
-            WHERE estimate_id = ?
-            ORDER BY id
+            SELECT li.id, COALESCE(js.stage_name,'Whole Job') AS 'Stage',
+                   COALESCE(li.production_tracking_enabled,1) AS 'Track Production',
+                   li.section AS 'Section', li.item_description AS 'Description', li.qty AS 'Qty', li.unit AS 'Unit',
+                   li.estimated_labour_hours AS 'Estimated Labour Hours', li.material_allowance AS 'Material Allowance',
+                   li.substrate AS 'Substrate', li.work_location AS 'Location', li.coating_system AS 'Coating System',
+                   li.colour_finish AS 'Colour / Finish', li.unit_rate AS 'Unit Rate', li.line_total AS 'Line Total',
+                   li.source_pack AS 'Source Pack', li.notes AS 'Notes'
+            FROM estimate_line_items li
+            LEFT JOIN job_stages js ON js.id=li.job_stage_id
+            WHERE li.estimate_id = ?
+            ORDER BY li.id
         """, (selected_estimate_id,))
         if lines_df.empty:
             st.info("No line items added yet.")
@@ -9558,12 +10976,15 @@ def estimate_working_sheet_page():
                     pb_success("Line item deleted.")
                     refresh()
 
+    with tab_production:
+        render_estimate_production_progress(selected_estimate_id, selected_job_id, current)
+
     with tab_view:
         summary_df = df_query("""
             SELECT e.estimate_no AS 'Estimate No', e.revision AS 'Revision', e.estimate_date AS 'Date', e.status AS 'Status',
                    j.job_no AS 'Job No', j.job_name AS 'Job Name', e.labour_hours AS 'Labour Hours', e.labour_rate AS 'Labour Rate',
                    e.material_allowance AS 'Material Allowance', e.access_equipment_allowance AS 'Access / Equipment',
-                   e.subcontractor_allowance AS 'Subcontractor', e.sundries_allowance AS 'Sundries', e.margin_percent AS 'Margin %',
+                   e.subcontractor_allowance AS 'Subcontractor', e.sundries_allowance AS 'Sundries',
                    e.contingency_percent AS 'Contingency %', e.total_ex_gst AS 'Total Ex GST', e.gst_amount AS 'GST',
                    e.total_inc_gst AS 'Total Inc GST', e.notes AS 'Notes'
             FROM estimate_working_sheets e
@@ -10562,7 +11983,14 @@ def job_costs_forecasting_page():
 
         st.markdown("### Forecast Inputs")
         i1, i2, i3, i4 = st.columns(4)
-        target_gp = i1.number_input("Target GP %", min_value=0.0, max_value=100.0, value=35.0, step=1.0)
+        i1.number_input(
+            "Profit-Inclusive Work / Painter Day",
+            min_value=1.0,
+            value=DEFAULT_VALUE_TARGET,
+            step=50.0,
+            disabled=True,
+            help="The $900 completed-work target already covers profit; no separate GP percentage is required.",
+        )
         labour_cost_hour = i2.number_input(
             "Forecast Labour Cost / Hour",
             min_value=0.0,
@@ -10574,10 +12002,8 @@ def job_costs_forecasting_page():
         crew_size = i3.number_input("Crew Size", min_value=1.0, value=3.0, step=1.0)
         hours_day = i4.number_input("Hours / Person / Day", min_value=1.0, value=8.0, step=0.5)
 
-        target_cost = jc_float(row["Contract Value"]) * (1 - target_gp / 100)
-        remaining_cost_budget = max(target_cost - jc_float(row["Total Actual Cost"]), 0)
-        remaining_by_budget = remaining_cost_budget / labour_cost_hour if labour_cost_hour else 0
-        remaining_hours = jc_float(row["Remaining Labour Hours"]) or remaining_by_budget
+        remaining_hours = jc_float(row["Remaining Labour Hours"])
+        remaining_cost_budget = remaining_hours * labour_cost_hour
         daily_capacity = crew_size * hours_day
         days_required = int((remaining_hours + daily_capacity - 0.001) // daily_capacity) if daily_capacity else 0
         if daily_capacity and remaining_hours % daily_capacity:
@@ -10594,10 +12020,10 @@ def job_costs_forecasting_page():
         f3.metric("Forecast Finish", str(finish_date))
         f4.metric("Forecast GP %", f"{forecast_gp:.2f}%")
 
-        if forecast_gp < target_gp:
-            st.warning("Forecast is below target. Check labour, materials, scope changes and variations.")
-        else:
-            pb_success("Forecast is at or above target based on these inputs.")
+        st.info(
+            "Forecast labour follows the $900 completed-work target. Gross profit remains visible "
+            "as an actual result, but there is no separate target percentage input."
+        )
 
         detail_cols = [
             "Job No", "Job Name", "Builder / Client", "Status", "Leading Hand", "Start Date", "End Date",
@@ -12191,7 +13617,6 @@ def pb_job_cost_frame():
                COALESCE(quoted_access_equipment, 0) AS 'Budget Access',
                COALESCE(quoted_subcontractors, 0) AS 'Budget Subcontractors',
                COALESCE(quoted_sundries, 0) AS 'Budget Sundries',
-               COALESCE(target_gp_percent, 35) AS 'Target GP %',
                locked_at AS 'Budget Locked'
         FROM job_budgets
     """)
@@ -12229,7 +13654,7 @@ def pb_job_cost_frame():
         "Contract Value", "Committed Material Cost", "Material Cost", "Material Qty Required", "Material Qty Received", "Material Lines",
         "Wage Hours", "Labour Cost", "Timesheet Hours", "Timesheet Lines", "Budget Labour Hours",
         "Budget Labour Cost", "Budget Materials", "Budget Access", "Budget Subcontractors", "Budget Sundries",
-        "Target GP %", "Variation Value", "Approved Variation Value", "Variation Count", "Claimed Amount",
+        "Variation Value", "Approved Variation Value", "Variation Count", "Claimed Amount",
         "Paid Amount", "Claim Count"
     ]
     for col in numeric_cols:
@@ -12258,17 +13683,13 @@ def pb_job_cost_frame():
     def health(row):
         today = date.today()
         issues = []
-        gp = pb_float(row["Gross Profit %"])
         cost_pct = pb_float(row["Cost to Date %"])
-        target_gp = pb_float(row["Target GP %"], 35)
         end = pb_date(row["End Date"])
 
         if pb_float(row["Adjusted Contract Value"]) <= 0:
             issues.append("No contract value")
         if row["Budget Locked"] in [None, ""]:
             issues.append("Budget not locked")
-        if gp < target_gp:
-            issues.append("GP below target")
         if cost_pct > 85 and str(row["Status"]).lower() not in ["complete", "completed", "closed", "archived"]:
             issues.append("Cost high")
         if end and end < today and str(row["Status"]).lower() not in ["complete", "completed", "closed", "archived"]:
@@ -12389,7 +13810,11 @@ def pb_control_budget_lock(df):
         quoted_subbies = c5.number_input("Subcontractor Allowance", min_value=0.0, value=pb_float(current.get("quoted_subcontractors", 0)), step=100.0)
         quoted_sundries = c6.number_input("Sundries / Consumables", min_value=0.0, value=pb_float(current.get("quoted_sundries", 0)), step=50.0)
 
-        target_gp = st.number_input("Target GP %", min_value=0.0, max_value=100.0, value=pb_float(current.get("target_gp_percent", 35), 35), step=1.0)
+        target_gp = 0.0
+        st.caption(
+            "Profit is already allowed for in the $900 completed-work target per painter-day. "
+            "No additional GP percentage is applied."
+        )
         notes = st.text_area("Budget Notes", value=str(current.get("notes", "") or ""))
         submitted = st.form_submit_button("Save / Lock Job Budget")
 
@@ -12420,7 +13845,6 @@ def pb_control_budget_lock(df):
                b.quoted_access_equipment AS 'Access',
                b.quoted_subcontractors AS 'Subcontractors',
                b.quoted_sundries AS 'Sundries',
-               b.target_gp_percent AS 'Target GP %',
                b.locked_at AS 'Locked At',
                b.locked_by AS 'Locked By'
         FROM job_budgets b
@@ -12896,6 +14320,1950 @@ def render_selectable_job_details(job_details, job_id):
             pb_error("The job could not be updated. Check that the Job Number is unique and try again.")
 
 
+JOB_STAGE_STATUS_OPTIONS = ["Planned", "Ready", "In Progress", "On Hold", "Completed"]
+JOB_PO_STATUS_OPTIONS = ["Draft", "Active", "Complete", "Cancelled"]
+
+
+def job_value_basis(job_id):
+    """Use the locked baseline, latest approved estimate, then contract value."""
+    baseline = safe_df_query(
+        """
+        SELECT COALESCE(total_ex_gst, 0) AS total_ex_gst,
+               COALESCE(baseline_name, '') AS baseline_name
+        FROM estimate_baselines
+        WHERE job_id = ? AND COALESCE(active, 1) = 1
+        ORDER BY locked_at DESC, id DESC
+        LIMIT 1
+        """,
+        (int(job_id),),
+    )
+    if not baseline.empty and float(baseline.iloc[0]["total_ex_gst"] or 0) > 0:
+        name = str(baseline.iloc[0]["baseline_name"] or "Locked estimate")
+        return float(baseline.iloc[0]["total_ex_gst"] or 0), f"Locked baseline: {name}"
+    estimate = safe_df_query(
+        """
+        SELECT COALESCE(total_ex_gst, 0) AS total_ex_gst
+        FROM estimate_working_sheets
+        WHERE job_id = ? AND COALESCE(archived, 0) = 0
+        ORDER BY CASE LOWER(COALESCE(status, '')) WHEN 'approved' THEN 0 ELSE 1 END,
+                 id DESC
+        LIMIT 1
+        """,
+        (int(job_id),),
+    )
+    if not estimate.empty and float(estimate.iloc[0]["total_ex_gst"] or 0) > 0:
+        return float(estimate.iloc[0]["total_ex_gst"] or 0), "Latest estimate"
+    job = safe_df_query(
+        "SELECT COALESCE(contract_value, 0) AS contract_value FROM jobs WHERE id = ?",
+        (int(job_id),),
+    )
+    value = float(job.iloc[0]["contract_value"] or 0) if not job.empty else 0.0
+    return value, "Contract value"
+
+
+def job_production_settings(job_id):
+    """Return the frozen production settings when available."""
+    baseline = safe_df_query(
+        """
+        SELECT COALESCE(production_day_hours, 8) AS day_hours,
+               COALESCE(production_value_target, 900) AS value_target
+        FROM estimate_baselines
+        WHERE job_id=? AND COALESCE(active,1)=1
+        ORDER BY locked_at DESC,id DESC LIMIT 1
+        """,
+        (int(job_id),),
+    )
+    if not baseline.empty:
+        return {
+            "day_hours": float(baseline.iloc[0]["day_hours"] or DEFAULT_DAY_HOURS),
+            "value_target": float(baseline.iloc[0]["value_target"] or DEFAULT_VALUE_TARGET),
+            "source": "Locked baseline",
+        }
+    current = safe_df_query(
+        """
+        SELECT COALESCE(production_day_hours, 8) AS day_hours,
+               COALESCE(production_value_target, 900) AS value_target
+        FROM estimate_working_sheets
+        WHERE job_id=? AND COALESCE(archived,0)=0
+        ORDER BY CASE LOWER(COALESCE(status,'')) WHEN 'approved' THEN 0 ELSE 1 END,id DESC
+        LIMIT 1
+        """,
+        (int(job_id),),
+    )
+    if not current.empty:
+        return {
+            "day_hours": float(current.iloc[0]["day_hours"] or DEFAULT_DAY_HOURS),
+            "value_target": float(current.iloc[0]["value_target"] or DEFAULT_VALUE_TARGET),
+            "source": "Latest estimate",
+        }
+    return {
+        "day_hours": DEFAULT_DAY_HOURS,
+        "value_target": DEFAULT_VALUE_TARGET,
+        "source": "JobHub default",
+    }
+
+
+def job_purchase_orders_dataframe(job_id):
+    return safe_df_query(
+        """
+        SELECT po.id,
+               po.po_number AS "PO Number",
+               COALESCE(po.description, '') AS "Description",
+               COALESCE(po.amount_ex_gst, 0) AS "Amount Ex GST",
+               COALESCE(po.status, 'Active') AS "Status",
+               COALESCE(po.received_date, '') AS "Received Date",
+               (SELECT COUNT(*) FROM job_stages js WHERE js.purchase_order_id = po.id) AS "Linked Stages",
+               (SELECT COUNT(*) FROM invoice_claim_items ci WHERE ci.purchase_order_id=po.id) AS "Linked Claims",
+               COALESCE(po.notes, '') AS "Notes"
+        FROM job_purchase_orders po
+        WHERE po.job_id = ?
+        ORDER BY po.po_number, po.id
+        """,
+        (int(job_id),),
+    )
+
+
+def job_purchase_order_options(job_id):
+    rows = job_purchase_orders_dataframe(job_id)
+    options = {"No PO allocated": None}
+    for _, row in rows.iterrows():
+        label = f"{row['PO Number']} — {row['Description']}".strip(" —")
+        options[label] = int(row["id"])
+    return options
+
+
+def job_stages_dataframe(job_id):
+    """Return ordered stage rows with their linked schedule and timesheet usage."""
+    stages = safe_df_query(
+        """
+        SELECT js.id,
+               js.sequence_order AS "Order",
+               js.stage_name AS "Stage Name",
+               COALESCE(js.job_percent, 0) AS "Job %",
+               COALESCE(po.po_number, '') AS "Purchase Order",
+               js.status AS "Status",
+               COALESCE(js.start_date, '') AS "Planned Start",
+               COALESCE(js.end_date, '') AS "Planned Finish",
+               COALESCE(js.budget_hours, 0) AS "Budget Hours Override",
+               (SELECT COUNT(*) FROM staff_schedule s WHERE s.job_stage_id = js.id) AS "Schedule Entries",
+               (SELECT COUNT(*) FROM timesheet_entries t
+                WHERE t.job_stage_id = js.id AND COALESCE(t.status, 'Submitted') <> 'Rejected') AS "Timesheets",
+               (SELECT COUNT(*) FROM stage_progress_updates u WHERE u.job_stage_id=js.id) AS "Progress Updates",
+               (SELECT COUNT(*) FROM estimate_baseline_lines bl WHERE bl.job_stage_id=js.id) AS "Baseline Lines",
+               (SELECT COUNT(*) FROM invoice_claim_items ci WHERE ci.job_stage_id=js.id) AS "Claim Lines",
+               COALESCE((SELECT SUM(t.total_hours) FROM timesheet_entries t
+                         WHERE t.job_stage_id = js.id
+                           AND COALESCE(t.status, 'Submitted') <> 'Rejected'), 0)
+                   AS "Actual Hours",
+               COALESCE(js.notes, '') AS "Notes"
+        FROM job_stages js
+        LEFT JOIN job_purchase_orders po ON po.id = js.purchase_order_id
+        WHERE js.job_id = ?
+        ORDER BY js.sequence_order, js.id
+        """,
+        (int(job_id),),
+    )
+    if stages.empty:
+        return stages
+    value_basis, _ = job_value_basis(job_id)
+    stages["Stage Value Ex GST"] = stages["Job %"].fillna(0).astype(float) * value_basis / 100.0
+    production = job_production_settings(job_id)
+    stages["Calculated Target Hours"] = (
+        stages["Stage Value Ex GST"]
+        / max(float(production["value_target"]), 0.01)
+        * float(production["day_hours"])
+    )
+    stages["Budget Hours"] = stages.apply(
+        lambda row: float(row["Budget Hours Override"] or 0)
+        if float(row["Budget Hours Override"] or 0) > 0
+        else float(row["Calculated Target Hours"] or 0),
+        axis=1,
+    )
+    stages["Expected Progress %"] = stages.apply(
+        lambda row: expected_progress(row["Actual Hours"], row["Budget Hours"])["expected_percent"],
+        axis=1,
+    )
+    return stages
+
+
+def _insert_and_get_id(cur, sql, params):
+    if USE_POSTGRES:
+        cur.execute(sql.rstrip().rstrip(";") + " RETURNING id", params)
+        return int(cur.fetchone()[0])
+    cur.execute(sql, params)
+    return int(cur.lastrowid)
+
+
+def estimate_baselines_dataframe(job_id):
+    return safe_df_query(
+        """
+        SELECT b.id,
+               b.baseline_name AS "Baseline",
+               COALESCE(b.estimate_no,'') AS "Estimate No",
+               COALESCE(b.revision,'') AS "Revision",
+               COALESCE(b.total_ex_gst,0) AS "Total Ex GST",
+               COALESCE(b.labour_hours,0) AS "Labour Hours",
+               COALESCE(b.production_value_target,900) AS "$ / Painter Day",
+               CASE WHEN COALESCE(b.active,1)=1 THEN 'Active' ELSE 'Superseded' END AS "Status",
+               b.locked_at AS "Locked At",
+               COALESCE(b.locked_by,'') AS "Locked By",
+               (SELECT COUNT(*) FROM estimate_baseline_lines l WHERE l.baseline_id=b.id) AS "Lines",
+               COALESCE(b.notes,'') AS "Notes"
+        FROM estimate_baselines b
+        WHERE b.job_id=?
+        ORDER BY b.locked_at DESC,b.id DESC
+        """,
+        (int(job_id),),
+    )
+
+
+def lock_estimate_baseline(estimate_id, baseline_name, notes=""):
+    """Atomically snapshot an estimate and make it the active job baseline."""
+    estimate_id = int(estimate_id)
+    conn = connect()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM estimate_working_sheets WHERE id=?", (estimate_id,))
+        row = cur.fetchone()
+        if not row:
+            raise ValueError("The estimate could not be found.")
+        columns = [description[0] for description in cur.description]
+        estimate = dict(zip(columns, row))
+        job_id = int(estimate["job_id"])
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        cur.execute("UPDATE estimate_baselines SET active=0 WHERE job_id=?", (job_id,))
+        baseline_id = _insert_and_get_id(
+            cur,
+            """
+            INSERT INTO estimate_baselines
+            (job_id,estimate_id,baseline_name,estimate_no,revision,total_ex_gst,total_inc_gst,
+             labour_hours,production_day_hours,production_value_target,active,locked_at,locked_by,notes)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                job_id,
+                estimate_id,
+                str(baseline_name or "Locked estimate").strip()[:160],
+                str(estimate.get("estimate_no") or ""),
+                str(estimate.get("revision") or ""),
+                float(estimate.get("total_ex_gst") or 0),
+                float(estimate.get("total_inc_gst") or 0),
+                float(estimate.get("labour_hours") or 0),
+                float(estimate.get("production_day_hours") or DEFAULT_DAY_HOURS),
+                float(estimate.get("production_value_target") or DEFAULT_VALUE_TARGET),
+                1,
+                now,
+                current_username(),
+                str(notes or "").strip(),
+            ),
+        )
+        cur.execute(
+            """
+            SELECT li.id,li.job_stage_id,COALESCE(js.stage_name,''),li.section,
+                   li.item_description,li.qty,li.unit,li.unit_rate,li.line_total,
+                   li.estimated_labour_hours,li.substrate,li.work_location,
+                   li.coating_system,li.colour_finish,li.source_pack,
+                   COALESCE(li.production_tracking_enabled,1),li.notes
+            FROM estimate_line_items li
+            LEFT JOIN job_stages js ON js.id=li.job_stage_id
+            WHERE li.estimate_id=?
+            ORDER BY li.id
+            """,
+            (estimate_id,),
+        )
+        line_rows = cur.fetchall()
+        if line_rows:
+            cur.executemany(
+                """
+                INSERT INTO estimate_baseline_lines
+                (baseline_id,source_line_id,job_stage_id,stage_name,section,item_description,
+                 qty,unit,unit_rate,line_total,estimated_labour_hours,substrate,work_location,
+                 coating_system,colour_finish,source_pack,production_tracking_enabled,notes)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                [(baseline_id, *line_row) for line_row in line_rows],
+            )
+        conn.commit()
+        record_audit_event(
+            "estimate_baseline_locked",
+            "estimate_baseline",
+            baseline_id,
+            {"job_id": job_id, "estimate_id": estimate_id, "line_count": len(line_rows)},
+        )
+        return baseline_id
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+
+
+def job_tracking_lines(job_id, job_stage_id=None):
+    """Return frozen tracked work lines, falling back to the current estimate."""
+    job_id = int(job_id)
+    stage_clause = "AND l.job_stage_id IS NULL" if job_stage_id is None else "AND l.job_stage_id=?"
+    stage_params = () if job_stage_id is None else (int(job_stage_id),)
+    baseline = safe_df_query(
+        """
+        SELECT id FROM estimate_baselines
+        WHERE job_id=? AND COALESCE(active,1)=1
+        ORDER BY locked_at DESC,id DESC LIMIT 1
+        """,
+        (job_id,),
+    )
+    if not baseline.empty:
+        return safe_df_query(
+            f"""
+            SELECT l.source_line_id AS estimate_line_item_id,l.job_stage_id,
+                   COALESCE(l.stage_name,'Whole Job') AS stage_name,
+                   COALESCE(l.section,'') AS section,
+                   COALESCE(l.item_description,'') AS item_description,
+                   COALESCE(l.qty,0) AS qty,COALESCE(l.unit,'item') AS unit,
+                   COALESCE(l.unit_rate,0) AS unit_rate,COALESCE(l.line_total,0) AS line_total,
+                   COALESCE(l.substrate,'') AS substrate,
+                   COALESCE(l.work_location,'') AS work_location,
+                   COALESCE(l.coating_system,'') AS coating_system,
+                   'Locked baseline' AS source
+            FROM estimate_baseline_lines l
+            WHERE l.baseline_id=? AND COALESCE(l.production_tracking_enabled,1)=1
+              {stage_clause}
+            ORDER BY l.id
+            """,
+            (int(baseline.iloc[0]["id"]), *stage_params),
+        )
+    estimate = safe_df_query(
+        """
+        SELECT id FROM estimate_working_sheets
+        WHERE job_id=? AND COALESCE(archived,0)=0
+        ORDER BY CASE LOWER(COALESCE(status,'')) WHEN 'approved' THEN 0 ELSE 1 END,id DESC
+        LIMIT 1
+        """,
+        (job_id,),
+    )
+    if estimate.empty:
+        return pd.DataFrame()
+    stage_clause = "AND li.job_stage_id IS NULL" if job_stage_id is None else "AND li.job_stage_id=?"
+    return safe_df_query(
+        f"""
+        SELECT li.id AS estimate_line_item_id,li.job_stage_id,
+               COALESCE(js.stage_name,'Whole Job') AS stage_name,
+               COALESCE(li.section,'') AS section,
+               COALESCE(li.item_description,'') AS item_description,
+               COALESCE(li.qty,0) AS qty,COALESCE(li.unit,'item') AS unit,
+               COALESCE(li.unit_rate,0) AS unit_rate,COALESCE(li.line_total,0) AS line_total,
+               COALESCE(li.substrate,'') AS substrate,
+               COALESCE(li.work_location,'') AS work_location,
+               COALESCE(li.coating_system,'') AS coating_system,
+               'Current estimate (not locked)' AS source
+        FROM estimate_line_items li
+        LEFT JOIN job_stages js ON js.id=li.job_stage_id
+        WHERE li.estimate_id=? AND COALESCE(li.production_tracking_enabled,1)=1
+          {stage_clause}
+        ORDER BY li.id
+        """,
+        (int(estimate.iloc[0]["id"]), *stage_params),
+    )
+
+
+def stage_actual_progress(job_id, job_stage_id):
+    """Calculate earned physical progress from measured quantities or manual fallback."""
+    job_id = int(job_id)
+    stage_id = int(job_stage_id) if job_stage_id else None
+    lines = job_tracking_lines(job_id, stage_id)
+    stage_filter = "job_stage_id IS NULL" if stage_id is None else "job_stage_id=?"
+    params = (job_id,) if stage_id is None else (job_id, stage_id)
+    updates = safe_df_query(
+        f"""
+        SELECT estimate_line_item_id,COALESCE(completed_quantity,0) AS completed_quantity,
+               manual_progress_percent,update_date,id
+        FROM stage_progress_updates
+        WHERE job_id=? AND {stage_filter}
+        ORDER BY update_date,id
+        """,
+        params,
+    )
+    measured_updates = updates[
+        updates["estimate_line_item_id"].notna()
+        & (updates["completed_quantity"].fillna(0).astype(float) > 0)
+    ] if not updates.empty else pd.DataFrame()
+    if not lines.empty and not measured_updates.empty:
+        completed_by_line = (
+            measured_updates.groupby("estimate_line_item_id")["completed_quantity"].sum().to_dict()
+        )
+        target_value = 0.0
+        earned_value = 0.0
+        for _, line in lines.iterrows():
+            line_id = line.get("estimate_line_item_id")
+            qty = max(0.0, float(line.get("qty") or 0))
+            rate = max(0.0, float(line.get("unit_rate") or 0))
+            value = max(0.0, float(line.get("line_total") or 0)) or qty * rate
+            if value <= 0:
+                continue
+            completed = float(completed_by_line.get(line_id, 0) or 0)
+            line_percent = min(1.0, completed / qty) if qty > 0 else 0.0
+            target_value += value
+            earned_value += value * line_percent
+        if target_value > 0:
+            return {
+                "actual_percent": min(100.0, earned_value / target_value * 100.0),
+                "source": "Measured take-off quantities",
+                "earned_value": earned_value,
+                "target_value": target_value,
+            }
+    if not updates.empty:
+        manual = updates[updates["manual_progress_percent"].notna()]
+        if not manual.empty:
+            percent = float(manual.iloc[-1]["manual_progress_percent"] or 0)
+            return {
+                "actual_percent": min(100.0, max(0.0, percent)),
+                "source": "Manual stage update",
+                "earned_value": 0.0,
+                "target_value": 0.0,
+            }
+    return {"actual_percent": 0.0, "source": "No progress update", "earned_value": 0.0, "target_value": 0.0}
+
+
+def stage_progress_summary_dataframe(job_id):
+    stages = job_stages_dataframe(job_id)
+    if stages.empty:
+        return stages
+    claim_rows = safe_df_query(
+        """
+        SELECT i.job_stage_id,COALESCE(SUM(i.amount_ex_gst),0) AS claimed
+        FROM invoice_claim_items i
+        JOIN invoice_claims c ON c.id=i.invoice_claim_id
+        WHERE c.job_id=? AND LOWER(COALESCE(c.status,'')) NOT IN ('void','cancelled')
+        GROUP BY i.job_stage_id
+        """,
+        (int(job_id),),
+    )
+    claimed_map = {
+        int(row["job_stage_id"]): float(row["claimed"] or 0)
+        for _, row in claim_rows.iterrows()
+        if not pd.isna(row["job_stage_id"])
+    }
+    rows = []
+    for _, stage in stages.iterrows():
+        stage_id = int(stage["id"])
+        physical = stage_actual_progress(job_id, stage_id)
+        expected = float(stage["Expected Progress %"] or 0)
+        variance = production_variance(physical["actual_percent"], expected)
+        stage_value = float(stage["Stage Value Ex GST"] or 0)
+        claimed = claimed_map.get(stage_id, 0.0)
+        claim = claimable_value(stage_value, physical["actual_percent"], claimed)
+        rows.append({
+            "id": stage_id,
+            "Stage": str(stage["Stage Name"] or ""),
+            "Status": str(stage["Status"] or ""),
+            "Job %": float(stage["Job %"] or 0),
+            "PO": str(stage["Purchase Order"] or ""),
+            "Budget Hours": float(stage["Budget Hours"] or 0),
+            "Actual Hours": float(stage["Actual Hours"] or 0),
+            "Should Be Complete %": expected,
+            "Actual Physical %": physical["actual_percent"],
+            "Variance Points": variance["variance_points"],
+            "Performance": variance["status"],
+            "Progress Source": physical["source"],
+            "Stage Value Ex GST": stage_value,
+            "Previously Claimed": claimed,
+            "Claimable Now": claim["claimable_value"],
+            "Planned Start": stage["Planned Start"],
+            "Planned Finish": stage["Planned Finish"],
+        })
+    return pd.DataFrame(rows)
+
+
+def get_job_stage_options(job_options):
+    """Build selectable job/stage labels while keeping jobs without stages valid."""
+    choices = {}
+    for job_label, job_id in job_options.items():
+        choices[f"{job_label} — Whole Job"] = {
+            "job_id": int(job_id),
+            "job_stage_id": None,
+            "stage_name": "Whole Job",
+        }
+        stages = safe_df_query(
+            """
+            SELECT id, stage_name
+            FROM job_stages
+            WHERE job_id = ?
+            ORDER BY sequence_order, id
+            """,
+            (int(job_id),),
+        )
+        for _, stage in stages.iterrows():
+            stage_name = str(stage["stage_name"] or "").strip()
+            choices[f"{job_label} — {stage_name}"] = {
+                "job_id": int(job_id),
+                "job_stage_id": int(stage["id"]),
+                "stage_name": stage_name,
+            }
+    return choices
+
+
+def render_job_purchase_orders_panel(job_id):
+    """Manage one or more POs while allowing several stages to share a PO."""
+    job_id = int(job_id)
+    purchase_orders = job_purchase_orders_dataframe(job_id)
+    with st.expander("Purchase orders for this job", expanded=purchase_orders.empty):
+        st.caption(
+            "Add each builder/client PO once. Multiple stages can select the same PO, "
+            "or a stage can use its own PO."
+        )
+        with st.form(f"add_job_po_{job_id}"):
+            p1, p2, p3 = st.columns(3)
+            po_number = p1.text_input("PO Number")
+            po_description = p2.text_input("Description", placeholder="Shared external PO")
+            po_amount = p3.number_input(
+                "PO Amount Ex GST",
+                min_value=0.0,
+                step=100.0,
+                value=0.0,
+            )
+            p4, p5 = st.columns(2)
+            po_status = p4.selectbox("PO Status", JOB_PO_STATUS_OPTIONS, index=1)
+            po_received = p5.date_input("Received Date", value=None, format="DD/MM/YYYY")
+            po_notes = st.text_area("PO Notes")
+            add_po = st.form_submit_button("Add purchase order", use_container_width=True)
+        if add_po:
+            clean_number = po_number.strip()
+            if not clean_number:
+                pb_error("PO Number is required.")
+            elif not safe_df_query(
+                "SELECT id FROM job_purchase_orders WHERE job_id = ? AND LOWER(po_number) = LOWER(?)",
+                (job_id, clean_number),
+            ).empty:
+                pb_error("This job already has that PO Number.")
+            else:
+                now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                execute(
+                    """
+                    INSERT INTO job_purchase_orders
+                    (job_id, po_number, description, amount_ex_gst, status, received_date,
+                     notes, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        job_id,
+                        clean_number,
+                        po_description.strip(),
+                        float(po_amount),
+                        po_status,
+                        po_received.isoformat() if po_received else "",
+                        po_notes.strip(),
+                        now,
+                        now,
+                    ),
+                )
+                pb_success(f"Added purchase order {clean_number}.")
+                pb_rerun()
+
+        purchase_orders = job_purchase_orders_dataframe(job_id)
+        if purchase_orders.empty:
+            st.info("No purchase orders have been added for this job.")
+            return
+
+        po_event = st.dataframe(
+            purchase_orders,
+            width="stretch",
+            hide_index=True,
+            key=f"selectable_job_purchase_orders_{job_id}",
+            on_select="rerun",
+            selection_mode="single-row",
+            column_config={"id": None},
+        )
+        selected_rows = list(
+            getattr(getattr(po_event, "selection", None), "rows", []) or []
+        )
+        if not selected_rows:
+            st.caption("Select a PO row to edit or delete it.")
+            return
+
+        selected = purchase_orders.iloc[selected_rows[0]]
+        po_id = int(selected["id"])
+        current_status = str(selected["Status"] or "Active")
+        status_options = list(JOB_PO_STATUS_OPTIONS)
+        if current_status not in status_options:
+            status_options.append(current_status)
+        with st.form(f"edit_job_po_{po_id}"):
+            ep1, ep2, ep3 = st.columns(3)
+            edit_number = ep1.text_input("PO Number", value=str(selected["PO Number"] or ""))
+            edit_description = ep2.text_input(
+                "Description",
+                value=str(selected["Description"] or ""),
+            )
+            edit_amount = ep3.number_input(
+                "PO Amount Ex GST",
+                min_value=0.0,
+                step=100.0,
+                value=float(selected["Amount Ex GST"] or 0),
+            )
+            ep4, ep5 = st.columns(2)
+            edit_po_status = ep4.selectbox(
+                "PO Status",
+                status_options,
+                index=status_options.index(current_status),
+            )
+            edit_received = ep5.date_input(
+                "Received Date",
+                value=pb_date(selected["Received Date"]),
+                format="DD/MM/YYYY",
+            )
+            edit_po_notes = st.text_area("PO Notes", value=str(selected["Notes"] or ""))
+            save_po = st.form_submit_button(
+                "Save purchase order",
+                type="primary",
+                use_container_width=True,
+            )
+        if save_po:
+            clean_number = edit_number.strip()
+            duplicate = safe_df_query(
+                """
+                SELECT id FROM job_purchase_orders
+                WHERE job_id = ? AND LOWER(po_number) = LOWER(?) AND id <> ?
+                """,
+                (job_id, clean_number, po_id),
+            )
+            if not clean_number:
+                pb_error("PO Number is required.")
+            elif not duplicate.empty:
+                pb_error("This job already has that PO Number.")
+            else:
+                execute(
+                    """
+                    UPDATE job_purchase_orders
+                    SET po_number = ?, description = ?, amount_ex_gst = ?, status = ?,
+                        received_date = ?, notes = ?, updated_at = ?
+                    WHERE id = ? AND job_id = ?
+                    """,
+                    (
+                        clean_number,
+                        edit_description.strip(),
+                        float(edit_amount),
+                        edit_po_status,
+                        edit_received.isoformat() if edit_received else "",
+                        edit_po_notes.strip(),
+                        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        po_id,
+                        job_id,
+                    ),
+                )
+                pb_success(f"Updated purchase order {clean_number}.")
+                pb_rerun()
+
+        linked_stages = int(selected["Linked Stages"] or 0)
+        linked_claims = int(selected["Linked Claims"] or 0)
+        po_in_use = linked_stages + linked_claims
+        delete_po_confirmed = st.checkbox(
+            f"I understand this will permanently delete PO {selected['PO Number']}.",
+            key=f"confirm_delete_job_po_{po_id}",
+            disabled=po_in_use > 0,
+        )
+        if po_in_use > 0:
+            st.info("This PO cannot be deleted while a stage or progress claim uses it.")
+        if st.button(
+            "Delete selected purchase order",
+            key=f"delete_job_po_{po_id}",
+            disabled=po_in_use > 0 or not delete_po_confirmed,
+            use_container_width=True,
+        ):
+            execute(
+                "DELETE FROM job_purchase_orders WHERE id = ? AND job_id = ?",
+                (po_id, job_id),
+            )
+            pb_success(f"Deleted purchase order {selected['PO Number']}.")
+            pb_rerun()
+
+
+def render_estimate_baseline_panel(estimate_id, job_id, current):
+    baselines = estimate_baselines_dataframe(job_id)
+    with st.expander("Locked estimate baseline and revision history", expanded=baselines.empty):
+        st.caption(
+            "Lock the accepted take-off before work starts. Later estimate edits create a new "
+            "baseline while the original quantities, rates and labour target remain in history."
+        )
+        default_name = " — ".join(filter(None, [
+            str(current.get("estimate_no") or "Estimate"),
+            str(current.get("revision") or "Current revision"),
+        ]))
+        with st.form(f"lock_estimate_baseline_{estimate_id}"):
+            baseline_name = st.text_input("Baseline Name", value=default_name)
+            baseline_notes = st.text_area(
+                "Baseline Notes",
+                placeholder="Accepted quote, builder revision, exclusions or approval reference",
+            )
+            lock_baseline = st.form_submit_button(
+                "Lock current estimate as active baseline",
+                type="primary",
+                use_container_width=True,
+            )
+        if lock_baseline:
+            if not baseline_name.strip():
+                pb_error("Baseline Name is required.")
+            else:
+                try:
+                    lock_estimate_baseline(estimate_id, baseline_name, baseline_notes)
+                    pb_success("Estimate baseline locked. Future edits will not rewrite this snapshot.")
+                    pb_rerun()
+                except Exception as exc:
+                    pb_error(f"The baseline could not be locked: {exc}")
+
+        baselines = estimate_baselines_dataframe(job_id)
+        if baselines.empty:
+            st.info("No baseline is locked yet. Progress currently follows the latest estimate.")
+        else:
+            st.dataframe(
+                baselines,
+                width="stretch",
+                hide_index=True,
+                column_config={"id": None},
+                key=f"estimate_baseline_history_{job_id}",
+            )
+
+
+def render_job_stage_templates_panel(job_id, stages):
+    templates = safe_df_query(
+        """
+        SELECT t.id,t.template_name AS "Template",COALESCE(t.notes,'') AS "Notes",
+               COUNT(i.id) AS "Stages",COALESCE(SUM(i.job_percent),0) AS "Total %",
+               COALESCE(t.created_by,'') AS "Created By"
+        FROM job_stage_templates t
+        LEFT JOIN job_stage_template_items i ON i.template_id=t.id
+        WHERE COALESCE(t.active,1)=1
+        GROUP BY t.id,t.template_name,t.notes,t.created_by
+        ORDER BY t.template_name
+        """
+    )
+    with st.expander("Reusable stage templates", expanded=False):
+        st.caption(
+            "Save the current stages once, then apply that setup to future jobs. "
+            "Purchase orders are deliberately not copied between jobs."
+        )
+        if not stages.empty:
+            with st.form(f"save_stage_template_{job_id}"):
+                template_name = st.text_input(
+                    "New Template Name",
+                    placeholder="Standard staged painting — 2 internal stages",
+                )
+                template_notes = st.text_area("Template Notes")
+                save_template = st.form_submit_button(
+                    "Save current stages as template",
+                    use_container_width=True,
+                )
+            if save_template:
+                clean_name = template_name.strip()
+                duplicate = safe_df_query(
+                    "SELECT id FROM job_stage_templates WHERE LOWER(template_name)=LOWER(?)",
+                    (clean_name,),
+                )
+                if not clean_name:
+                    pb_error("Template Name is required.")
+                elif not duplicate.empty:
+                    pb_error("A stage template already uses that name.")
+                else:
+                    conn = connect()
+                    try:
+                        cur = conn.cursor()
+                        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        template_id = _insert_and_get_id(
+                            cur,
+                            """
+                            INSERT INTO job_stage_templates
+                            (template_name,notes,active,created_by,created_at,updated_at)
+                            VALUES (?,?,?,?,?,?)
+                            """,
+                            (clean_name, template_notes.strip(), 1, current_username(), now, now),
+                        )
+                        rows = [
+                            (
+                                template_id,
+                                str(row["Stage Name"] or ""),
+                                int(row["Order"] or 1),
+                                float(row["Job %"] or 0),
+                                str(row["Status"] or "Planned"),
+                                float(row["Budget Hours Override"] or 0),
+                                "Unallocated",
+                                str(row["Notes"] or ""),
+                            )
+                            for _, row in stages.iterrows()
+                        ]
+                        cur.executemany(
+                            """
+                            INSERT INTO job_stage_template_items
+                            (template_id,stage_name,sequence_order,job_percent,default_status,
+                             budget_hours,po_mode,notes)
+                            VALUES (?,?,?,?,?,?,?,?)
+                            """,
+                            rows,
+                        )
+                        conn.commit()
+                        pb_success(f"Saved template: {clean_name}.")
+                        pb_rerun()
+                    except Exception as exc:
+                        try:
+                            conn.rollback()
+                        except Exception:
+                            pass
+                        pb_error(f"The template could not be saved: {exc}")
+                    finally:
+                        conn.close()
+
+        templates = safe_df_query(
+            """
+            SELECT t.id,t.template_name AS "Template",COALESCE(t.notes,'') AS "Notes",
+                   COUNT(i.id) AS "Stages",COALESCE(SUM(i.job_percent),0) AS "Total %",
+                   COALESCE(t.created_by,'') AS "Created By"
+            FROM job_stage_templates t
+            LEFT JOIN job_stage_template_items i ON i.template_id=t.id
+            WHERE COALESCE(t.active,1)=1
+            GROUP BY t.id,t.template_name,t.notes,t.created_by
+            ORDER BY t.template_name
+            """
+        )
+        if templates.empty:
+            st.info("No reusable templates have been saved yet.")
+            return
+        template_event = st.dataframe(
+            templates,
+            width="stretch",
+            hide_index=True,
+            key=f"selectable_stage_templates_{job_id}",
+            on_select="rerun",
+            selection_mode="single-row",
+            column_config={"id": None},
+        )
+        selected_rows = list(getattr(getattr(template_event, "selection", None), "rows", []) or [])
+        if not selected_rows:
+            st.caption("Select a template to preview, apply or remove it.")
+            return
+        selected = templates.iloc[selected_rows[0]]
+        template_id = int(selected["id"])
+        items = safe_df_query(
+            """
+            SELECT stage_name AS "Stage",sequence_order AS "Order",job_percent AS "Job %",
+                   default_status AS "Status",budget_hours AS "Budget Hours",
+                   COALESCE(notes,'') AS "Notes"
+            FROM job_stage_template_items WHERE template_id=? ORDER BY sequence_order,id
+            """,
+            (template_id,),
+        )
+        st.dataframe(items, width="stretch", hide_index=True)
+        a1, a2 = st.columns(2)
+        if a1.button(
+            "Apply selected template to this job",
+            type="primary",
+            use_container_width=True,
+            key=f"apply_stage_template_{job_id}_{template_id}",
+        ):
+            existing_names = {
+                str(value or "").strip().casefold()
+                for value in stages.get("Stage Name", pd.Series(dtype=str)).tolist()
+            }
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            added = 0
+            for _, item in items.iterrows():
+                name = str(item["Stage"] or "").strip()
+                if not name or name.casefold() in existing_names:
+                    continue
+                execute(
+                    """
+                    INSERT INTO job_stages
+                    (job_id,purchase_order_id,stage_name,sequence_order,job_percent,status,
+                     start_date,end_date,budget_hours,notes,created_at,updated_at)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        int(job_id), None, name, int(item["Order"] or 1),
+                        float(item["Job %"] or 0), str(item["Status"] or "Planned"),
+                        "", "", float(item["Budget Hours"] or 0),
+                        str(item["Notes"] or ""), now, now,
+                    ),
+                )
+                existing_names.add(name.casefold())
+                added += 1
+            if added:
+                pb_success(f"Added {added} stage(s) from {selected['Template']}.")
+                pb_rerun()
+            else:
+                pb_error("Every stage in this template already exists on the job.")
+        confirm_delete_template = a2.checkbox(
+            "Confirm template removal",
+            key=f"confirm_delete_stage_template_{template_id}",
+        )
+        if a2.button(
+            "Remove selected template",
+            disabled=not confirm_delete_template,
+            use_container_width=True,
+            key=f"delete_stage_template_{template_id}",
+        ):
+            execute("DELETE FROM job_stage_template_items WHERE template_id=?", (template_id,))
+            execute("DELETE FROM job_stage_templates WHERE id=?", (template_id,))
+            pb_success(f"Removed template: {selected['Template']}.")
+            pb_rerun()
+
+
+def render_stage_updates_panel(job_id, employee_mode=False, key_prefix="stage_updates"):
+    """Mobile-friendly daily measured progress, blocker and inspection updates."""
+    job_id = int(job_id)
+    stages = safe_df_query(
+        """
+        SELECT id,stage_name,status FROM job_stages
+        WHERE job_id=? ORDER BY sequence_order,id
+        """,
+        (job_id,),
+    )
+    if stages.empty:
+        st.info("Add at least one job stage before recording stage updates.")
+        return
+
+    stage_options = {
+        f"{row['stage_name']} — {row['status']}": int(row["id"])
+        for _, row in stages.iterrows()
+    }
+    selected_stage_label = st.selectbox(
+        "Job Stage",
+        list(stage_options.keys()),
+        key=f"{key_prefix}_stage_{job_id}",
+    )
+    stage_id = stage_options[selected_stage_label]
+    stage_name = selected_stage_label.rsplit(" — ", 1)[0]
+    lines = job_tracking_lines(job_id, stage_id)
+    manual_label = "Manual stage percentage (when no measured take-off line applies)"
+    line_options = {manual_label: None}
+    for _, line in lines.iterrows():
+        line_id = line.get("estimate_line_item_id")
+        if pd.isna(line_id):
+            continue
+        description = str(line.get("item_description") or "Take-off line")
+        location = str(line.get("work_location") or "").strip()
+        quantity = float(line.get("qty") or 0)
+        unit = str(line.get("unit") or "item")
+        label = f"{description} — {quantity:g} {unit}"
+        if location:
+            label += f" — {location}"
+        label += f" [#{int(line_id)}]"
+        line_options[label] = int(line_id)
+
+    with st.form(f"{key_prefix}_form_{job_id}_{stage_id}"):
+        u1, u2 = st.columns(2)
+        update_date = u1.date_input("Update Date", value=date.today(), format="DD/MM/YYYY")
+        selected_line_label = u2.selectbox("Work Item", list(line_options.keys()))
+        selected_line_id = line_options[selected_line_label]
+        selected_line = None
+        if selected_line_id is not None and not lines.empty:
+            matches = lines[lines["estimate_line_item_id"].fillna(-1).astype(int) == int(selected_line_id)]
+            if not matches.empty:
+                selected_line = matches.iloc[0]
+
+        q1, q2, q3 = st.columns(3)
+        if selected_line is not None:
+            completed_quantity = q1.number_input(
+                f"Completed Today ({selected_line.get('unit') or 'item'})",
+                min_value=0.0,
+                step=1.0,
+                value=0.0,
+                help="Enter only the quantity completed in this update. JobHub totals all updates.",
+            )
+            manual_percent = None
+            q2.metric("Take-off Target", f"{float(selected_line.get('qty') or 0):g} {selected_line.get('unit') or 'item'}")
+            q3.metric("Sell Rate", f"${float(selected_line.get('unit_rate') or 0):,.2f} / {selected_line.get('unit') or 'item'}")
+        else:
+            completed_quantity = 0.0
+            manual_percent = q1.number_input(
+                "Overall Stage Complete %",
+                min_value=0.0,
+                max_value=100.0,
+                step=5.0,
+                value=0.0,
+            )
+            q2.caption("Use measured m², lineal metres or items whenever a take-off line is available.")
+
+        active_employees = safe_df_query(
+            """
+            SELECT name FROM employees
+            WHERE LOWER(COALESCE(status,'active')) NOT IN ('inactive','terminated')
+            ORDER BY name
+            """
+        )
+        employee_names = [str(value) for value in active_employees.get("name", pd.Series(dtype=str)).tolist()]
+        user = get_current_user() or {}
+        default_crew = []
+        signed_in_name = str(user.get("employee_name") or "")
+        if signed_in_name in employee_names:
+            default_crew = [signed_in_name]
+        c1, c2 = st.columns(2)
+        crew_names = c1.multiselect("Crew on this work", employee_names, default=default_crew)
+        crew_hours = c2.number_input(
+            "Total Crew Hours for This Update",
+            min_value=0.0,
+            step=0.5,
+            value=0.0,
+            help="Example: three painters for eight hours = 24 crew hours.",
+        )
+
+        b1, b2 = st.columns(2)
+        blocker_type = b1.selectbox(
+            "Delay / Blocker",
+            ["None", "Weather", "Scaffold / Access", "Materials", "Colour Approval", "Builder / Other Trade", "Safety", "Other"],
+        )
+        blocker_status = b2.selectbox(
+            "Blocker Status",
+            ["None", "Active", "Cleared"],
+            index=1,
+            help="New blockers default to Active. Choose Cleared when recording that the issue is resolved.",
+        )
+        blocker_notes = st.text_area(
+            "Blocker Details",
+            placeholder="What is stopping the work and what is needed to clear it?",
+        )
+        ready_for_inspection = st.checkbox("This stage/work is ready for inspection")
+        update_notes = st.text_area(
+            "Progress Notes",
+            placeholder="Areas completed, quality checks, access or next steps",
+        )
+        update_photos = st.file_uploader(
+            "Progress Photos",
+            type=["jpg", "jpeg", "png", "webp"],
+            accept_multiple_files=True,
+            key=f"{key_prefix}_photos_{job_id}_{stage_id}",
+        )
+        submit_update = st.form_submit_button(
+            "Save stage update",
+            type="primary",
+            use_container_width=True,
+        )
+
+    if submit_update:
+        work_recorded = (
+            (selected_line is not None and float(completed_quantity or 0) > 0)
+            or (manual_percent is not None and float(manual_percent or 0) > 0)
+        )
+        if not work_recorded and not update_notes.strip() and blocker_type == "None" and not ready_for_inspection:
+            pb_error("Enter completed work, a progress note, a blocker or inspection status.")
+        elif blocker_type != "None" and blocker_status == "Active" and not blocker_notes.strip():
+            pb_error("Add details explaining the active blocker.")
+        else:
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            conn = connect()
+            try:
+                cur = conn.cursor()
+                update_id = _insert_and_get_id(
+                    cur,
+                    """
+                    INSERT INTO stage_progress_updates
+                    (job_id,job_stage_id,estimate_line_item_id,update_date,reported_by,
+                     completed_quantity,unit,unit_rate_snapshot,manual_progress_percent,
+                     crew_hours,crew_names,work_type,substrate,coating_system,blocker_type,
+                     blocker_status,blocker_notes,ready_for_inspection,notes,created_at,updated_at)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        job_id,
+                        stage_id,
+                        int(selected_line_id) if selected_line_id is not None else None,
+                        update_date.isoformat(),
+                        current_username(),
+                        float(completed_quantity or 0),
+                        str(selected_line.get("unit") or "") if selected_line is not None else "",
+                        float(selected_line.get("unit_rate") or 0) if selected_line is not None else 0.0,
+                        float(manual_percent) if manual_percent is not None else None,
+                        float(crew_hours or 0),
+                        ", ".join(crew_names),
+                        str(selected_line.get("section") or "") if selected_line is not None else stage_name,
+                        str(selected_line.get("substrate") or "") if selected_line is not None else "",
+                        str(selected_line.get("coating_system") or "") if selected_line is not None else "",
+                        "" if blocker_type == "None" else blocker_type,
+                        "None" if blocker_type == "None" else blocker_status,
+                        blocker_notes.strip(),
+                        1 if ready_for_inspection else 0,
+                        update_notes.strip(),
+                        now,
+                        now,
+                    ),
+                )
+                conn.commit()
+            except Exception as exc:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                pb_error(f"The stage update could not be saved: {exc}")
+                update_id = None
+            finally:
+                conn.close()
+            if update_id:
+                photo_failures = []
+                for uploaded in update_photos or []:
+                    try:
+                        save_job_photo(
+                            job_id,
+                            uploaded,
+                            "Stage Progress",
+                            f"{stage_name} — {update_date.isoformat()}",
+                            update_notes.strip() or blocker_notes.strip(),
+                            job_stage_id=stage_id,
+                            stage_progress_update_id=update_id,
+                        )
+                    except Exception as exc:
+                        photo_failures.append(f"{uploaded.name}: {exc}")
+                record_audit_event(
+                    "stage_progress_updated",
+                    "stage_progress_update",
+                    update_id,
+                    {"job_id": job_id, "job_stage_id": stage_id},
+                )
+                if blocker_type != "None" and blocker_status == "Active":
+                    create_management_notifications(
+                        "stage_blocker",
+                        f"Stage blocked: {stage_name}",
+                        blocker_notes.strip(),
+                        job_id=job_id,
+                        entity_type="stage_progress_update",
+                        entity_id=update_id,
+                    )
+                elif ready_for_inspection:
+                    create_management_notifications(
+                        "stage_ready_for_inspection",
+                        f"Ready for inspection: {stage_name}",
+                        update_notes.strip() or "A site update marked this stage ready for inspection.",
+                        job_id=job_id,
+                        entity_type="stage_progress_update",
+                        entity_id=update_id,
+                    )
+                if photo_failures:
+                    pb_error("The update was saved, but some photos failed: " + "; ".join(photo_failures))
+                else:
+                    pb_success(f"Saved progress update for {stage_name}.")
+                pb_rerun()
+
+    history = safe_df_query(
+        """
+        SELECT u.id,u.update_date AS "Date",js.stage_name AS "Stage",
+               COALESCE(li.item_description,u.work_type,'Manual progress') AS "Work Item",
+               COALESCE(u.completed_quantity,0) AS "Completed Qty",COALESCE(u.unit,'') AS "Unit",
+               u.manual_progress_percent AS "Manual Progress %",COALESCE(u.crew_hours,0) AS "Crew Hours",
+               COALESCE(u.crew_names,'') AS "Crew",COALESCE(u.blocker_type,'') AS "Blocker",
+               COALESCE(u.blocker_status,'None') AS "Blocker Status",
+               CASE WHEN COALESCE(u.ready_for_inspection,0)=1 THEN 'Yes' ELSE 'No' END AS "Inspection Ready",
+               COALESCE((SELECT COUNT(*) FROM job_photos p WHERE p.stage_progress_update_id=u.id),0) AS "Photos",
+               COALESCE(u.reported_by,'') AS "Reported By",COALESCE(u.notes,'') AS "Notes"
+        FROM stage_progress_updates u
+        JOIN job_stages js ON js.id=u.job_stage_id
+        LEFT JOIN estimate_line_items li ON li.id=u.estimate_line_item_id
+        WHERE u.job_id=?
+        ORDER BY u.update_date DESC,u.id DESC
+        LIMIT 250
+        """,
+        (job_id,),
+    )
+    if history.empty:
+        st.info("No stage updates have been recorded for this job yet.")
+        return
+    st.markdown("#### Stage update history")
+    if employee_mode:
+        st.dataframe(
+            history,
+            width="stretch",
+            hide_index=True,
+            key=f"{key_prefix}_history_{job_id}",
+            column_config={"id": None},
+        )
+        return
+    history_event = st.dataframe(
+        history,
+        width="stretch",
+        hide_index=True,
+        key=f"{key_prefix}_history_{job_id}",
+        on_select="rerun",
+        selection_mode="single-row",
+        column_config={"id": None},
+    )
+    selected_history = list(getattr(getattr(history_event, "selection", None), "rows", []) or [])
+    if selected_history:
+        update_row = history.iloc[selected_history[0]]
+        update_id = int(update_row["id"])
+        confirm_delete = st.checkbox(
+            f"Confirm removal of the selected {update_row['Stage']} update",
+            key=f"confirm_delete_stage_update_{update_id}",
+        )
+        if st.button(
+            "Delete selected stage update",
+            disabled=not confirm_delete,
+            key=f"delete_stage_update_{update_id}",
+            use_container_width=True,
+        ):
+            execute(
+                "UPDATE job_photos SET stage_progress_update_id=NULL WHERE stage_progress_update_id=?",
+                (update_id,),
+            )
+            execute("DELETE FROM stage_progress_updates WHERE id=? AND job_id=?", (update_id, job_id))
+            record_audit_event("stage_progress_deleted", "stage_progress_update", update_id, {"job_id": job_id})
+            pb_success("Stage update removed. Its job photos were retained.")
+            pb_rerun()
+
+
+def operational_alerts_dataframe(job_id):
+    summary = stage_progress_summary_dataframe(job_id)
+    if summary.empty:
+        return pd.DataFrame()
+    alerts = []
+    today = date.today()
+    for _, row in summary.iterrows():
+        stage_id = int(row["id"])
+        stage = str(row["Stage"] or "")
+        actual = float(row["Actual Physical %"] or 0)
+        expected = float(row["Should Be Complete %"] or 0)
+        variance = float(row["Variance Points"] or 0)
+        performance = str(row["Performance"] or "")
+        if performance in {"Behind", "Critical"}:
+            severity = "Critical" if performance == "Critical" else "Warning"
+            alerts.append({
+                "alert_key": f"progress:{stage_id}:{round(expected)}:{round(actual)}",
+                "job_stage_id": stage_id,
+                "Severity": severity,
+                "Stage": stage,
+                "Alert": "Physical progress behind labour use",
+                "Details": f"Should be {expected:.1f}% complete, but measured progress is {actual:.1f}% ({variance:.1f} points).",
+            })
+        budget = float(row["Budget Hours"] or 0)
+        used = float(row["Actual Hours"] or 0)
+        if budget > 0 and used / budget >= 0.80 and actual < 75:
+            alerts.append({
+                "alert_key": f"hours80:{stage_id}:{round(used)}:{round(actual)}",
+                "job_stage_id": stage_id,
+                "Severity": "Critical" if used >= budget else "Warning",
+                "Stage": stage,
+                "Alert": "Labour allowance nearly used",
+                "Details": f"{used:.1f} of {budget:.1f} hours used while physical progress is {actual:.1f}%.",
+            })
+        finish = pb_date(row["Planned Finish"])
+        if finish and finish < today and str(row["Status"] or "").casefold() != "completed":
+            alerts.append({
+                "alert_key": f"overdue:{stage_id}:{finish.isoformat()}",
+                "job_stage_id": stage_id,
+                "Severity": "Warning",
+                "Stage": stage,
+                "Alert": "Stage overdue",
+                "Details": f"Planned finish was {finish.strftime('%d/%m/%Y')} and the stage is not complete.",
+            })
+        if float(row["Claimable Now"] or 0) >= 100:
+            alerts.append({
+                "alert_key": f"claimable:{stage_id}:{int(float(row['Claimable Now']) // 100)}",
+                "job_stage_id": stage_id,
+                "Severity": "Info",
+                "Stage": stage,
+                "Alert": "Progress available to claim",
+                "Details": f"${float(row['Claimable Now']):,.2f} is currently earned and not yet claimed.",
+            })
+
+    blocker_rows = safe_df_query(
+        """
+        SELECT u.id,u.job_stage_id,js.stage_name,u.blocker_type,u.blocker_notes,u.update_date
+        FROM stage_progress_updates u
+        JOIN job_stages js ON js.id=u.job_stage_id
+        JOIN (
+            SELECT job_stage_id,MAX(id) AS max_id
+            FROM stage_progress_updates
+            WHERE job_id=? AND COALESCE(blocker_type,'')<>''
+            GROUP BY job_stage_id
+        ) latest ON latest.max_id=u.id
+        WHERE u.job_id=? AND COALESCE(u.blocker_status,'None')='Active'
+          AND COALESCE(u.blocker_type,'')<>''
+        """,
+        (int(job_id), int(job_id)),
+    )
+    for _, blocker in blocker_rows.iterrows():
+        alerts.append({
+            "alert_key": f"blocker:{int(blocker['id'])}",
+            "job_stage_id": int(blocker["job_stage_id"]),
+            "Severity": "Critical",
+            "Stage": str(blocker["stage_name"] or ""),
+            "Alert": f"Active blocker — {blocker['blocker_type']}",
+            "Details": str(blocker["blocker_notes"] or "No blocker details supplied."),
+        })
+
+    inspection_rows = safe_df_query(
+        """
+        SELECT u.id,u.job_stage_id,js.stage_name,u.update_date
+        FROM stage_progress_updates u
+        JOIN job_stages js ON js.id=u.job_stage_id
+        WHERE u.job_id=? AND COALESCE(u.ready_for_inspection,0)=1
+          AND LOWER(COALESCE(js.status,'')) NOT IN ('completed','complete')
+        ORDER BY u.id DESC
+        """,
+        (int(job_id),),
+    )
+    seen_inspection_stages = set()
+    for _, inspection in inspection_rows.iterrows():
+        stage_id = int(inspection["job_stage_id"])
+        if stage_id in seen_inspection_stages:
+            continue
+        seen_inspection_stages.add(stage_id)
+        alerts.append({
+            "alert_key": f"inspection:{int(inspection['id'])}",
+            "job_stage_id": stage_id,
+            "Severity": "Info",
+            "Stage": str(inspection["stage_name"] or ""),
+            "Alert": "Ready for inspection",
+            "Details": f"Marked ready on {inspection['update_date']}. Close the alert by completing the stage or acknowledging it.",
+        })
+
+    po_rows = safe_df_query(
+        """
+        SELECT po.id,po.po_number,COALESCE(po.amount_ex_gst,0) AS po_amount,
+               COALESCE(SUM(CASE WHEN LOWER(COALESCE(c.status,'')) NOT IN ('void','cancelled')
+                                 THEN i.amount_ex_gst ELSE 0 END),0) AS claimed
+        FROM job_purchase_orders po
+        LEFT JOIN invoice_claim_items i ON i.purchase_order_id=po.id
+        LEFT JOIN invoice_claims c ON c.id=i.invoice_claim_id
+        WHERE po.job_id=?
+        GROUP BY po.id,po.po_number,po.amount_ex_gst
+        """,
+        (int(job_id),),
+    )
+    for _, po in po_rows.iterrows():
+        po_amount = float(po["po_amount"] or 0)
+        claimed = float(po["claimed"] or 0)
+        if po_amount > 0 and claimed > po_amount + 0.01:
+            alerts.append({
+                "alert_key": f"po_over:{int(po['id'])}:{round(claimed)}",
+                "job_stage_id": None,
+                "Severity": "Critical",
+                "Stage": "Shared PO",
+                "Alert": f"PO {po['po_number']} overclaimed",
+                "Details": f"Claims total ${claimed:,.2f} against a ${po_amount:,.2f} PO.",
+            })
+
+    if not alerts:
+        return pd.DataFrame()
+    result = pd.DataFrame(alerts)
+    acknowledgements = safe_df_query(
+        "SELECT job_stage_id,alert_key,acknowledged_at,acknowledged_by FROM job_alert_acknowledgements WHERE job_id=?",
+        (int(job_id),),
+    )
+    ack_map = {
+        (None if pd.isna(row["job_stage_id"]) else int(row["job_stage_id"]), str(row["alert_key"])):
+        f"{row['acknowledged_at']} — {row['acknowledged_by']}"
+        for _, row in acknowledgements.iterrows()
+    }
+    result["Acknowledged"] = result.apply(
+        lambda row: ack_map.get((row["job_stage_id"], row["alert_key"]), ""), axis=1
+    )
+    severity_order = {"Critical": 0, "Warning": 1, "Info": 2}
+    result["_order"] = result["Severity"].map(severity_order).fillna(9)
+    return result.sort_values(["_order", "Stage", "Alert"]).drop(columns=["_order"]).reset_index(drop=True)
+
+
+def render_operational_alerts_panel(job_id):
+    alerts = operational_alerts_dataframe(job_id)
+    with st.expander("Operational alerts", expanded=not alerts.empty):
+        if alerts.empty:
+            pb_success("No current stage, labour, blocker, claim or PO alerts.")
+            return
+        show_acknowledged = st.checkbox(
+            "Show acknowledged alerts",
+            value=False,
+            key=f"show_acknowledged_stage_alerts_{job_id}",
+        )
+        visible = alerts if show_acknowledged else alerts[alerts["Acknowledged"].astype(str) == ""]
+        if visible.empty:
+            st.info("All current alerts have been acknowledged.")
+            return
+        event = st.dataframe(
+            visible.drop(columns=["alert_key", "job_stage_id"], errors="ignore"),
+            width="stretch",
+            hide_index=True,
+            key=f"selectable_operational_alerts_{job_id}",
+            on_select="rerun",
+            selection_mode="single-row",
+        )
+        selected_rows = list(getattr(getattr(event, "selection", None), "rows", []) or [])
+        if not selected_rows:
+            st.caption("Select an alert to acknowledge it after review.")
+            return
+        selected = visible.iloc[selected_rows[0]]
+        acknowledgement_note = st.text_input(
+            "Acknowledgement Note",
+            placeholder="Action taken, person following up or reason accepted",
+            key=f"alert_ack_note_{job_id}_{selected['alert_key']}",
+        )
+        if st.button(
+            "Acknowledge selected alert",
+            type="primary",
+            use_container_width=True,
+            key=f"ack_alert_{job_id}_{selected['alert_key']}",
+        ):
+            execute(
+                """
+                INSERT INTO job_alert_acknowledgements
+                (job_id,job_stage_id,alert_key,acknowledged_at,acknowledged_by,notes)
+                VALUES (?,?,?,?,?,?)
+                ON CONFLICT(job_id,job_stage_id,alert_key) DO UPDATE SET
+                    acknowledged_at=excluded.acknowledged_at,
+                    acknowledged_by=excluded.acknowledged_by,
+                    notes=excluded.notes
+                """,
+                (
+                    int(job_id),
+                    int(selected["job_stage_id"]) if selected["job_stage_id"] is not None else None,
+                    str(selected["alert_key"]),
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    current_username(),
+                    acknowledgement_note.strip(),
+                ),
+            )
+            pb_success("Alert acknowledged.")
+            pb_rerun()
+
+
+def render_stage_progress_claims_panel(job_id):
+    summary = stage_progress_summary_dataframe(job_id)
+    with st.expander("Stage progress claims", expanded=False):
+        st.caption(
+            "Claim earned stage value from measured progress. Shared and separate POs remain "
+            "connected to the same job, and previous claims are deducted automatically."
+        )
+        if summary.empty:
+            st.info("Add stages before creating a stage progress claim.")
+            return
+        claim_rows = summary[[
+            "id", "Stage", "PO", "Job %", "Actual Physical %", "Stage Value Ex GST",
+            "Previously Claimed", "Claimable Now",
+        ]].copy()
+        claim_rows.insert(0, "Include", False)
+        claim_rows["Claim Now Ex GST"] = claim_rows["Claimable Now"]
+        edited = st.data_editor(
+            claim_rows,
+            width="stretch",
+            hide_index=True,
+            num_rows="fixed",
+            key=f"stage_claim_editor_{job_id}",
+            disabled=[
+                "id", "Stage", "PO", "Job %", "Actual Physical %", "Stage Value Ex GST",
+                "Previously Claimed", "Claimable Now",
+            ],
+            column_config={
+                "id": None,
+                "Include": st.column_config.CheckboxColumn("Include"),
+                "Actual Physical %": st.column_config.ProgressColumn(
+                    "Progress", min_value=0, max_value=100, format="%.1f%%"
+                ),
+                "Claim Now Ex GST": st.column_config.NumberColumn(
+                    "Claim Now Ex GST", min_value=0.0, format="$%.2f"
+                ),
+            },
+        )
+        with st.form(f"create_stage_progress_claim_{job_id}"):
+            c1, c2, c3 = st.columns(3)
+            claim_no = c1.text_input("Claim / Invoice No", value=pb_next_claim_no(job_id))
+            claim_date = c2.date_input("Claim Date", value=date.today(), format="DD/MM/YYYY")
+            due_date = c3.date_input(
+                "Due Date", value=date.today() + timedelta(days=14), format="DD/MM/YYYY"
+            )
+            c4, c5 = st.columns(2)
+            claim_status = c4.selectbox("Status", ["Draft", "Sent", "Approved", "Paid"])
+            description = c5.text_input("Description", value="Stage progress claim")
+            claim_notes = st.text_area("Claim Notes")
+            create_claim = st.form_submit_button(
+                "Create claim from selected stages",
+                type="primary",
+                use_container_width=True,
+            )
+        if create_claim:
+            selected_claims = edited[edited["Include"].fillna(False).astype(bool)].copy()
+            errors = []
+            if not claim_no.strip():
+                errors.append("Claim / Invoice No is required.")
+            if selected_claims.empty:
+                errors.append("Select at least one stage to claim.")
+            for _, row in selected_claims.iterrows():
+                amount = float(row["Claim Now Ex GST"] or 0)
+                available = float(row["Claimable Now"] or 0)
+                if amount <= 0:
+                    errors.append(f"{row['Stage']}: claim amount must be greater than zero.")
+                elif amount > available + 0.01:
+                    errors.append(f"{row['Stage']}: claim cannot exceed ${available:,.2f} currently available.")
+            duplicate = safe_df_query(
+                "SELECT id FROM invoice_claims WHERE job_id=? AND LOWER(claim_no)=LOWER(?)",
+                (int(job_id), claim_no.strip()),
+            )
+            if not duplicate.empty:
+                errors.append("This job already has that claim number.")
+            if errors:
+                for error in errors:
+                    pb_error(error)
+            else:
+                conn = connect()
+                try:
+                    cur = conn.cursor()
+                    total = float(selected_claims["Claim Now Ex GST"].fillna(0).sum())
+                    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    claim_id = _insert_and_get_id(
+                        cur,
+                        """
+                        INSERT INTO invoice_claims
+                        (job_id,claim_no,description,amount_ex_gst,invoice_date,due_date,
+                         paid_date,status,notes,created_at)
+                        VALUES (?,?,?,?,?,?,?,?,?,?)
+                        """,
+                        (
+                            int(job_id), claim_no.strip(), description.strip(), total,
+                            claim_date.isoformat(), due_date.isoformat(),
+                            claim_date.isoformat() if claim_status == "Paid" else "",
+                            claim_status, claim_notes.strip(), now,
+                        ),
+                    )
+                    po_lookup = safe_df_query(
+                        "SELECT id,po_number FROM job_purchase_orders WHERE job_id=?",
+                        (int(job_id),),
+                    )
+                    po_map = {str(row["po_number"] or ""): int(row["id"]) for _, row in po_lookup.iterrows()}
+                    item_rows = [
+                        (
+                            claim_id,
+                            int(row["id"]),
+                            po_map.get(str(row["PO"] or "")),
+                            str(row["Stage"] or ""),
+                            float(row["Job %"] or 0),
+                            float(row["Actual Physical %"] or 0),
+                            float(row["Stage Value Ex GST"] or 0),
+                            float(row["Previously Claimed"] or 0),
+                            float(row["Claim Now Ex GST"] or 0),
+                            claim_notes.strip(),
+                        )
+                        for _, row in selected_claims.iterrows()
+                    ]
+                    cur.executemany(
+                        """
+                        INSERT INTO invoice_claim_items
+                        (invoice_claim_id,job_stage_id,purchase_order_id,stage_name,job_percent,
+                         progress_percent,stage_value_ex_gst,previously_claimed_ex_gst,
+                         amount_ex_gst,notes)
+                        VALUES (?,?,?,?,?,?,?,?,?,?)
+                        """,
+                        item_rows,
+                    )
+                    conn.commit()
+                    record_audit_event(
+                        "stage_progress_claim_created",
+                        "invoice_claim",
+                        claim_id,
+                        {"job_id": int(job_id), "amount_ex_gst": total, "stage_count": len(item_rows)},
+                    )
+                    pb_success(f"Created {claim_no.strip()} for ${total:,.2f} Ex GST.")
+                    pb_rerun()
+                except Exception as exc:
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+                    pb_error(f"The progress claim could not be created: {exc}")
+                finally:
+                    conn.close()
+
+        existing = safe_df_query(
+            """
+            SELECT c.claim_no AS "Claim",c.invoice_date AS "Date",c.status AS "Status",
+                   i.stage_name AS "Stage",COALESCE(po.po_number,'') AS "PO",
+                   i.progress_percent AS "Progress %",i.stage_value_ex_gst AS "Stage Value",
+                   i.previously_claimed_ex_gst AS "Previous Claims",i.amount_ex_gst AS "This Claim"
+            FROM invoice_claims c
+            JOIN invoice_claim_items i ON i.invoice_claim_id=c.id
+            LEFT JOIN job_purchase_orders po ON po.id=i.purchase_order_id
+            WHERE c.job_id=? ORDER BY c.id DESC,i.id
+            """,
+            (int(job_id),),
+        )
+        if not existing.empty:
+            st.markdown("#### Stage claim history")
+            st.dataframe(existing, width="stretch", hide_index=True)
+
+
+def historical_production_rates_dataframe():
+    updates = safe_df_query(
+        """
+        SELECT u.job_id,u.job_stage_id,u.update_date,COALESCE(u.completed_quantity,0) AS qty,
+               COALESCE(u.crew_hours,0) AS crew_hours,COALESCE(u.unit,'item') AS unit,
+               COALESCE(NULLIF(u.work_type,''),js.stage_name,'Other') AS work_type,
+               COALESCE(u.substrate,'') AS substrate,COALESCE(u.coating_system,'') AS coating_system,
+               COALESCE(u.unit_rate_snapshot,0) AS unit_rate,j.job_no
+        FROM stage_progress_updates u
+        JOIN jobs j ON j.id=u.job_id
+        LEFT JOIN job_stages js ON js.id=u.job_stage_id
+        WHERE COALESCE(u.completed_quantity,0)>0 AND COALESCE(u.crew_hours,0)>0
+        ORDER BY u.update_date,u.id
+        """
+    )
+    if updates.empty:
+        return updates
+    rows = []
+    group_columns = ["work_type", "unit", "substrate", "coating_system"]
+    for group_values, group in updates.groupby(group_columns, dropna=False):
+        total_qty = float(group["qty"].sum())
+        total_hours = float(group["crew_hours"].sum())
+        painter_days = total_hours / DEFAULT_DAY_HOURS
+        units_per_day = total_qty / painter_days if painter_days > 0 else 0.0
+        completed_value = float((group["qty"] * group["unit_rate"]).sum())
+        value_per_day = completed_value / painter_days if painter_days > 0 else 0.0
+        work_type, unit, substrate, coating = group_values
+        rows.append({
+            "Work Type": str(work_type or "Other"),
+            "Unit": str(unit or "item"),
+            "Substrate": str(substrate or ""),
+            "Coating System": str(coating or ""),
+            "Updates": int(len(group)),
+            "Jobs": int(group["job_id"].nunique()),
+            "Crew Hours": total_hours,
+            "Completed Qty": total_qty,
+            "Actual Qty / Painter Day": units_per_day,
+            "Actual Sell Value / Painter Day": value_per_day,
+            "Against $900 Target": value_per_day - DEFAULT_VALUE_TARGET,
+            "Confidence": "Established" if len(group) >= 10 else ("Building" if len(group) >= 3 else "Early sample"),
+        })
+    return pd.DataFrame(rows).sort_values(["Work Type", "Substrate", "Coating System"])
+
+
+def render_historical_production_rates():
+    with st.expander("Historical production rates across completed work", expanded=False):
+        st.caption(
+            "JobHub learns actual m², lineal-metre and item output from stage updates. "
+            "Rates are weighted by painter-hours and compared with the profit-inclusive $900 target."
+        )
+        rates = historical_production_rates_dataframe()
+        if rates.empty:
+            st.info("Production history will appear after measured stage updates include crew hours.")
+            return
+        st.dataframe(
+            rates,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "Actual Sell Value / Painter Day": st.column_config.NumberColumn(format="$%.2f"),
+                "Against $900 Target": st.column_config.NumberColumn(format="$%.2f"),
+            },
+        )
+
+
+def render_job_stages_panel(job_id):
+    """Create, edit, order and safely delete optional stages for one job."""
+    job_id = int(job_id)
+    stages = job_stages_dataframe(job_id)
+    st.caption(
+        "Split this job into any named work stages. Existing jobs remain available as "
+        "Whole Job until stages are added."
+    )
+    render_job_purchase_orders_panel(job_id)
+    render_job_stage_templates_panel(job_id, stages)
+    po_options = job_purchase_order_options(job_id)
+    value_basis, value_source = job_value_basis(job_id)
+
+    stage_count = len(stages)
+    active_count = (
+        int((stages["Status"].astype(str).str.casefold() != "completed").sum())
+        if not stages.empty
+        else 0
+    )
+    budget_hours = float(stages["Budget Hours"].fillna(0).sum()) if not stages.empty else 0.0
+    actual_hours = float(stages["Actual Hours"].fillna(0).sum()) if not stages.empty else 0.0
+    percentage_total = float(stages["Job %"].fillna(0).sum()) if not stages.empty else 0.0
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Stages", stage_count)
+    m2.metric("Stage Allocation", f"{percentage_total:.1f}%")
+    m3.metric("Job Value Basis", f"${value_basis:,.0f}", value_source)
+    m4.metric("Budget Hours", f"{budget_hours:.1f}")
+    m5.metric("Recorded Hours", f"{actual_hours:.1f}")
+    if stages.empty:
+        pass
+    elif abs(percentage_total - 100.0) <= 0.01:
+        st.success("Stage percentages total 100%.")
+    else:
+        st.warning(
+            f"Stage percentages currently total {percentage_total:.1f}%. "
+            "Adjust them until the total is 100%."
+        )
+
+    with st.expander("Add a stage", expanded=stages.empty):
+        with st.form(f"add_job_stage_{job_id}"):
+            a1, a2, a3, a4 = st.columns(4)
+            stage_name = a1.text_input(
+                "Stage Name",
+                placeholder="e.g. External Upper — Scaffold",
+            )
+            sequence_order = int(
+                a2.number_input(
+                    "Order",
+                    min_value=1,
+                    step=1,
+                    value=stage_count + 1,
+                )
+            )
+            stage_percent = a3.number_input(
+                "Job %",
+                min_value=0.0,
+                max_value=100.0,
+                step=1.0,
+                value=0.0,
+            )
+            stage_status = a4.selectbox("Status", JOB_STAGE_STATUS_OPTIONS)
+            d1, d2, d3 = st.columns(3)
+            stage_start = d1.date_input("Planned Start", value=None, format="DD/MM/YYYY")
+            stage_end = d2.date_input("Planned Finish", value=None, format="DD/MM/YYYY")
+            stage_budget = d3.number_input(
+                "Budget Hours Override",
+                min_value=0.0,
+                step=8.0,
+                value=0.0,
+                help="Leave at 0 to calculate hours automatically from Job % and the $900 painter-day target.",
+            )
+            stage_po_label = st.selectbox(
+                "Purchase Order",
+                list(po_options.keys()),
+                help="Choose the same PO for shared stages, or add a separate PO above for this stage.",
+            )
+            stage_notes = st.text_area(
+                "Stage Notes",
+                placeholder="Access, scaffold, colour, area or sequencing notes",
+            )
+            add_stage = st.form_submit_button(
+                "Add stage",
+                type="primary",
+                use_container_width=True,
+            )
+        if add_stage:
+            clean_name = stage_name.strip()
+            if not clean_name:
+                pb_error("Stage Name is required.")
+            elif stage_start and stage_end and stage_end < stage_start:
+                pb_error("Planned Finish cannot be before Planned Start.")
+            elif not safe_df_query(
+                "SELECT id FROM job_stages WHERE job_id = ? AND LOWER(stage_name) = LOWER(?)",
+                (job_id, clean_name),
+            ).empty:
+                pb_error("This job already has a stage with that name.")
+            else:
+                now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                execute(
+                    """
+                    INSERT INTO job_stages
+                    (job_id, purchase_order_id, stage_name, sequence_order, job_percent,
+                     status, start_date, end_date, budget_hours, notes, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        job_id,
+                        po_options[stage_po_label],
+                        clean_name,
+                        sequence_order,
+                        float(stage_percent),
+                        stage_status,
+                        stage_start.isoformat() if stage_start else "",
+                        stage_end.isoformat() if stage_end else "",
+                        float(stage_budget),
+                        stage_notes.strip(),
+                        now,
+                        now,
+                    ),
+                )
+                pb_success(f"Added stage: {clean_name}.")
+                pb_rerun()
+
+    if stages.empty:
+        st.info(
+            "No stages have been added. Scheduling and timesheets will continue to use Whole Job."
+        )
+        return
+
+    progress_summary = stage_progress_summary_dataframe(job_id)
+    if not progress_summary.empty:
+        weighted_actual = float(
+            (progress_summary["Actual Physical %"] * progress_summary["Job %"] / 100.0).sum()
+        )
+        weighted_expected = float(
+            (progress_summary["Should Be Complete %"] * progress_summary["Job %"] / 100.0).sum()
+        )
+        p1, p2, p3, p4 = st.columns(4)
+        p1.metric("Actual Job Progress", f"{weighted_actual:.1f}%")
+        p2.metric("Should Be Complete", f"{weighted_expected:.1f}%")
+        p3.metric("Progress Variance", f"{weighted_actual - weighted_expected:+.1f} pts")
+        p4.metric("Claimable Now", f"${float(progress_summary['Claimable Now'].sum()):,.2f}")
+        st.dataframe(
+            progress_summary.drop(columns=["id"], errors="ignore"),
+            width="stretch",
+            hide_index=True,
+            key=f"job_stage_progress_summary_{job_id}",
+            column_config={
+                "Should Be Complete %": st.column_config.ProgressColumn(
+                    min_value=0, max_value=100, format="%.1f%%"
+                ),
+                "Actual Physical %": st.column_config.ProgressColumn(
+                    min_value=0, max_value=100, format="%.1f%%"
+                ),
+                "Stage Value Ex GST": st.column_config.NumberColumn(format="$%.2f"),
+                "Previously Claimed": st.column_config.NumberColumn(format="$%.2f"),
+                "Claimable Now": st.column_config.NumberColumn(format="$%.2f"),
+            },
+        )
+
+    render_operational_alerts_panel(job_id)
+    with st.expander("Supervisor stage update", expanded=False):
+        render_stage_updates_panel(job_id, employee_mode=False, key_prefix="manager_stage_updates")
+    render_stage_progress_claims_panel(job_id)
+    render_historical_production_rates()
+
+    st.markdown("### Current Stages")
+    event = st.dataframe(
+        stages,
+        width="stretch",
+        hide_index=True,
+        key=f"selectable_job_stages_{job_id}",
+        on_select="rerun",
+        selection_mode="single-row",
+        column_config={"id": None},
+    )
+    selected_rows = list(getattr(getattr(event, "selection", None), "rows", []) or [])
+    if not selected_rows:
+        st.caption("Select a stage row to rename, reorder, update or delete it.")
+        return
+
+    selected = stages.iloc[selected_rows[0]]
+    stage_id = int(selected["id"])
+    current_status = str(selected["Status"] or "Planned")
+    status_options = list(JOB_STAGE_STATUS_OPTIONS)
+    if current_status not in status_options:
+        status_options.append(current_status)
+
+    with st.form(f"edit_job_stage_{stage_id}"):
+        st.markdown(f"#### Edit {selected['Stage Name']}")
+        e1, e2, e3, e4 = st.columns(4)
+        edit_name = e1.text_input("Stage Name", value=str(selected["Stage Name"] or ""))
+        edit_order = int(
+            e2.number_input(
+                "Order",
+                min_value=1,
+                step=1,
+                value=int(selected["Order"] or 1),
+            )
+        )
+        edit_percent = e3.number_input(
+            "Job %",
+            min_value=0.0,
+            max_value=100.0,
+            step=1.0,
+            value=float(selected["Job %"] or 0),
+        )
+        edit_status = e4.selectbox(
+            "Status",
+            status_options,
+            index=status_options.index(current_status),
+        )
+        ed1, ed2, ed3 = st.columns(3)
+        edit_start = ed1.date_input(
+            "Planned Start",
+            value=pb_date(selected["Planned Start"]),
+            format="DD/MM/YYYY",
+        )
+        edit_end = ed2.date_input(
+            "Planned Finish",
+            value=pb_date(selected["Planned Finish"]),
+            format="DD/MM/YYYY",
+        )
+        edit_budget = ed3.number_input(
+            "Budget Hours Override",
+            min_value=0.0,
+            step=8.0,
+            value=float(selected["Budget Hours Override"] or 0),
+            help="Leave at 0 to use the calculated production budget.",
+        )
+        current_po = str(selected["Purchase Order"] or "")
+        current_po_label = "No PO allocated"
+        for label in po_options:
+            if current_po and label.startswith(f"{current_po} —"):
+                current_po_label = label
+                break
+            if current_po and label == current_po:
+                current_po_label = label
+                break
+        edit_po_label = st.selectbox(
+            "Purchase Order",
+            list(po_options.keys()),
+            index=list(po_options.keys()).index(current_po_label),
+        )
+        edit_notes = st.text_area("Stage Notes", value=str(selected["Notes"] or ""))
+        save_stage = st.form_submit_button(
+            "Save stage",
+            type="primary",
+            use_container_width=True,
+        )
+    if save_stage:
+        clean_name = edit_name.strip()
+        duplicate = safe_df_query(
+            """
+            SELECT id FROM job_stages
+            WHERE job_id = ? AND LOWER(stage_name) = LOWER(?) AND id <> ?
+            """,
+            (job_id, clean_name, stage_id),
+        )
+        if not clean_name:
+            pb_error("Stage Name is required.")
+        elif edit_start and edit_end and edit_end < edit_start:
+            pb_error("Planned Finish cannot be before Planned Start.")
+        elif not duplicate.empty:
+            pb_error("This job already has a stage with that name.")
+        else:
+            execute(
+                """
+                UPDATE job_stages
+                SET purchase_order_id = ?, stage_name = ?, sequence_order = ?, job_percent = ?,
+                    status = ?, start_date = ?, end_date = ?, budget_hours = ?,
+                    notes = ?, updated_at = ?
+                WHERE id = ? AND job_id = ?
+                """,
+                (
+                    po_options[edit_po_label],
+                    clean_name,
+                    edit_order,
+                    float(edit_percent),
+                    edit_status,
+                    edit_start.isoformat() if edit_start else "",
+                    edit_end.isoformat() if edit_end else "",
+                    float(edit_budget),
+                    edit_notes.strip(),
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    stage_id,
+                    job_id,
+                ),
+            )
+            pb_success(f"Updated stage: {clean_name}.")
+            pb_rerun()
+
+    stage_in_use = sum(
+        int(selected.get(column) or 0)
+        for column in ["Schedule Entries", "Timesheets", "Progress Updates", "Baseline Lines", "Claim Lines"]
+    )
+    confirm_delete = st.checkbox(
+        f"I understand this will permanently delete {selected['Stage Name']}.",
+        key=f"confirm_delete_job_stage_{stage_id}",
+        disabled=stage_in_use > 0,
+    )
+    if stage_in_use > 0:
+        st.info(
+            "This stage cannot be deleted because schedule entries, timesheets, progress updates, "
+            "a locked baseline or claim history uses it. Rename it or move those records first."
+        )
+    if st.button(
+        "Delete selected stage",
+        key=f"delete_job_stage_{stage_id}",
+        disabled=stage_in_use > 0 or not confirm_delete,
+        use_container_width=True,
+    ):
+        execute("DELETE FROM job_stages WHERE id = ? AND job_id = ?", (stage_id, job_id))
+        pb_success(f"Deleted stage: {selected['Stage Name']}.")
+        pb_rerun()
+
+
 def go_to_linked_job_view(job_id=None, builder_id=None, mode=None):
     if job_id is not None:
         st.session_state["linked_view_selected_job_id"] = int(job_id)
@@ -13066,6 +16434,7 @@ def render_job_linked_info(job_id, expanded=True):
         SELECT t.id AS "ID",
                t.work_date AS "Date",
                e.name AS "Employee",
+               COALESCE(js.stage_name, 'Whole Job') AS "Stage",
                t.start_time AS "Start",
                t.finish_time AS "Finish",
                t.break_minutes AS "Break Minutes",
@@ -13075,6 +16444,7 @@ def render_job_linked_info(job_id, expanded=True):
                t.notes AS "Notes"
         FROM timesheet_entries t
         JOIN employees e ON e.id = t.employee_id
+        LEFT JOIN job_stages js ON js.id = t.job_stage_id
         WHERE t.job_id = ?
         ORDER BY t.work_date DESC, t.id DESC
     """, (job_id,))
@@ -13090,7 +16460,6 @@ def render_job_linked_info(job_id, expanded=True):
                access_equipment_allowance AS "Access / Equipment",
                subcontractor_allowance AS "Subcontractor",
                sundries_allowance AS "Sundries",
-               margin_percent AS "Margin %",
                contingency_percent AS "Contingency %",
                total_ex_gst AS "Total Ex GST",
                gst_amount AS "GST",
@@ -13103,6 +16472,7 @@ def render_job_linked_info(job_id, expanded=True):
 
     estimate_lines = safe_df_query("""
         SELECT e.estimate_no AS "Estimate No",
+               COALESCE(js.stage_name, 'Whole Job / Unassigned') AS "Stage",
                l.section AS "Section",
                l.item_description AS "Description",
                l.qty AS "Qty",
@@ -13119,6 +16489,7 @@ def render_job_linked_info(job_id, expanded=True):
                l.notes AS "Notes"
         FROM estimate_line_items l
         JOIN estimate_working_sheets e ON e.id = l.estimate_id
+        LEFT JOIN job_stages js ON js.id = l.job_stage_id
         WHERE e.job_id = ?
         ORDER BY e.id DESC, l.id ASC
     """, (job_id,))
@@ -13169,7 +16540,6 @@ def render_job_linked_info(job_id, expanded=True):
                quoted_access_equipment AS "Access / Equipment",
                quoted_subcontractors AS "Subcontractors",
                quoted_sundries AS "Sundries",
-               target_gp_percent AS "Target GP %",
                locked_at AS "Locked At",
                locked_by AS "Locked By",
                notes AS "Notes"
@@ -13209,12 +16579,14 @@ def render_job_linked_info(job_id, expanded=True):
     schedule_df = safe_df_query("""
         SELECT s.schedule_date AS "Date",
                e.name AS "Employee",
+               COALESCE(js.stage_name, 'Whole Job') AS "Stage",
                s.start_time AS "Start",
                s.finish_time AS "Finish",
                s.site_role AS "Role",
                s.notes AS "Notes"
         FROM staff_schedule s
         JOIN employees e ON e.id = s.employee_id
+        LEFT JOIN job_stages js ON js.id = s.job_stage_id
         WHERE s.job_id = ?
         ORDER BY s.schedule_date DESC, e.name
     """, (job_id,))
@@ -13254,8 +16626,9 @@ def render_job_linked_info(job_id, expanded=True):
     m4.metric("Wages", f"${wage_total:,.2f}")
     m5.metric("Basic Position", f"${gross_position:,.2f}")
 
-    tab_summary, tab_costs, tab_materials, tab_wages, tab_equipment, tab_control, tab_photos = st.tabs([
+    tab_summary, tab_stages, tab_costs, tab_materials, tab_wages, tab_equipment, tab_control, tab_photos = st.tabs([
         "Summary",
+        "Stages / POs",
         "Costs & Estimates",
         "Materials",
         "Wages & Timesheets",
@@ -13274,6 +16647,10 @@ def render_job_linked_info(job_id, expanded=True):
             st.info("No staff schedule entries saved for this job.")
         else:
             st.dataframe(schedule_df, width="stretch", hide_index=True)
+
+    with tab_stages:
+        st.markdown("### Job Stages and Purchase Orders")
+        render_job_stages_panel(job_id)
 
     with tab_costs:
         c1, c2, c3 = st.columns(3)
@@ -13805,6 +17182,7 @@ def jobhub_enterprise_context():
         "execute": execute,
         "execute_many": execute_many,
         "record_audit_event": record_audit_event,
+        "recalc_estimate_totals": recalc_estimate_totals,
         "create_management_notifications": create_management_notifications,
         "get_current_user": get_current_user,
         "save_job_photo": save_job_photo,
@@ -13851,6 +17229,12 @@ except Exception as exc:
     st.stop()
 
 require_login()
+
+try:
+    notify_overdue_staff_requests()
+except Exception:
+    # Request reminders must never block staff from opening JobHub.
+    pass
 
 # Keep linked modules talking on every JobHub rerun. Only records explicitly
 # linked to their source are updated; manual/fixed scheduler dates are preserved.
@@ -13908,6 +17292,7 @@ elif role == "manager":
     management_menu_map = {
         "Builders & Clients": "Builders & Clients",
         "Employees": "Employees",
+        "Staff Requests": "Staff Requests",
         "Products": "Products",
         "Equipment": "Equipment",
     }
@@ -13947,6 +17332,7 @@ else:
         "User Accounts": "User Access",
         "Builders & Clients": "Builders & Clients",
         "Employees": "Employees",
+        "Staff Requests": "Staff Requests",
         "Products": "Products",
         "Equipment": "Equipment",
     }
@@ -14305,6 +17691,10 @@ elif menu == "App Builder AI":
 
 elif menu == "User Access":
     user_access_page()
+
+
+elif menu == "Staff Requests":
+    staff_requests_page()
 
 
 # =============================
@@ -16659,7 +20049,6 @@ elif menu == "Reports / Export":
                        e.access_equipment_allowance AS 'Access / Equipment',
                        e.subcontractor_allowance AS 'Subcontractor',
                        e.sundries_allowance AS 'Sundries',
-                       e.margin_percent AS 'Margin %',
                        e.contingency_percent AS 'Contingency %',
                        e.total_ex_gst AS 'Total Ex GST',
                        e.gst_amount AS 'GST',

@@ -24,7 +24,7 @@ except ImportError:  # pragma: no cover - only used for local SQLite installs
 
 
 APP_NAME = "Premier Brushworks Staff Scheduler"
-APP_VERSION = "2.4-clickable-timeline"
+APP_VERSION = "2.5-crews-stages-clash-review"
 JOBHUB_URL = os.getenv("JOBHUB_URL", "https://premierbwjobhub.onrender.com/").strip()
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 USE_POSTGRES = bool(DATABASE_URL)
@@ -183,6 +183,7 @@ def init_linked_schema() -> None:
             CREATE TABLE IF NOT EXISTS staff_schedule (
                 id SERIAL PRIMARY KEY,
                 job_id INTEGER,
+                job_stage_id INTEGER,
                 employee_id INTEGER,
                 schedule_date TEXT,
                 start_time TEXT,
@@ -229,12 +230,39 @@ def init_linked_schema() -> None:
             )
             """
         )
+        execute(
+            """
+            CREATE TABLE IF NOT EXISTS scheduler_crews (
+                id SERIAL PRIMARY KEY,
+                crew_name TEXT NOT NULL UNIQUE,
+                lead_employee_id INTEGER NOT NULL UNIQUE,
+                active INTEGER NOT NULL DEFAULT 1,
+                notes TEXT DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT,
+                FOREIGN KEY(lead_employee_id) REFERENCES employees(id)
+            )
+            """
+        )
+        execute(
+            """
+            CREATE TABLE IF NOT EXISTS scheduler_crew_members (
+                crew_id INTEGER NOT NULL,
+                employee_id INTEGER NOT NULL,
+                is_lead INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (crew_id, employee_id),
+                FOREIGN KEY(crew_id) REFERENCES scheduler_crews(id) ON DELETE CASCADE,
+                FOREIGN KEY(employee_id) REFERENCES employees(id)
+            )
+            """
+        )
     else:
         execute(
             """
             CREATE TABLE IF NOT EXISTS staff_schedule (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 job_id INTEGER,
+                job_stage_id INTEGER,
                 employee_id INTEGER,
                 schedule_date TEXT,
                 start_time TEXT,
@@ -281,8 +309,35 @@ def init_linked_schema() -> None:
             )
             """
         )
+        execute(
+            """
+            CREATE TABLE IF NOT EXISTS scheduler_crews (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                crew_name TEXT NOT NULL UNIQUE,
+                lead_employee_id INTEGER NOT NULL UNIQUE,
+                active INTEGER NOT NULL DEFAULT 1,
+                notes TEXT DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT,
+                FOREIGN KEY(lead_employee_id) REFERENCES employees(id)
+            )
+            """
+        )
+        execute(
+            """
+            CREATE TABLE IF NOT EXISTS scheduler_crew_members (
+                crew_id INTEGER NOT NULL,
+                employee_id INTEGER NOT NULL,
+                is_lead INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (crew_id, employee_id),
+                FOREIGN KEY(crew_id) REFERENCES scheduler_crews(id) ON DELETE CASCADE,
+                FOREIGN KEY(employee_id) REFERENCES employees(id)
+            )
+            """
+        )
 
     for column, definition in [
+        ("job_stage_id", "INTEGER"),
         ("period_type", "TEXT"),
         ("period_start", "TEXT"),
         ("period_end", "TEXT"),
@@ -296,6 +351,9 @@ def init_linked_schema() -> None:
 
     execute("CREATE INDEX IF NOT EXISTS idx_staff_schedule_date ON staff_schedule(schedule_date)")
     execute("CREATE INDEX IF NOT EXISTS idx_staff_schedule_employee_date ON staff_schedule(employee_id, schedule_date)")
+    execute("CREATE INDEX IF NOT EXISTS idx_staff_schedule_job_stage ON staff_schedule(job_id, job_stage_id)")
+    execute("CREATE INDEX IF NOT EXISTS idx_scheduler_crew_lead ON scheduler_crews(lead_employee_id)")
+    execute("CREATE INDEX IF NOT EXISTS idx_scheduler_crew_member ON scheduler_crew_members(employee_id)")
     execute(
         "CREATE INDEX IF NOT EXISTS idx_staff_schedule_linked_job "
         "ON staff_schedule(linked_to_job_dates, job_id)"
@@ -429,6 +487,104 @@ def active_staff() -> pd.DataFrame:
     )
 
 
+def saved_crews(active_only: bool = True) -> pd.DataFrame:
+    """Return saved lead/member groups used by the tile board and bulk allocator."""
+    where_clause = "WHERE COALESCE(c.active,1)=1" if active_only else ""
+    crews = query_df(
+        f"""
+        SELECT c.id, c.crew_name, c.lead_employee_id, lead.name AS lead_name,
+               COALESCE(c.active,1) AS active, COALESCE(c.notes,'') AS notes
+        FROM scheduler_crews c
+        JOIN employees lead ON lead.id=c.lead_employee_id
+        {where_clause}
+        ORDER BY c.crew_name
+        """
+    )
+    if crews.empty:
+        return crews
+    member_labels = []
+    member_ids = []
+    for crew_id in crews["id"].astype(int):
+        members = query_df(
+            """
+            SELECT e.id, e.name, COALESCE(cm.is_lead,0) AS is_lead
+            FROM scheduler_crew_members cm
+            JOIN employees e ON e.id=cm.employee_id
+            WHERE cm.crew_id=?
+            ORDER BY cm.is_lead DESC, e.name
+            """,
+            (crew_id,),
+        )
+        member_labels.append(", ".join(members["name"].astype(str)) if not members.empty else "")
+        member_ids.append(members["id"].astype(int).tolist() if not members.empty else [])
+    crews["member_names"] = member_labels
+    crews["member_ids"] = member_ids
+    return crews
+
+
+def crew_for_lead(employee_id: int) -> dict | None:
+    crews = saved_crews(active_only=True)
+    match = crews[crews["lead_employee_id"].astype(int) == int(employee_id)] if not crews.empty else crews
+    return match.iloc[0].to_dict() if not match.empty else None
+
+
+def save_scheduler_crew(
+    crew_id: int | None,
+    crew_name: str,
+    lead_employee_id: int,
+    member_employee_ids: Iterable[int],
+    notes: str = "",
+) -> int:
+    """Create or update a saved crew and its members in one transaction."""
+    member_ids = list(dict.fromkeys([int(lead_employee_id), *[int(value) for value in member_employee_ids]]))
+    now = datetime.now().isoformat(timespec="seconds")
+    with db_conn() as conn:
+        cur = conn.cursor()
+        if crew_id is None:
+            insert_sql = """
+                INSERT INTO scheduler_crews
+                (crew_name,lead_employee_id,active,notes,created_at,updated_at)
+                VALUES (?,?,1,?,?,?)
+            """
+            if USE_POSTGRES:
+                insert_sql += " RETURNING id"
+            cur.execute(sql_text(insert_sql), (crew_name.strip(), int(lead_employee_id), notes.strip(), now, now))
+            crew_id = int(cur.fetchone()[0]) if USE_POSTGRES else int(cur.lastrowid)
+        else:
+            crew_id = int(crew_id)
+            cur.execute(
+                sql_text(
+                    """
+                    UPDATE scheduler_crews
+                    SET crew_name=?,lead_employee_id=?,active=1,notes=?,updated_at=?
+                    WHERE id=?
+                    """
+                ),
+                (crew_name.strip(), int(lead_employee_id), notes.strip(), now, crew_id),
+            )
+            cur.execute(sql_text("DELETE FROM scheduler_crew_members WHERE crew_id=?"), (crew_id,))
+        cur.executemany(
+            sql_text(
+                """
+                INSERT INTO scheduler_crew_members (crew_id,employee_id,is_lead)
+                VALUES (?,?,?)
+                """
+            ),
+            [
+                (crew_id, employee_id, 1 if employee_id == int(lead_employee_id) else 0)
+                for employee_id in member_ids
+            ],
+        )
+    return int(crew_id)
+
+
+def delete_scheduler_crew(crew_id: int) -> None:
+    with db_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(sql_text("DELETE FROM scheduler_crew_members WHERE crew_id=?"), (int(crew_id),))
+        cur.execute(sql_text("DELETE FROM scheduler_crews WHERE id=?"), (int(crew_id),))
+
+
 def schedulable_jobs() -> pd.DataFrame:
     return query_df(
         """
@@ -444,11 +600,52 @@ def schedulable_jobs() -> pd.DataFrame:
     )
 
 
+def schedulable_job_stage_choices(jobs: pd.DataFrame) -> dict[str, dict]:
+    """Return whole-job and active-stage choices for the scheduler."""
+    choices: dict[str, dict] = {}
+    stages_available = table_exists("job_stages")
+    for _, job in jobs.iterrows():
+        base_label = f"{job['job_no']} · {job['job_name']}"
+        choices[f"{base_label} — Whole Job"] = {
+            "job_id": int(job["id"]),
+            "job_stage_id": None,
+            "job_no": str(job["job_no"]),
+            "job_name": str(job["job_name"]),
+            "stage_name": "Whole Job",
+        }
+        stages = query_df(
+            """
+            SELECT id, stage_name
+            FROM job_stages
+            WHERE job_id=?
+            ORDER BY sequence_order, id
+            """,
+            (int(job["id"]),),
+        ) if stages_available else pd.DataFrame()
+        for _, stage in stages.iterrows():
+            stage_name = str(stage["stage_name"] or "").strip()
+            choices[f"{base_label} — {stage_name}"] = {
+                "job_id": int(job["id"]),
+                "job_stage_id": int(stage["id"]),
+                "job_no": str(job["job_no"]),
+                "job_name": str(job["job_name"]),
+                "stage_name": stage_name,
+            }
+    return choices
+
+
 def assignment_rows(start: date, end: date, employee_id: int | None = None) -> pd.DataFrame:
-    sql = """
+    stage_select = (
+        "s.job_stage_id, COALESCE(js.stage_name,'Whole Job') AS stage_name"
+        if table_exists("job_stages")
+        else "s.job_stage_id, 'Whole Job' AS stage_name"
+    )
+    stage_join = "LEFT JOIN job_stages js ON js.id=s.job_stage_id" if table_exists("job_stages") else ""
+    sql = f"""
         SELECT s.id, s.employee_id, e.name AS staff, COALESCE(e.role,'Painter') AS position,
                COALESCE(es.target_daily_hours,8.0) AS target_daily_hours,
-               s.job_id, j.job_no, j.job_name, COALESCE(bc.name,'') AS builder,
+               s.job_id, {stage_select}, j.job_no, j.job_name,
+               COALESCE(bc.name,'') AS builder,
                COALESCE(j.site_address,'') AS address,
                s.schedule_date, COALESCE(s.start_time,'07:00') AS start_time,
                COALESCE(s.finish_time,'15:00') AS finish_time,
@@ -460,6 +657,7 @@ def assignment_rows(start: date, end: date, employee_id: int | None = None) -> p
         FROM staff_schedule s
         JOIN employees e ON e.id=s.employee_id
         JOIN jobs j ON j.id=s.job_id
+        {stage_join}
         LEFT JOIN builders_clients bc ON bc.id=j.builder_client_id
         LEFT JOIN scheduler_employee_settings es ON es.employee_id=e.id
         WHERE s.schedule_date BETWEEN ? AND ?
@@ -512,16 +710,28 @@ def has_approved_leave(employee_id: int, work_date: date) -> bool:
     )
 
 
-def overlapping_assignment(
+def overlapping_assignment_rows(
     employee_id: int,
     work_date: date,
     start_value: time,
     finish_value: time,
     exclude_id: int | None = None,
-) -> bool:
-    sql = """
-        SELECT COUNT(*) FROM staff_schedule
-        WHERE employee_id=? AND schedule_date=?
+) -> pd.DataFrame:
+    stages_available = table_exists("job_stages")
+    stage_select = "COALESCE(js.stage_name,'Whole Job')" if stages_available else "'Whole Job'"
+    stage_join = "LEFT JOIN job_stages js ON js.id=s.job_stage_id" if stages_available else ""
+    sql = f"""
+        SELECT s.id, s.employee_id, e.name AS staff, s.job_id, s.job_stage_id,
+               j.job_no, j.job_name, {stage_select} AS stage_name,
+               s.schedule_date, COALESCE(s.start_time,'07:00') AS start_time,
+               COALESCE(s.finish_time,'15:00') AS finish_time,
+               COALESCE(s.site_role,'Site Work') AS site_role,
+               COALESCE(s.notes,'') AS notes
+        FROM staff_schedule s
+        JOIN employees e ON e.id=s.employee_id
+        JOIN jobs j ON j.id=s.job_id
+        {stage_join}
+        WHERE s.employee_id=? AND s.schedule_date=?
           AND NOT (COALESCE(finish_time,'15:00') <= ? OR COALESCE(start_time,'07:00') >= ?)
     """
     params: list = [
@@ -531,14 +741,45 @@ def overlapping_assignment(
         finish_value.strftime("%H:%M"),
     ]
     if exclude_id is not None:
-        sql += " AND id<>?"
+        sql += " AND s.id<>?"
         params.append(int(exclude_id))
-    return bool(scalar(sql, params, 0))
+    sql += " ORDER BY s.start_time, s.id"
+    return query_df(sql, params)
+
+
+def overlapping_assignment(
+    employee_id: int,
+    work_date: date,
+    start_value: time,
+    finish_value: time,
+    exclude_id: int | None = None,
+) -> bool:
+    return not overlapping_assignment_rows(
+        employee_id,
+        work_date,
+        start_value,
+        finish_value,
+        exclude_id,
+    ).empty
+
+
+def job_date_linkage(job_id: int, work_date: date, linked_to_job_dates: bool) -> tuple[date | None, int | None]:
+    if not linked_to_job_dates:
+        return None, None
+    job_row = query_df("SELECT start_date FROM jobs WHERE id=?", (int(job_id),))
+    if job_row.empty or not str(job_row.iloc[0].get("start_date") or "").strip():
+        return None, None
+    try:
+        job_start = to_date(job_row.iloc[0]["start_date"])
+        return job_start, (work_date - job_start).days
+    except Exception:
+        return None, None
 
 
 def add_assignment(
     employee_id: int,
     job_id: int,
+    job_stage_id: int | None,
     work_date: date,
     start_value: time,
     finish_value: time,
@@ -554,26 +795,18 @@ def add_assignment(
         return False, "Staff member is on approved leave."
     if overlapping_assignment(employee_id, work_date, start_value, finish_value):
         return False, "Staff member already has an overlapping assignment."
-    job_row = query_df("SELECT start_date FROM jobs WHERE id=?", (job_id,))
-    job_start = None
-    day_offset = None
-    if not job_row.empty and str(job_row.iloc[0].get("start_date") or "").strip():
-        try:
-            job_start = to_date(job_row.iloc[0]["start_date"])
-            day_offset = (work_date - job_start).days
-        except Exception:
-            job_start = None
-            day_offset = None
+    job_start, day_offset = job_date_linkage(job_id, work_date, linked_to_job_dates)
     execute(
         """
         INSERT INTO staff_schedule
-        (job_id,employee_id,schedule_date,start_time,finish_time,site_role,notes,created_at,
+        (job_id,job_stage_id,employee_id,schedule_date,start_time,finish_time,site_role,notes,created_at,
          period_type,period_start,period_end,planned_hours,created_by,
          linked_to_job_dates,job_day_offset,last_job_start_date)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         (
             job_id,
+            job_stage_id,
             employee_id,
             work_date.isoformat(),
             start_value.strftime("%H:%M"),
@@ -592,6 +825,124 @@ def add_assignment(
         ),
     )
     return True, "Assignment added to JobHub."
+
+
+def replace_conflicting_assignments(
+    expected_conflict_ids: Iterable[int],
+    employee_id: int,
+    job_id: int,
+    job_stage_id: int | None,
+    work_date: date,
+    start_value: time,
+    finish_value: time,
+    planned_hours: float,
+    site_role: str,
+    notes: str,
+    created_by: str,
+    linked_to_job_dates: bool = True,
+) -> tuple[bool, str]:
+    """Atomically replace only the clashes the user reviewed on screen."""
+    if finish_value <= start_value:
+        return False, "Finish time must be after start time."
+    if has_approved_leave(employee_id, work_date):
+        return False, "Staff member is on approved leave."
+    expected_ids = {int(value) for value in expected_conflict_ids}
+    current = overlapping_assignment_rows(employee_id, work_date, start_value, finish_value)
+    current_ids = set(current["id"].astype(int).tolist()) if not current.empty else set()
+    if current_ids != expected_ids:
+        return False, "The schedule changed while this clash was open. Review the current bookings again."
+    if not current_ids:
+        return add_assignment(
+            employee_id, job_id, job_stage_id, work_date, start_value, finish_value,
+            planned_hours, site_role, notes, created_by, linked_to_job_dates,
+        )
+
+    job_start, day_offset = job_date_linkage(job_id, work_date, linked_to_job_dates)
+    placeholders = ",".join("?" for _ in current_ids)
+    with db_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            sql_text(f"DELETE FROM staff_schedule WHERE employee_id=? AND id IN ({placeholders})"),
+            (int(employee_id), *sorted(current_ids)),
+        )
+        cur.execute(
+            sql_text(
+                """
+                INSERT INTO staff_schedule
+                (job_id,job_stage_id,employee_id,schedule_date,start_time,finish_time,site_role,notes,created_at,
+                 period_type,period_start,period_end,planned_hours,created_by,
+                 linked_to_job_dates,job_day_offset,last_job_start_date)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """
+            ),
+            (
+                int(job_id), int(job_stage_id) if job_stage_id is not None else None,
+                int(employee_id), work_date.isoformat(), start_value.strftime("%H:%M"),
+                finish_value.strftime("%H:%M"), site_role, notes.strip(),
+                datetime.now().isoformat(timespec="seconds"), "Day", work_date.isoformat(),
+                work_date.isoformat(), float(planned_hours), created_by,
+                1 if linked_to_job_dates and job_start is not None else 0,
+                day_offset, job_start.isoformat() if job_start else None,
+            ),
+        )
+    return True, f"Replaced {len(current_ids)} conflicting booking{'s' if len(current_ids) != 1 else ''}."
+
+
+def replace_conflicts_for_assignment_edit(
+    expected_conflict_ids: Iterable[int],
+    assignment_id: int,
+    employee_id: int,
+    job_id: int,
+    job_stage_id: int | None,
+    work_date: date,
+    start_value: time,
+    finish_value: time,
+    planned_hours: float,
+    site_role: str,
+    notes: str,
+    linked_to_job_dates: bool,
+) -> tuple[bool, str]:
+    """Delete reviewed clashes and update the selected booking in one transaction."""
+    if finish_value <= start_value:
+        return False, "Finish time must be after start time."
+    if has_approved_leave(employee_id, work_date):
+        return False, "Staff member is on approved leave."
+    expected_ids = {int(value) for value in expected_conflict_ids}
+    current = overlapping_assignment_rows(
+        employee_id, work_date, start_value, finish_value, int(assignment_id),
+    )
+    current_ids = set(current["id"].astype(int).tolist()) if not current.empty else set()
+    if current_ids != expected_ids:
+        return False, "The schedule changed while this clash was open. Review the current bookings again."
+    job_start, day_offset = job_date_linkage(job_id, work_date, linked_to_job_dates)
+    placeholders = ",".join("?" for _ in current_ids)
+    with db_conn() as conn:
+        cur = conn.cursor()
+        if current_ids:
+            cur.execute(
+                sql_text(f"DELETE FROM staff_schedule WHERE employee_id=? AND id IN ({placeholders})"),
+                (int(employee_id), *sorted(current_ids)),
+            )
+        cur.execute(
+            sql_text(
+                """
+                UPDATE staff_schedule
+                SET employee_id=?,job_id=?,job_stage_id=?,schedule_date=?,start_time=?,finish_time=?,
+                    planned_hours=?,site_role=?,notes=?,period_start=?,period_end=?,
+                    linked_to_job_dates=?,job_day_offset=?,last_job_start_date=?
+                WHERE id=?
+                """
+            ),
+            (
+                int(employee_id), int(job_id),
+                int(job_stage_id) if job_stage_id is not None else None,
+                work_date.isoformat(), start_value.strftime("%H:%M"), finish_value.strftime("%H:%M"),
+                float(planned_hours), site_role, notes.strip(), work_date.isoformat(),
+                work_date.isoformat(), 1 if linked_to_job_dates and job_start is not None else 0,
+                day_offset, job_start.isoformat() if job_start else None, int(assignment_id),
+            ),
+        )
+    return True, f"Kept the edited booking and removed {len(current_ids)} reviewed clash{'es' if len(current_ids) != 1 else ''}."
 
 
 def sync_linked_job_dates() -> int:
@@ -684,7 +1035,10 @@ def schedule_grid(assignments: pd.DataFrame, start: date, end: date, staff: pd.D
     for _, row in assignments.iterrows():
         day = to_date(row["schedule_date"])
         column = day.strftime("%a\n%d %b")
-        text = f"{row['job_no']} · {row['job_name']}\n{row['hours']:.1f}h"
+        text = (
+            f"{row['job_no']} · {row['job_name']}\n"
+            f"{row['stage_name']} · {row['hours']:.1f}h"
+        )
         current = grid.loc[row["staff"], column]
         grid.loc[row["staff"], column] = f"{current}\n{text}".strip()
     return grid
@@ -697,16 +1051,17 @@ def job_crew_grid(assignments: pd.DataFrame, start: date, end: date) -> pd.DataF
     if assignments.empty:
         return pd.DataFrame(columns=["Job"] + columns)
     jobs = (
-        assignments[["job_id", "job_no", "job_name"]]
+        assignments[["job_id", "job_no", "job_name", "stage_name"]]
         .drop_duplicates()
-        .sort_values(["job_no", "job_name"])
+        .sort_values(["job_no", "job_name", "stage_name"])
     )
     rows = []
     for _, job in jobs.iterrows():
-        row = {"Job": f"{job['job_no']} · {job['job_name']}"}
+        row = {"Job": f"{job['job_no']} · {job['job_name']} — {job['stage_name']}"}
         for day in days:
             booked = assignments[
                 (assignments["job_id"].astype(int) == int(job["job_id"]))
+                & (assignments["stage_name"].astype(str) == str(job["stage_name"]))
                 & (assignments["schedule_date"].astype(str) == day.isoformat())
             ]
             row[day.strftime("%a %d %b")] = "\n".join(
@@ -730,7 +1085,7 @@ def staff_job_grid(assignments: pd.DataFrame, start: date, end: date, staff: pd.
                 & (assignments["schedule_date"].astype(str) == day.isoformat())
             ] if not assignments.empty else assignments
             row[day.strftime("%a %d %b")] = "\n".join(
-                f"{item['job_no']} · {item['job_name']}\n{float(item['hours']):.1f}h"
+                f"{item['job_no']} · {item['job_name']}\n{item['stage_name']} · {float(item['hours']):.1f}h"
                 for _, item in booked.iterrows()
             )
         rows.append(row)
@@ -767,6 +1122,148 @@ def selected_board_cell(event, board: pd.DataFrame) -> tuple[str, str] | None:
     return str(board.iloc[row_index]["Employee"]), str(column_name)
 
 
+def render_tile_clash_choices(pending_key: str, cell_key: str) -> bool:
+    """Show both sides of every clash and apply the user's per-person choice."""
+    pending = list(st.session_state.get(pending_key, []) or [])
+    if not pending:
+        return False
+
+    st.error("One or more people already have a booking at this time.")
+    st.caption("Review both bookings for each person, then choose which one to keep.")
+    decisions: list[tuple[dict, str]] = []
+    for index, item in enumerate(pending):
+        start_value = time_value(item["start_time"])
+        finish_value = time_value(item["finish_time"], time(15, 0))
+        existing = overlapping_assignment_rows(
+            int(item["employee_id"]),
+            to_date(item["work_date"]),
+            start_value,
+            finish_value,
+        )
+        with st.container(border=True):
+            st.markdown(f"**{item['staff_name']} · {to_date(item['work_date']).strftime('%A %d %B')}**")
+            comparison_rows = []
+            for _, booking in existing.iterrows():
+                comparison_rows.append(
+                    {
+                        "Booking": "Existing",
+                        "Job / Stage": f"{booking['job_no']} · {booking['job_name']} — {booking['stage_name']}",
+                        "Time": f"{booking['start_time']}–{booking['finish_time']}",
+                        "Role": booking["site_role"],
+                    }
+                )
+            comparison_rows.append(
+                {
+                    "Booking": "New selection",
+                    "Job / Stage": item["job_label"],
+                    "Time": f"{item['start_time']}–{item['finish_time']}",
+                    "Role": item["site_role"],
+                }
+            )
+            st.dataframe(pd.DataFrame(comparison_rows), use_container_width=True, hide_index=True)
+            choice = st.radio(
+                f"Which booking should {item['staff_name']} keep?",
+                ["Keep existing booking", "Replace existing with new selection"],
+                key=f"{pending_key}_decision_{index}_{item['employee_id']}",
+            )
+            decisions.append((item, choice))
+
+    apply_col, cancel_col = st.columns(2)
+    if apply_col.button("Apply clash choices", type="primary", use_container_width=True, key=f"{pending_key}_apply"):
+        messages = []
+        errors = []
+        for item, choice in decisions:
+            if choice == "Keep existing booking":
+                messages.append(f"Kept {item['staff_name']}'s existing booking.")
+                continue
+            ok, message = replace_conflicting_assignments(
+                item["expected_conflict_ids"],
+                int(item["employee_id"]),
+                int(item["job_id"]),
+                int(item["job_stage_id"]) if item.get("job_stage_id") is not None else None,
+                to_date(item["work_date"]),
+                time_value(item["start_time"]),
+                time_value(item["finish_time"], time(15, 0)),
+                float(item["planned_hours"]),
+                str(item["site_role"]),
+                str(item.get("notes", "")),
+                str(item.get("created_by", "")),
+                bool(item.get("linked_to_job_dates", True)),
+            )
+            (messages if ok else errors).append(f"{item['staff_name']}: {message}")
+        st.session_state.pop(pending_key, None)
+        st.session_state["scheduler_dismissed_cell"] = cell_key
+        if errors:
+            st.session_state["scheduler_clash_result"] = {"messages": messages, "errors": errors}
+        else:
+            st.session_state["scheduler_clash_result"] = {"messages": messages, "errors": []}
+        pb_rerun()
+
+    if cancel_col.button("Cancel new booking", use_container_width=True, key=f"{pending_key}_cancel"):
+        st.session_state.pop(pending_key, None)
+        st.session_state["scheduler_dismissed_cell"] = cell_key
+        pb_rerun()
+    return True
+
+
+def render_edit_clash_choices(pending_key: str) -> bool:
+    """Resolve a clash caused by moving or extending an existing booking."""
+    item = st.session_state.get(pending_key)
+    if not item:
+        return False
+    existing = overlapping_assignment_rows(
+        int(item["employee_id"]), to_date(item["work_date"]),
+        time_value(item["start_time"]), time_value(item["finish_time"], time(15, 0)),
+        int(item["assignment_id"]),
+    )
+    st.error("These edited times overlap another booking.")
+    comparison_rows = [
+        {
+            "Booking": "Existing",
+            "Job / Stage": f"{row['job_no']} · {row['job_name']} — {row['stage_name']}",
+            "Time": f"{row['start_time']}–{row['finish_time']}",
+            "Role": row["site_role"],
+        }
+        for _, row in existing.iterrows()
+    ]
+    comparison_rows.append({
+        "Booking": "Edited selection",
+        "Job / Stage": item["job_label"],
+        "Time": f"{item['start_time']}–{item['finish_time']}",
+        "Role": item["site_role"],
+    })
+    st.dataframe(pd.DataFrame(comparison_rows), use_container_width=True, hide_index=True)
+    choice = st.radio(
+        "Which one should be kept?",
+        ["Keep existing booking and cancel this edit", "Keep edited booking and remove the clash"],
+        key=f"{pending_key}_choice",
+    )
+    keep_col, cancel_col = st.columns(2)
+    if keep_col.button("Apply choice", type="primary", use_container_width=True, key=f"{pending_key}_apply"):
+        if choice == "Keep existing booking and cancel this edit":
+            result = (True, "Kept the existing booking; the edited booking was not changed.")
+        else:
+            result = replace_conflicts_for_assignment_edit(
+                item["expected_conflict_ids"], int(item["assignment_id"]),
+                int(item["employee_id"]), int(item["job_id"]),
+                int(item["job_stage_id"]) if item.get("job_stage_id") is not None else None,
+                to_date(item["work_date"]), time_value(item["start_time"]),
+                time_value(item["finish_time"], time(15, 0)), float(item["planned_hours"]),
+                str(item["site_role"]), str(item.get("notes", "")),
+                bool(item.get("linked_to_job_dates", True)),
+            )
+        st.session_state.pop(pending_key, None)
+        st.session_state["scheduler_clash_result"] = {
+            "messages": [result[1]] if result[0] else [],
+            "errors": [] if result[0] else [result[1]],
+        }
+        pb_rerun()
+    if cancel_col.button("Close without changes", use_container_width=True, key=f"{pending_key}_cancel"):
+        st.session_state.pop(pending_key, None)
+        pb_rerun()
+    return True
+
+
 @st.dialog("Choose a job", dismissible=False)
 def schedule_tile_dialog(
     employee_id: int,
@@ -774,17 +1271,21 @@ def schedule_tile_dialog(
     work_day: date,
     existing: pd.DataFrame,
     jobs: pd.DataFrame,
+    job_stage_choices: dict[str, dict],
     user: dict,
     cell_key: str,
 ) -> None:
     """Open the minimal employee/day job picker requested for the tile board."""
     st.markdown(f"**{staff_name} · {work_day.strftime('%A %d %B')}**")
+    pending_key = f"scheduler_tile_clashes_{cell_key}"
+    if render_tile_clash_choices(pending_key, cell_key):
+        return
     if not existing.empty:
         st.caption("Already scheduled")
         for _, booking in existing.iterrows():
             details, remove = st.columns([4, 1])
             details.write(
-                f"{booking['job_no']} · {booking['job_name']} "
+                f"{booking['job_no']} · {booking['job_name']} — {booking['stage_name']} "
                 f"({booking['start_time']}–{booking['finish_time']})"
             )
             if remove.button(
@@ -797,12 +1298,25 @@ def schedule_tile_dialog(
                 pb_success(f"Deleted {staff_name}'s booking for {work_day.strftime('%d %b')}.")
                 pb_rerun()
 
-    job_labels = (jobs["job_no"].astype(str) + " · " + jobs["job_name"].astype(str)).tolist()
-    selected_job = st.selectbox(
-        "Select job",
-        job_labels,
+    selected_job_stage = st.selectbox(
+        "Select job / stage",
+        list(job_stage_choices.keys()),
         key=f"tile_popup_job_{employee_id}_{work_day.isoformat()}",
     )
+    lead_crew = crew_for_lead(employee_id)
+    include_saved_crew = False
+    if lead_crew:
+        member_ids = [int(value) for value in lead_crew.get("member_ids", [])]
+        available_members = active_staff()
+        crew_members = available_members[available_members["id"].astype(int).isin(member_ids)]
+        other_names = crew_members[crew_members["id"].astype(int) != int(employee_id)]["name"].astype(str).tolist()
+        if other_names:
+            include_saved_crew = st.checkbox(
+                f"Also include {lead_crew['crew_name']}: {', '.join(other_names)}",
+                value=False,
+                key=f"tile_popup_include_crew_{employee_id}_{work_day.isoformat()}",
+                help=f"Schedule {staff_name} alone, or add every available member of this saved crew.",
+            )
     st.caption("Standard shift: 7:00 am–3:00 pm, zero break, 8.0 hours.")
     add_col, close_col = st.columns(2)
     if add_col.button(
@@ -811,24 +1325,69 @@ def schedule_tile_dialog(
         type="primary",
         use_container_width=True,
     ):
-        job_no = selected_job.split(" · ", 1)[0]
-        job_id = int(jobs.loc[jobs["job_no"].astype(str) == job_no, "id"].iloc[0])
-        ok, message = add_assignment(
-            employee_id,
-            job_id,
-            work_day,
-            time(7, 0),
-            time(15, 0),
-            8.0,
-            "Site Work",
-            "",
-            str(user.get("username", "")),
-            True,
-        )
-        (pb_success if ok else pb_error)(message)
-        if ok:
-            st.session_state["scheduler_dismissed_cell"] = cell_key
+        selection = job_stage_choices[selected_job_stage]
+        available_staff = active_staff()
+        target_ids = [int(employee_id)]
+        if include_saved_crew and lead_crew:
+            target_ids = [
+                int(value)
+                for value in lead_crew.get("member_ids", [])
+                if int(value) in set(available_staff["id"].astype(int).tolist())
+            ]
+            if int(employee_id) not in target_ids:
+                target_ids.insert(0, int(employee_id))
+        added = []
+        blocked = []
+        clashes = []
+        for target_id in target_ids:
+            target_name = str(available_staff.loc[available_staff["id"].astype(int) == target_id, "name"].iloc[0])
+            if has_approved_leave(target_id, work_day):
+                blocked.append(f"{target_name}: approved leave")
+                continue
+            conflicts = overlapping_assignment_rows(target_id, work_day, time(7, 0), time(15, 0))
+            if not conflicts.empty:
+                clashes.append(
+                    {
+                        "employee_id": target_id,
+                        "staff_name": target_name,
+                        "expected_conflict_ids": conflicts["id"].astype(int).tolist(),
+                        "job_id": int(selection["job_id"]),
+                        "job_stage_id": selection["job_stage_id"],
+                        "job_label": selected_job_stage,
+                        "work_date": work_day.isoformat(),
+                        "start_time": "07:00",
+                        "finish_time": "15:00",
+                        "planned_hours": 8.0,
+                        "site_role": "Site Work",
+                        "notes": "",
+                        "created_by": str(user.get("username", "")),
+                        "linked_to_job_dates": True,
+                    }
+                )
+                continue
+            ok, message = add_assignment(
+                target_id, int(selection["job_id"]), selection["job_stage_id"],
+                work_day, time(7, 0), time(15, 0), 8.0, "Site Work", "",
+                str(user.get("username", "")), True,
+            )
+            (added if ok else blocked).append(target_name if ok else f"{target_name}: {message}")
+        if clashes:
+            st.session_state[pending_key] = clashes
+            st.session_state["scheduler_clash_result"] = {
+                "messages": [f"Added: {', '.join(added)}"] if added else [],
+                "errors": [f"Not added: {', '.join(blocked)}"] if blocked else [],
+            }
             pb_rerun()
+        elif added:
+            st.session_state["scheduler_dismissed_cell"] = cell_key
+            if blocked:
+                st.session_state["scheduler_clash_result"] = {
+                    "messages": [f"Added: {', '.join(added)}"],
+                    "errors": [f"Not added: {', '.join(blocked)}"],
+                }
+            pb_rerun()
+        elif blocked:
+            pb_error(" | ".join(blocked))
     if close_col.button(
         "Close",
         key=f"tile_popup_close_{employee_id}_{work_day.isoformat()}",
@@ -844,6 +1403,7 @@ def clickable_schedule_board(
     end: date,
     staff: pd.DataFrame,
     jobs: pd.DataFrame,
+    job_stage_choices: dict[str, dict],
     role_options: list[str],
     user: dict,
 ) -> None:
@@ -886,6 +1446,7 @@ def clickable_schedule_board(
             work_day,
             existing,
             jobs,
+            job_stage_choices,
             user,
             cell_key,
         )
@@ -897,7 +1458,13 @@ def timeline_chart(assignments: pd.DataFrame, title: str):
     data = assignments.copy()
     data["Start"] = pd.to_datetime(data["schedule_date"] + " " + data["start_time"])
     data["Finish"] = pd.to_datetime(data["schedule_date"] + " " + data["finish_time"])
-    data["Job"] = data["job_no"].astype(str) + " · " + data["job_name"].astype(str)
+    data["Job"] = (
+        data["job_no"].astype(str)
+        + " · "
+        + data["job_name"].astype(str)
+        + " — "
+        + data["stage_name"].astype(str)
+    )
     data["Details"] = data["site_role"].astype(str) + " · " + data["hours"].map(lambda x: f"{x:.1f}h")
     fig = px.timeline(
         data,
@@ -905,7 +1472,7 @@ def timeline_chart(assignments: pd.DataFrame, title: str):
         x_end="Finish",
         y="staff",
         color="Job",
-        hover_data=["job_no", "job_name", "builder", "address", "Details", "notes"],
+        hover_data=["job_no", "job_name", "stage_name", "builder", "address", "Details", "notes"],
         custom_data=["id"],
         title=title,
     )
@@ -948,6 +1515,7 @@ def timeline_booking_editor(
     assignments: pd.DataFrame,
     staff: pd.DataFrame,
     jobs: pd.DataFrame,
+    job_stage_choices: dict[str, dict],
     role_options: list[str],
 ) -> None:
     """Quick edit/delete panel opened by clicking a timeline booking box."""
@@ -956,9 +1524,12 @@ def timeline_booking_editor(
         st.warning("That booking is no longer in the displayed date range.")
         return
     row = selected_rows.iloc[0]
+    pending_key = f"timeline_edit_clash_{assignment_id}"
+    if render_edit_clash_choices(pending_key):
+        return
     staff_names = staff["name"].tolist()
-    job_labels = (jobs["job_no"].astype(str) + " · " + jobs["job_name"].astype(str)).tolist()
-    current_job = f"{row['job_no']} · {row['job_name']}"
+    job_labels = list(job_stage_choices.keys())
+    current_job = f"{row['job_no']} · {row['job_name']} — {row['stage_name']}"
 
     st.markdown(
         f"#### Selected booking · {row['staff']} · "
@@ -978,7 +1549,7 @@ def timeline_booking_editor(
             key=f"timeline_date_{assignment_id}",
         )
         edit_job = e2.selectbox(
-            "Job",
+            "Job / stage",
             job_labels,
             index=job_labels.index(current_job) if current_job in job_labels else 0,
             key=f"timeline_job_{assignment_id}",
@@ -1024,14 +1595,28 @@ def timeline_booking_editor(
         )
     if save:
         employee_id = int(staff.loc[staff["name"] == edit_staff, "id"].iloc[0])
-        job_no = edit_job.split(" · ", 1)[0]
-        job_id = int(jobs.loc[jobs["job_no"].astype(str) == job_no, "id"].iloc[0])
+        selected_job_stage = job_stage_choices[edit_job]
+        job_id = int(selected_job_stage["job_id"])
+        job_stage_id = selected_job_stage["job_stage_id"]
         if edit_finish <= edit_start:
             pb_error("Finish time must be after start time.")
         elif has_approved_leave(employee_id, to_date(edit_date)):
             pb_error("This staff member is on approved leave.")
         elif overlapping_assignment(employee_id, to_date(edit_date), edit_start, edit_finish, assignment_id):
-            pb_error("This would overlap another booking.")
+            conflicts = overlapping_assignment_rows(
+                employee_id, to_date(edit_date), edit_start, edit_finish, assignment_id,
+            )
+            st.session_state[pending_key] = {
+                "assignment_id": int(assignment_id), "employee_id": employee_id,
+                "staff_name": edit_staff, "expected_conflict_ids": conflicts["id"].astype(int).tolist(),
+                "job_id": job_id, "job_stage_id": job_stage_id, "job_label": edit_job,
+                "work_date": to_date(edit_date).isoformat(),
+                "start_time": edit_start.strftime("%H:%M"),
+                "finish_time": edit_finish.strftime("%H:%M"),
+                "planned_hours": float(edit_hours), "site_role": edit_role,
+                "notes": edit_notes, "linked_to_job_dates": bool(edit_linked),
+            }
+            pb_rerun()
         else:
             job_start_value = jobs.loc[jobs["id"] == job_id, "start_date"]
             job_start = (
@@ -1042,7 +1627,7 @@ def timeline_booking_editor(
             execute(
                 """
                 UPDATE staff_schedule
-                SET employee_id=?,job_id=?,schedule_date=?,start_time=?,finish_time=?,planned_hours=?,
+                SET employee_id=?,job_id=?,job_stage_id=?,schedule_date=?,start_time=?,finish_time=?,planned_hours=?,
                     site_role=?,notes=?,period_start=?,period_end=?,linked_to_job_dates=?,
                     job_day_offset=?,last_job_start_date=?
                 WHERE id=?
@@ -1050,6 +1635,7 @@ def timeline_booking_editor(
                 (
                     employee_id,
                     job_id,
+                    job_stage_id,
                     to_date(edit_date).isoformat(),
                     edit_start.strftime("%H:%M"),
                     edit_finish.strftime("%H:%M"),
@@ -1189,6 +1775,100 @@ def page_dashboard() -> None:
             )
 
 
+def render_crew_management(staff: pd.DataFrame) -> None:
+    """Create saved lead/member groups such as Ian with River and Salty."""
+    st.markdown("### Saved crews")
+    st.caption(
+        "Set one employee as the lead and save the regular members. Clicking that lead's "
+        "tile will then ask whether to schedule the lead alone or the whole crew."
+    )
+    crews = saved_crews(active_only=False)
+    staff_names = staff["name"].astype(str).tolist()
+    if not crews.empty:
+        display = crews[["crew_name", "lead_name", "member_names", "active", "notes"]].rename(
+            columns={
+                "crew_name": "Crew", "lead_name": "Lead", "member_names": "Members",
+                "active": "Active", "notes": "Notes",
+            }
+        )
+        st.dataframe(display, use_container_width=True, hide_index=True)
+
+    mode_options = ["Create new crew"] + (
+        [f"#{int(row['id'])} · {row['crew_name']}" for _, row in crews.iterrows()]
+        if not crews.empty else []
+    )
+    mode = st.selectbox("Crew record", mode_options, key="scheduler_crew_record")
+    selected_crew = None
+    crew_id = None
+    if mode != "Create new crew":
+        crew_id = int(mode.split(" · ", 1)[0].replace("#", ""))
+        selected_crew = crews[crews["id"].astype(int) == crew_id].iloc[0]
+
+    current_lead = str(selected_crew["lead_name"]) if selected_crew is not None else staff_names[0]
+    if current_lead not in staff_names:
+        st.warning("This crew's lead is inactive. Choose an active lead before saving.")
+        current_lead = staff_names[0]
+    current_members = (
+        [
+            name for name in str(selected_crew["member_names"] or "").split(", ")
+            if name in staff_names and name != current_lead
+        ]
+        if selected_crew is not None else []
+    )
+    with st.form(f"scheduler_crew_form_{crew_id or 'new'}"):
+        crew_name = st.text_input(
+            "Crew name",
+            value=str(selected_crew["crew_name"]) if selected_crew is not None else "",
+            placeholder="Ian's crew",
+        )
+        lead_name = st.selectbox("Crew lead", staff_names, index=staff_names.index(current_lead))
+        member_names = st.multiselect(
+            "Other crew members",
+            [name for name in staff_names if name != lead_name],
+            default=[name for name in current_members if name != lead_name],
+            help="The lead is included automatically.",
+        )
+        crew_notes = st.text_area(
+            "Notes",
+            value=str(selected_crew["notes"] or "") if selected_crew is not None else "",
+        )
+        save_crew = st.form_submit_button("Save crew", type="primary", use_container_width=True)
+    if save_crew:
+        lead_id = int(staff.loc[staff["name"] == lead_name, "id"].iloc[0])
+        member_ids = staff[staff["name"].isin(member_names)]["id"].astype(int).tolist()
+        duplicate_name = scalar(
+            "SELECT id FROM scheduler_crews WHERE LOWER(TRIM(crew_name))=LOWER(TRIM(?)) AND id<>?",
+            (crew_name.strip(), int(crew_id or 0)), None,
+        )
+        duplicate_lead = scalar(
+            "SELECT id FROM scheduler_crews WHERE lead_employee_id=? AND id<>?",
+            (lead_id, int(crew_id or 0)), None,
+        )
+        if not crew_name.strip():
+            pb_error("Crew name is required.")
+        elif duplicate_name:
+            pb_error("A saved crew already uses that name.")
+        elif duplicate_lead:
+            pb_error(f"{lead_name} is already the lead of another saved crew.")
+        else:
+            save_scheduler_crew(crew_id, crew_name, lead_id, member_ids, crew_notes)
+            pb_success(f"Saved {crew_name.strip()} with {lead_name} as lead.")
+            pb_rerun()
+
+    if selected_crew is not None:
+        delete_confirmed = st.checkbox(
+            f"I understand this removes the saved group {selected_crew['crew_name']} (not its employees).",
+            key=f"scheduler_delete_crew_confirm_{crew_id}",
+        )
+        if st.button(
+            "Delete saved crew", disabled=not delete_confirmed, use_container_width=True,
+            key=f"scheduler_delete_crew_{crew_id}",
+        ):
+            delete_scheduler_crew(int(crew_id))
+            pb_success(f"Deleted saved crew {selected_crew['crew_name']}.")
+            pb_rerun()
+
+
 def page_schedule(user: dict) -> None:
     st.title("Schedule Board")
     staff = active_staff()
@@ -1202,12 +1882,21 @@ def page_schedule(user: dict) -> None:
     display_days = c2.selectbox("Board range", [7, 14, 21, 28], index=1, format_func=lambda x: f"{x} days")
     start = week_start(to_date(selected))
     end = start + timedelta(days=display_days - 1)
-    tabs = st.tabs(["Clickable tile board", "Add assignment", "Allocate crew", "Edit / delete"])
+    result = st.session_state.pop("scheduler_clash_result", None)
+    if result:
+        if result.get("messages"):
+            pb_success(" | ".join(result["messages"]))
+        if result.get("errors"):
+            pb_error(" | ".join(result["errors"]))
+    tabs = st.tabs(["Clickable tile board", "Add assignment", "Allocate crew", "Saved crews", "Edit / delete"])
     staff_names = staff["name"].tolist()
-    job_labels = (jobs["job_no"].astype(str) + " · " + jobs["job_name"].astype(str)).tolist()
+    job_stage_choices = schedulable_job_stage_choices(jobs)
+    job_labels = list(job_stage_choices.keys())
     role_options = ["Site Work", "Leading Hand", "Supervision", "Quote / Measure", "Office / Planning", "Training", "Touch-ups", "Other"]
 
     with tabs[0]:
+        copy_pending_key = "scheduler_copy_week_clashes"
+        render_tile_clash_choices(copy_pending_key, "copy-week")
         assignments = assignment_rows(start, end)
         leaves = leave_rows(start, end)
         alerts = conflict_report(assignments, leaves)
@@ -1218,7 +1907,16 @@ def page_schedule(user: dict) -> None:
             "Every day tile is selectable. Click an employee's tile to add a job, "
             "view that day's bookings, or delete a booking."
         )
-        clickable_schedule_board(assignments, start, end, staff, jobs, role_options, user)
+        clickable_schedule_board(
+            assignments,
+            start,
+            end,
+            staff,
+            jobs,
+            job_stage_choices,
+            role_options,
+            user,
+        )
         with st.expander("View coloured schedule timeline"):
             chart = timeline_chart(assignments, f"JobHub schedule · {start.strftime('%d %b')} to {end.strftime('%d %b %Y')}")
             if chart:
@@ -1237,6 +1935,7 @@ def page_schedule(user: dict) -> None:
                         assignments,
                         staff,
                         jobs,
+                        job_stage_choices,
                         role_options,
                     )
             else:
@@ -1246,10 +1945,36 @@ def page_schedule(user: dict) -> None:
             if st.button("Copy first week to next week", use_container_width=True):
                 source = assignment_rows(start, start + timedelta(days=6))
                 added = skipped = 0
+                copy_clashes: list[dict] = []
                 for _, row in source.iterrows():
+                    copy_date = to_date(row["schedule_date"]) + timedelta(days=7)
+                    copy_start = time_value(row["start_time"])
+                    copy_finish = time_value(row["finish_time"], time(15, 0))
+                    conflicts = overlapping_assignment_rows(
+                        int(row["employee_id"]), copy_date, copy_start, copy_finish,
+                    )
+                    if not conflicts.empty:
+                        copy_clashes.append({
+                            "employee_id": int(row["employee_id"]),
+                            "staff_name": str(row["staff"]),
+                            "expected_conflict_ids": conflicts["id"].astype(int).tolist(),
+                            "job_id": int(row["job_id"]),
+                            "job_stage_id": int(row["job_stage_id"]) if pd.notna(row["job_stage_id"]) else None,
+                            "job_label": f"{row['job_no']} · {row['job_name']} — {row['stage_name']}",
+                            "work_date": copy_date.isoformat(),
+                            "start_time": copy_start.strftime("%H:%M"),
+                            "finish_time": copy_finish.strftime("%H:%M"),
+                            "planned_hours": float(row["hours"]),
+                            "site_role": str(row["site_role"]),
+                            "notes": str(row["notes"] or ""),
+                            "created_by": str(user.get("username", "")),
+                            "linked_to_job_dates": True,
+                        })
+                        continue
                     ok, _ = add_assignment(
                         int(row["employee_id"]),
                         int(row["job_id"]),
+                        int(row["job_stage_id"]) if pd.notna(row["job_stage_id"]) else None,
                         to_date(row["schedule_date"]) + timedelta(days=7),
                         time_value(row["start_time"]),
                         time_value(row["finish_time"], time(15, 0)),
@@ -1260,7 +1985,14 @@ def page_schedule(user: dict) -> None:
                     )
                     added += int(ok)
                     skipped += int(not ok)
-                pb_success(f"Copied {added} assignment(s); skipped {skipped} conflict(s).")
+                if copy_clashes:
+                    st.session_state[copy_pending_key] = copy_clashes
+                    st.session_state["scheduler_clash_result"] = {
+                        "messages": [f"Copied {added} non-conflicting assignment(s)."] if added else [],
+                        "errors": [f"Skipped {skipped} leave or validation issue(s)."] if skipped else [],
+                    }
+                    pb_rerun()
+                pb_success(f"Copied {added} assignment(s); skipped {skipped} leave or validation issue(s).")
                 pb_rerun()
         with b2:
             csv = assignments.to_csv(index=False).encode("utf-8")
@@ -1273,11 +2005,13 @@ def page_schedule(user: dict) -> None:
             )
 
     with tabs[1]:
+        manual_pending_key = "scheduler_manual_assignment_clashes"
+        render_tile_clash_choices(manual_pending_key, "manual-assignment")
         with st.form("add_linked_assignment"):
             a1, a2, a3 = st.columns(3)
             staff_name = a1.selectbox("Staff member", staff_names)
             work_day = a1.date_input("Date", value=start)
-            job_label = a2.selectbox("Job", job_labels)
+            job_label = a2.selectbox("Job / stage", job_labels)
             site_role = a2.selectbox("Role / type", role_options)
             start_time = a3.time_input("Start", value=time(7, 0))
             finish_time = a3.time_input("Finish", value=time(15, 0))
@@ -1291,28 +2025,66 @@ def page_schedule(user: dict) -> None:
             save = st.form_submit_button("Add to JobHub schedule", type="primary", use_container_width=True)
         if save:
             employee_id = int(staff.loc[staff["name"] == staff_name, "id"].iloc[0])
-            job_no = job_label.split(" · ", 1)[0]
-            job_id = int(jobs.loc[jobs["job_no"].astype(str) == job_no, "id"].iloc[0])
-            ok, message = add_assignment(
-                employee_id,
-                job_id,
-                to_date(work_day),
-                start_time,
-                finish_time,
-                hours,
-                site_role,
-                notes,
-                str(user.get("username", "")),
-                linked_dates,
+            selected_job_stage = job_stage_choices[job_label]
+            conflicts = overlapping_assignment_rows(
+                employee_id, to_date(work_day), start_time, finish_time,
             )
-            (pb_success if ok else pb_error)(message)
-            if ok:
+            if not conflicts.empty:
+                st.session_state[manual_pending_key] = [{
+                    "employee_id": employee_id,
+                    "staff_name": staff_name,
+                    "expected_conflict_ids": conflicts["id"].astype(int).tolist(),
+                    "job_id": int(selected_job_stage["job_id"]),
+                    "job_stage_id": selected_job_stage["job_stage_id"],
+                    "job_label": job_label,
+                    "work_date": to_date(work_day).isoformat(),
+                    "start_time": start_time.strftime("%H:%M"),
+                    "finish_time": finish_time.strftime("%H:%M"),
+                    "planned_hours": float(hours),
+                    "site_role": site_role,
+                    "notes": notes,
+                    "created_by": str(user.get("username", "")),
+                    "linked_to_job_dates": bool(linked_dates),
+                }]
                 pb_rerun()
+            else:
+                ok, message = add_assignment(
+                    employee_id, int(selected_job_stage["job_id"]),
+                    selected_job_stage["job_stage_id"], to_date(work_day), start_time,
+                    finish_time, hours, site_role, notes, str(user.get("username", "")),
+                    linked_dates,
+                )
+                (pb_success if ok else pb_error)(message)
+                if ok:
+                    pb_rerun()
 
     with tabs[2]:
+        bulk_pending_key = "scheduler_bulk_assignment_clashes"
+        render_tile_clash_choices(bulk_pending_key, "bulk-assignment")
         with st.form("bulk_linked_assignment"):
-            crew = st.multiselect("Crew", staff_names)
-            job_label = st.selectbox("Job", job_labels, key="bulk_job")
+            crews = saved_crews(active_only=True)
+            crew_source_options = ["Choose names manually"] + (
+                [f"#{int(row['id'])} · {row['crew_name']}" for _, row in crews.iterrows()]
+                if not crews.empty else []
+            )
+            crew_source = st.selectbox("Saved crew", crew_source_options)
+            default_crew = []
+            source_key = "manual"
+            if crew_source != "Choose names manually":
+                source_id = int(crew_source.split(" · ", 1)[0].replace("#", ""))
+                source_key = str(source_id)
+                source_row = crews[crews["id"].astype(int) == source_id].iloc[0]
+                default_crew = [
+                    name for name in str(source_row["member_names"] or "").split(", ")
+                    if name in staff_names
+                ]
+            crew = st.multiselect(
+                "Crew members",
+                staff_names,
+                default=default_crew,
+                key=f"bulk_crew_members_{source_key}",
+            )
+            job_label = st.selectbox("Job / stage", job_labels, key="bulk_job")
             c1, c2, c3 = st.columns(3)
             range_start = c1.date_input("Start date", value=start, key="bulk_start")
             range_end = c1.date_input("End date", value=start + timedelta(days=4), key="bulk_end")
@@ -1340,18 +2112,42 @@ def page_schedule(user: dict) -> None:
             else:
                 day_numbers = {name: number for number, name in enumerate(["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"])}
                 selected_day_numbers = {day_numbers[name] for name in weekdays}
-                job_no = job_label.split(" · ", 1)[0]
-                job_id = int(jobs.loc[jobs["job_no"].astype(str) == job_no, "id"].iloc[0])
+                selected_job_stage = job_stage_choices[job_label]
+                job_id = int(selected_job_stage["job_id"])
+                job_stage_id = selected_job_stage["job_stage_id"]
                 added = 0
                 skipped: list[str] = []
+                clash_items: list[dict] = []
                 for work_day in daterange(to_date(range_start), to_date(range_end)):
                     if work_day.weekday() not in selected_day_numbers:
                         continue
                     for staff_name in crew:
                         employee_id = int(staff.loc[staff["name"] == staff_name, "id"].iloc[0])
+                        conflicts = overlapping_assignment_rows(
+                            employee_id, work_day, start_time, finish_time,
+                        )
+                        if not conflicts.empty:
+                            clash_items.append({
+                                "employee_id": employee_id,
+                                "staff_name": staff_name,
+                                "expected_conflict_ids": conflicts["id"].astype(int).tolist(),
+                                "job_id": job_id,
+                                "job_stage_id": job_stage_id,
+                                "job_label": job_label,
+                                "work_date": work_day.isoformat(),
+                                "start_time": start_time.strftime("%H:%M"),
+                                "finish_time": finish_time.strftime("%H:%M"),
+                                "planned_hours": float(hours),
+                                "site_role": site_role,
+                                "notes": notes,
+                                "created_by": str(user.get("username", "")),
+                                "linked_to_job_dates": bool(linked_dates),
+                            })
+                            continue
                         ok, message = add_assignment(
                             employee_id,
                             job_id,
+                            job_stage_id,
                             work_day,
                             start_time,
                             finish_time,
@@ -1365,6 +2161,13 @@ def page_schedule(user: dict) -> None:
                             added += 1
                         else:
                             skipped.append(f"{staff_name} {work_day.strftime('%d %b')}: {message}")
+                if clash_items:
+                    st.session_state[bulk_pending_key] = clash_items
+                    st.session_state["scheduler_clash_result"] = {
+                        "messages": [f"Added {added} non-conflicting schedule entries."] if added else [],
+                        "errors": skipped,
+                    }
+                    pb_rerun()
                 pb_success(f"Added {added} JobHub schedule entries.")
                 if skipped:
                     st.warning("Skipped:\n\n" + "\n\n".join(f"• {item}" for item in skipped[:15]))
@@ -1372,23 +2175,36 @@ def page_schedule(user: dict) -> None:
                     pb_rerun()
 
     with tabs[3]:
+        render_crew_management(staff)
+
+    with tabs[4]:
         assignments = assignment_rows(start, end)
         if assignments.empty:
             st.info("There are no assignments in this range.")
         else:
             labels = assignments.apply(
-                lambda row: f"#{row['id']} · {to_date(row['schedule_date']).strftime('%a %d %b')} · {row['staff']} · {row['job_no']} {row['job_name']}",
+                lambda row: (
+                    f"#{row['id']} · {to_date(row['schedule_date']).strftime('%a %d %b')} · "
+                    f"{row['staff']} · {row['job_no']} {row['job_name']} — {row['stage_name']}"
+                ),
                 axis=1,
             ).tolist()
             selected_label = st.selectbox("Assignment", labels)
             assignment_id = int(selected_label.split(" · ", 1)[0].replace("#", ""))
             row = assignments[assignments["id"] == assignment_id].iloc[0]
+            edit_pending_key = f"schedule_tab_edit_clash_{assignment_id}"
+            if render_edit_clash_choices(edit_pending_key):
+                return
             with st.form("edit_linked_assignment"):
                 e1, e2, e3 = st.columns(3)
                 edit_staff = e1.selectbox("Staff member", staff_names, index=staff_names.index(row["staff"]))
                 edit_date = e1.date_input("Date", value=to_date(row["schedule_date"]))
-                current_job = f"{row['job_no']} · {row['job_name']}"
-                edit_job = e2.selectbox("Job", job_labels, index=job_labels.index(current_job) if current_job in job_labels else 0)
+                current_job = f"{row['job_no']} · {row['job_name']} — {row['stage_name']}"
+                edit_job = e2.selectbox(
+                    "Job / stage",
+                    job_labels,
+                    index=job_labels.index(current_job) if current_job in job_labels else 0,
+                )
                 edit_role = e2.selectbox("Role / type", role_options, index=role_options.index(row["site_role"]) if row["site_role"] in role_options else 0)
                 edit_start = e3.time_input("Start", value=time_value(row["start_time"]))
                 edit_finish = e3.time_input("Finish", value=time_value(row["finish_time"], time(15, 0)))
@@ -1402,19 +2218,34 @@ def page_schedule(user: dict) -> None:
                 update = st.form_submit_button("Save changes", type="primary", use_container_width=True)
             if update:
                 employee_id = int(staff.loc[staff["name"] == edit_staff, "id"].iloc[0])
-                job_no = edit_job.split(" · ", 1)[0]
-                job_id = int(jobs.loc[jobs["job_no"].astype(str) == job_no, "id"].iloc[0])
+                selected_job_stage = job_stage_choices[edit_job]
+                job_id = int(selected_job_stage["job_id"])
+                job_stage_id = selected_job_stage["job_stage_id"]
                 if edit_finish <= edit_start:
                     pb_error("Finish time must be after start time.")
                 elif has_approved_leave(employee_id, to_date(edit_date)):
                     pb_error("This staff member is on approved leave.")
                 elif overlapping_assignment(employee_id, to_date(edit_date), edit_start, edit_finish, assignment_id):
-                    pb_error("This would overlap another assignment.")
+                    conflicts = overlapping_assignment_rows(
+                        employee_id, to_date(edit_date), edit_start, edit_finish, assignment_id,
+                    )
+                    st.session_state[edit_pending_key] = {
+                        "assignment_id": assignment_id, "employee_id": employee_id,
+                        "staff_name": edit_staff,
+                        "expected_conflict_ids": conflicts["id"].astype(int).tolist(),
+                        "job_id": job_id, "job_stage_id": job_stage_id,
+                        "job_label": edit_job, "work_date": to_date(edit_date).isoformat(),
+                        "start_time": edit_start.strftime("%H:%M"),
+                        "finish_time": edit_finish.strftime("%H:%M"),
+                        "planned_hours": float(edit_hours), "site_role": edit_role,
+                        "notes": edit_notes, "linked_to_job_dates": bool(edit_linked),
+                    }
+                    pb_rerun()
                 else:
                     execute(
                         """
                         UPDATE staff_schedule
-                        SET employee_id=?,job_id=?,schedule_date=?,start_time=?,finish_time=?,planned_hours=?,
+                        SET employee_id=?,job_id=?,job_stage_id=?,schedule_date=?,start_time=?,finish_time=?,planned_hours=?,
                             site_role=?,notes=?,period_start=?,period_end=?,linked_to_job_dates=?,
                             job_day_offset=?,last_job_start_date=?
                         WHERE id=?
@@ -1422,6 +2253,7 @@ def page_schedule(user: dict) -> None:
                         (
                             employee_id,
                             job_id,
+                            job_stage_id,
                             to_date(edit_date).isoformat(),
                             edit_start.strftime("%H:%M"),
                             edit_finish.strftime("%H:%M"),
@@ -1542,6 +2374,14 @@ def page_leave(user: dict) -> None:
 
 def page_crew_suggestions(user: dict) -> None:
     st.title("Crew Suggestions")
+    result = st.session_state.pop("scheduler_clash_result", None)
+    if result:
+        if result.get("messages"):
+            pb_success(" | ".join(result["messages"]))
+        if result.get("errors"):
+            pb_error(" | ".join(result["errors"]))
+    suggestion_pending_key = "scheduler_suggestion_clashes"
+    render_tile_clash_choices(suggestion_pending_key, "crew-suggestion")
     st.caption(
         "JobHub compares job dates, estimator labour hours, existing allocations, leave, "
         "staff roles and current progress. Suggestions never alter the schedule until approved."
@@ -1716,19 +2556,47 @@ def page_crew_suggestions(user: dict) -> None:
             pb_error("Select at least one crew member.")
             return
         added = skipped = 0
+        suggestion_clashes: list[dict] = []
         for work_day in daterange(to_date(schedule_start), to_date(schedule_end)):
             if work_day.weekday() >= 5:
                 continue
             for name in crew:
                 employee_id = int(staff.loc[staff["name"] == name, "id"].iloc[0])
+                conflicts = overlapping_assignment_rows(
+                    employee_id, work_day, time(7, 0), time(15, 0),
+                )
+                if not conflicts.empty:
+                    job_record = jobs[jobs["id"].astype(int) == int(job_id)].iloc[0]
+                    suggestion_clashes.append({
+                        "employee_id": employee_id, "staff_name": name,
+                        "expected_conflict_ids": conflicts["id"].astype(int).tolist(),
+                        "job_id": job_id, "job_stage_id": None,
+                        "job_label": f"{job_record['job_no']} · {job_record['job_name']} — Whole Job",
+                        "work_date": work_day.isoformat(), "start_time": "07:00",
+                        "finish_time": "15:00", "planned_hours": float(hours),
+                        "site_role": "Site Work", "notes": "JobHub approved crew suggestion",
+                        "created_by": str(user.get("username", "")),
+                        "linked_to_job_dates": True,
+                    })
+                    continue
                 ok, _ = add_assignment(
-                    employee_id, job_id, work_day, time(7, 0), time(15, 0),
+                    employee_id, job_id, None, work_day, time(7, 0), time(15, 0),
                     float(hours), "Site Work", "JobHub approved crew suggestion",
                     str(user.get("username", "")), True,
                 )
                 added += int(ok)
                 skipped += int(not ok)
-        pb_success(f"Suggestion approved: {added} schedule entries added; {skipped} conflicts skipped.")
+        if suggestion_clashes:
+            st.session_state[suggestion_pending_key] = suggestion_clashes
+            st.session_state["scheduler_clash_result"] = {
+                "messages": [f"Added {added} non-conflicting suggested entries."] if added else [],
+                "errors": [f"Skipped {skipped} leave or validation issue(s)."] if skipped else [],
+            }
+            pb_rerun()
+        pb_success(
+            f"Suggestion approved: {added} schedule entries added; "
+            f"{skipped} leave or validation issue(s) skipped."
+        )
         pb_rerun()
 
 def page_sync() -> None:
@@ -1974,7 +2842,7 @@ def page_jobs_to_crew() -> None:
 
     summary = (
         assignments.groupby(
-            ["job_id", "job_no", "job_name", "builder", "address"],
+            ["job_id", "job_no", "job_name", "stage_name", "builder", "address"],
             dropna=False,
         )
         .agg(
@@ -1989,11 +2857,11 @@ def page_jobs_to_crew() -> None:
     summary["planned_hours"] = summary["planned_hours"].round(2)
 
     display = summary[
-        ["job_no", "job_name", "builder", "address", "Crew",
+        ["job_no", "job_name", "stage_name", "builder", "address", "Crew",
          "crew_count", "planned_hours", "first_date", "last_date"]
     ].copy()
     display.columns = [
-        "Job No", "Job", "Builder / Client", "Address", "Assigned Crew",
+        "Job No", "Job", "Stage", "Builder / Client", "Address", "Assigned Crew",
         "Crew Count", "Planned Hours", "First Date", "Last Date"
     ]
     st.subheader("Visual jobs → crew table")
@@ -2011,9 +2879,12 @@ def page_jobs_to_crew() -> None:
 
     st.subheader("Job-by-job detail")
     for _, job_row in summary.sort_values(["job_no", "job_name"]).iterrows():
-        job_assignments = assignments[assignments["job_id"] == job_row["job_id"]].copy()
+        job_assignments = assignments[
+            (assignments["job_id"] == job_row["job_id"])
+            & (assignments["stage_name"] == job_row["stage_name"])
+        ].copy()
         heading = (
-            f"{job_row['job_no']} · {job_row['job_name']} — "
+            f"{job_row['job_no']} · {job_row['job_name']} — {job_row['stage_name']} — "
             f"{int(job_row['crew_count'])} staff / {float(job_row['planned_hours']):,.1f} hrs"
         )
         with st.expander(heading, expanded=False):

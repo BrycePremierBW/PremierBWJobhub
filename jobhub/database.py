@@ -287,6 +287,82 @@ def init_db():
     """)
 
     cur.execute("""
+    CREATE TABLE IF NOT EXISTS job_purchase_orders (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_id INTEGER NOT NULL,
+        po_number TEXT NOT NULL,
+        description TEXT,
+        amount_ex_gst REAL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'Active',
+        received_date TEXT,
+        notes TEXT,
+        created_at TEXT,
+        updated_at TEXT,
+        UNIQUE(job_id, po_number),
+        FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
+    )
+    """)
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_job_purchase_orders_job "
+        "ON job_purchase_orders(job_id, po_number)"
+    )
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS job_stages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_id INTEGER NOT NULL,
+        purchase_order_id INTEGER,
+        stage_name TEXT NOT NULL,
+        sequence_order INTEGER NOT NULL DEFAULT 1,
+        job_percent REAL NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'Planned',
+        start_date TEXT,
+        end_date TEXT,
+        budget_hours REAL DEFAULT 0,
+        notes TEXT,
+        created_at TEXT,
+        updated_at TEXT,
+        UNIQUE(job_id, stage_name),
+        FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+        FOREIGN KEY(purchase_order_id) REFERENCES job_purchase_orders(id)
+    )
+    """)
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_job_stages_job_order "
+        "ON job_stages(job_id, sequence_order, id)"
+    )
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS job_stage_templates (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        template_name TEXT NOT NULL UNIQUE,
+        notes TEXT,
+        active INTEGER NOT NULL DEFAULT 1,
+        created_by TEXT,
+        created_at TEXT,
+        updated_at TEXT
+    )
+    """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS job_stage_template_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        template_id INTEGER NOT NULL,
+        stage_name TEXT NOT NULL,
+        sequence_order INTEGER NOT NULL DEFAULT 1,
+        job_percent REAL NOT NULL DEFAULT 0,
+        default_status TEXT NOT NULL DEFAULT 'Planned',
+        budget_hours REAL DEFAULT 0,
+        po_mode TEXT NOT NULL DEFAULT 'Unallocated',
+        notes TEXT,
+        FOREIGN KEY(template_id) REFERENCES job_stage_templates(id) ON DELETE CASCADE
+    )
+    """)
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_job_stage_template_items_order "
+        "ON job_stage_template_items(template_id, sequence_order, id)"
+    )
+
+    cur.execute("""
     CREATE TABLE IF NOT EXISTS products (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         product_code TEXT UNIQUE,
@@ -333,6 +409,9 @@ def init_db():
             existing_columns = [row[1] for row in cur.fetchall()]
             if column not in existing_columns:
                 cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+    ensure_column("job_stages", "purchase_order_id", "INTEGER")
+    ensure_column("job_stages", "job_percent", "REAL NOT NULL DEFAULT 0")
 
     ensure_column("material_entries", "custom_product_code", "TEXT")
     ensure_column("material_entries", "custom_product_name", "TEXT")
@@ -481,6 +560,7 @@ def init_db():
     CREATE TABLE IF NOT EXISTS timesheet_entries (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         job_id INTEGER NOT NULL,
+        job_stage_id INTEGER,
         employee_id INTEGER NOT NULL,
         work_date TEXT,
         start_time TEXT,
@@ -493,9 +573,12 @@ def init_db():
         status TEXT DEFAULT 'Submitted',
         notes TEXT,
         FOREIGN KEY(job_id) REFERENCES jobs(id),
+        FOREIGN KEY(job_stage_id) REFERENCES job_stages(id),
         FOREIGN KEY(employee_id) REFERENCES employees(id)
     )
     """)
+
+    ensure_column("timesheet_entries", "job_stage_id", "INTEGER")
     ensure_column("timesheet_entries", "period_type", "TEXT")
     ensure_column("timesheet_entries", "period_start", "TEXT")
     ensure_column("timesheet_entries", "period_end", "TEXT")
@@ -531,20 +614,80 @@ def init_db():
     )
     """)
 
+    ensure_column("estimate_working_sheets", "archived", "INTEGER DEFAULT 0")
+    ensure_column("estimate_working_sheets", "archived_at", "TEXT")
+    ensure_column("estimate_working_sheets", "archived_by", "TEXT")
+    ensure_column("estimate_working_sheets", "production_day_hours", "REAL DEFAULT 8")
+    ensure_column("estimate_working_sheets", "production_value_low", "REAL DEFAULT 800")
+    ensure_column("estimate_working_sheets", "production_value_target", "REAL DEFAULT 900")
+    ensure_column("estimate_working_sheets", "production_value_high", "REAL DEFAULT 1000")
+
     cur.execute("""
     CREATE TABLE IF NOT EXISTS estimate_line_items (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         estimate_id INTEGER NOT NULL,
+        job_stage_id INTEGER,
+        production_tracking_enabled INTEGER DEFAULT 1,
         section TEXT,
         item_description TEXT,
         qty REAL DEFAULT 0,
         unit TEXT,
         unit_rate REAL DEFAULT 0,
         line_total REAL DEFAULT 0,
+        estimated_labour_hours REAL DEFAULT 0,
+        material_allowance REAL DEFAULT 0,
+        substrate TEXT,
+        work_location TEXT,
+        coating_system TEXT,
+        colour_finish TEXT,
+        source_pack TEXT,
         notes TEXT,
+        FOREIGN KEY(estimate_id) REFERENCES estimate_working_sheets(id),
+        FOREIGN KEY(job_stage_id) REFERENCES job_stages(id)
+    )
+    """)
+
+    ensure_column("estimate_line_items", "job_stage_id", "INTEGER")
+    ensure_column("estimate_line_items", "production_tracking_enabled", "INTEGER DEFAULT 1")
+    for column, definition in [
+        ("estimated_labour_hours", "REAL DEFAULT 0"),
+        ("material_allowance", "REAL DEFAULT 0"),
+        ("substrate", "TEXT"),
+        ("work_location", "TEXT"),
+        ("coating_system", "TEXT"),
+        ("colour_finish", "TEXT"),
+        ("source_pack", "TEXT"),
+    ]:
+        ensure_column("estimate_line_items", column, definition)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_estimate_working_sheets_job_id ON estimate_working_sheets(job_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_estimate_line_items_estimate_id ON estimate_line_items(estimate_id)")
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_estimate_line_items_job_stage "
+        "ON estimate_line_items(job_stage_id)"
+    )
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS takeoff_pack_imports (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_id INTEGER NOT NULL,
+        pack_id TEXT NOT NULL,
+        revision TEXT NOT NULL,
+        source_file TEXT,
+        imported_at TEXT NOT NULL,
+        imported_by TEXT,
+        estimate_id INTEGER,
+        line_count INTEGER DEFAULT 0,
+        material_count INTEGER DEFAULT 0,
+        document_count INTEGER DEFAULT 0,
+        manifest_json TEXT,
+        UNIQUE(job_id, pack_id, revision),
+        FOREIGN KEY(job_id) REFERENCES jobs(id),
         FOREIGN KEY(estimate_id) REFERENCES estimate_working_sheets(id)
     )
     """)
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_takeoff_pack_imports_job "
+        "ON takeoff_pack_imports(job_id, imported_at)"
+    )
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS painting_takeoff_packages (
@@ -788,6 +931,103 @@ def init_db():
         FOREIGN KEY(job_id) REFERENCES jobs(id)
     )
     """)
+    ensure_column("job_photos", "job_stage_id", "INTEGER")
+    ensure_column("job_photos", "stage_progress_update_id", "INTEGER")
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS estimate_baselines (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_id INTEGER NOT NULL,
+        estimate_id INTEGER NOT NULL,
+        baseline_name TEXT NOT NULL,
+        estimate_no TEXT,
+        revision TEXT,
+        total_ex_gst REAL DEFAULT 0,
+        total_inc_gst REAL DEFAULT 0,
+        labour_hours REAL DEFAULT 0,
+        production_day_hours REAL DEFAULT 8,
+        production_value_target REAL DEFAULT 900,
+        active INTEGER NOT NULL DEFAULT 1,
+        locked_at TEXT NOT NULL,
+        locked_by TEXT,
+        notes TEXT,
+        FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+        FOREIGN KEY(estimate_id) REFERENCES estimate_working_sheets(id)
+    )
+    """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS estimate_baseline_lines (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        baseline_id INTEGER NOT NULL,
+        source_line_id INTEGER,
+        job_stage_id INTEGER,
+        stage_name TEXT,
+        section TEXT,
+        item_description TEXT,
+        qty REAL DEFAULT 0,
+        unit TEXT,
+        unit_rate REAL DEFAULT 0,
+        line_total REAL DEFAULT 0,
+        estimated_labour_hours REAL DEFAULT 0,
+        substrate TEXT,
+        work_location TEXT,
+        coating_system TEXT,
+        colour_finish TEXT,
+        source_pack TEXT,
+        production_tracking_enabled INTEGER DEFAULT 1,
+        notes TEXT,
+        FOREIGN KEY(baseline_id) REFERENCES estimate_baselines(id) ON DELETE CASCADE,
+        FOREIGN KEY(job_stage_id) REFERENCES job_stages(id)
+    )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_estimate_baselines_job_locked ON estimate_baselines(job_id, active, locked_at, id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_estimate_baseline_lines_stage ON estimate_baseline_lines(baseline_id, job_stage_id, id)")
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS stage_progress_updates (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_id INTEGER NOT NULL,
+        job_stage_id INTEGER,
+        estimate_line_item_id INTEGER,
+        update_date TEXT NOT NULL,
+        reported_by TEXT,
+        completed_quantity REAL DEFAULT 0,
+        unit TEXT,
+        unit_rate_snapshot REAL DEFAULT 0,
+        manual_progress_percent REAL,
+        crew_hours REAL DEFAULT 0,
+        crew_names TEXT,
+        work_type TEXT,
+        substrate TEXT,
+        coating_system TEXT,
+        blocker_type TEXT,
+        blocker_status TEXT DEFAULT 'None',
+        blocker_notes TEXT,
+        ready_for_inspection INTEGER DEFAULT 0,
+        notes TEXT,
+        created_at TEXT,
+        updated_at TEXT,
+        FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+        FOREIGN KEY(job_stage_id) REFERENCES job_stages(id),
+        FOREIGN KEY(estimate_line_item_id) REFERENCES estimate_line_items(id)
+    )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_stage_progress_updates_stage_date ON stage_progress_updates(job_id, job_stage_id, update_date, id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_stage_progress_updates_line ON stage_progress_updates(estimate_line_item_id, update_date, id)")
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS job_alert_acknowledgements (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_id INTEGER NOT NULL,
+        job_stage_id INTEGER,
+        alert_key TEXT NOT NULL,
+        acknowledged_at TEXT NOT NULL,
+        acknowledged_by TEXT,
+        notes TEXT,
+        UNIQUE(job_id, job_stage_id, alert_key),
+        FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+        FOREIGN KEY(job_stage_id) REFERENCES job_stages(id)
+    )
+    """)
    
     cur.execute("""
     CREATE TABLE IF NOT EXISTS app_users (
@@ -855,11 +1095,31 @@ def init_db():
         FOREIGN KEY(job_id) REFERENCES jobs(id)
     )
     """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS invoice_claim_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        invoice_claim_id INTEGER NOT NULL,
+        job_stage_id INTEGER,
+        purchase_order_id INTEGER,
+        stage_name TEXT,
+        job_percent REAL DEFAULT 0,
+        progress_percent REAL DEFAULT 0,
+        stage_value_ex_gst REAL DEFAULT 0,
+        previously_claimed_ex_gst REAL DEFAULT 0,
+        amount_ex_gst REAL DEFAULT 0,
+        notes TEXT,
+        FOREIGN KEY(invoice_claim_id) REFERENCES invoice_claims(id) ON DELETE CASCADE,
+        FOREIGN KEY(job_stage_id) REFERENCES job_stages(id),
+        FOREIGN KEY(purchase_order_id) REFERENCES job_purchase_orders(id)
+    )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_invoice_claim_items_stage ON invoice_claim_items(job_stage_id, invoice_claim_id)")
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS staff_schedule (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         job_id INTEGER,
+        job_stage_id INTEGER,
         employee_id INTEGER,
         schedule_date TEXT,
         start_time TEXT,
@@ -868,9 +1128,19 @@ def init_db():
         notes TEXT,
         created_at TEXT,
         FOREIGN KEY(job_id) REFERENCES jobs(id),
+        FOREIGN KEY(job_stage_id) REFERENCES job_stages(id),
         FOREIGN KEY(employee_id) REFERENCES employees(id)
     )
     """)
+    ensure_column("staff_schedule", "job_stage_id", "INTEGER")
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_timesheet_entries_job_stage "
+        "ON timesheet_entries(job_id, job_stage_id)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_staff_schedule_job_stage "
+        "ON staff_schedule(job_id, job_stage_id)"
+    )
     ensure_column("staff_schedule", "period_type", "TEXT")
     ensure_column("staff_schedule", "period_start", "TEXT")
     ensure_column("staff_schedule", "period_end", "TEXT")
@@ -912,6 +1182,66 @@ def init_db():
         note TEXT,
         source TEXT,
         created_at TEXT
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS app_notifications (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        recipient_user_id INTEGER NOT NULL,
+        event_type TEXT,
+        title TEXT,
+        message TEXT,
+        job_id INTEGER,
+        entity_type TEXT,
+        entity_id TEXT,
+        created_by TEXT,
+        created_at TEXT NOT NULL,
+        read_at TEXT,
+        FOREIGN KEY(recipient_user_id) REFERENCES app_users(id),
+        FOREIGN KEY(job_id) REFERENCES jobs(id)
+    )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_app_notifications_recipient_unread ON app_notifications(recipient_user_id, read_at, created_at)")
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS staff_requests (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        requested_by_user_id INTEGER,
+        employee_id INTEGER NOT NULL,
+        job_id INTEGER,
+        job_stage_id INTEGER,
+        request_type TEXT NOT NULL,
+        title TEXT NOT NULL,
+        instructions TEXT,
+        priority TEXT NOT NULL DEFAULT 'Normal',
+        due_at TEXT,
+        status TEXT NOT NULL DEFAULT 'Requested',
+        response_notes TEXT,
+        response_entity_type TEXT,
+        response_entity_id TEXT,
+        requested_at TEXT NOT NULL,
+        completed_at TEXT,
+        completed_by TEXT,
+        FOREIGN KEY(requested_by_user_id) REFERENCES app_users(id),
+        FOREIGN KEY(employee_id) REFERENCES employees(id),
+        FOREIGN KEY(job_id) REFERENCES jobs(id),
+        FOREIGN KEY(job_stage_id) REFERENCES job_stages(id)
+    )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_staff_requests_employee_status ON staff_requests(employee_id, status, due_at, id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_staff_requests_job_stage ON staff_requests(job_id, job_stage_id, requested_at)")
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS push_notification_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        recipient_user_id INTEGER,
+        staff_request_id INTEGER,
+        provider TEXT,
+        delivery_status TEXT,
+        provider_message_id TEXT,
+        response_text TEXT,
+        sent_at TEXT,
+        FOREIGN KEY(recipient_user_id) REFERENCES app_users(id),
+        FOREIGN KEY(staff_request_id) REFERENCES staff_requests(id)
     )
     """)
 
@@ -1215,4 +1545,3 @@ def seed_data():
 
     conn.commit()
     conn.close()
-

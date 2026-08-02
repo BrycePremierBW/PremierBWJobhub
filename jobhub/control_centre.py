@@ -111,7 +111,6 @@ def pb_job_cost_frame():
                COALESCE(quoted_access_equipment, 0) AS 'Budget Access',
                COALESCE(quoted_subcontractors, 0) AS 'Budget Subcontractors',
                COALESCE(quoted_sundries, 0) AS 'Budget Sundries',
-               COALESCE(target_gp_percent, 35) AS 'Target GP %',
                locked_at AS 'Budget Locked'
         FROM job_budgets
     """)
@@ -143,7 +142,7 @@ def pb_job_cost_frame():
         "Contract Value", "Material Cost", "Material Qty Required", "Material Qty Received", "Material Lines",
         "Wage Hours", "Labour Cost", "Timesheet Hours", "Timesheet Lines", "Budget Labour Hours",
         "Budget Labour Cost", "Budget Materials", "Budget Access", "Budget Subcontractors", "Budget Sundries",
-        "Target GP %", "Variation Value", "Approved Variation Value", "Variation Count", "Claimed Amount",
+        "Variation Value", "Approved Variation Value", "Variation Count", "Claimed Amount",
         "Paid Amount", "Claim Count"
     ]
     for col in numeric_cols:
@@ -172,17 +171,13 @@ def pb_job_cost_frame():
     def health(row):
         today = date.today()
         issues = []
-        gp = pb_float(row["Gross Profit %"])
         cost_pct = pb_float(row["Cost to Date %"])
-        target_gp = pb_float(row["Target GP %"], 35)
         end = pb_date(row["End Date"])
 
         if pb_float(row["Adjusted Contract Value"]) <= 0:
             issues.append("No contract value")
         if row["Budget Locked"] in [None, ""]:
             issues.append("Budget not locked")
-        if gp < target_gp:
-            issues.append("GP below target")
         if cost_pct > 85 and str(row["Status"]).lower() not in ["complete", "completed", "closed", "archived"]:
             issues.append("Cost high")
         if end and end < today and str(row["Status"]).lower() not in ["complete", "completed", "closed", "archived"]:
@@ -314,7 +309,8 @@ def pb_control_budget_lock(df):
         quoted_subbies = c5.number_input("Subcontractor Allowance", min_value=0.0, value=pb_float(current.get("quoted_subcontractors", 0)), step=100.0)
         quoted_sundries = c6.number_input("Sundries / Consumables", min_value=0.0, value=pb_float(current.get("quoted_sundries", 0)), step=50.0)
 
-        target_gp = st.number_input("Target GP %", min_value=0.0, max_value=100.0, value=pb_float(current.get("target_gp_percent", 35), 35), step=1.0)
+        target_gp = 0.0
+        st.caption("The $900 completed-work target already includes profit; no GP percentage is added.")
         notes = st.text_area("Budget Notes", value=str(current.get("notes", "") or ""))
         submitted = st.form_submit_button("Save / Lock Job Budget")
 
@@ -345,7 +341,6 @@ def pb_control_budget_lock(df):
                b.quoted_access_equipment AS 'Access',
                b.quoted_subcontractors AS 'Subcontractors',
                b.quoted_sundries AS 'Sundries',
-               b.target_gp_percent AS 'Target GP %',
                b.locked_at AS 'Locked At',
                b.locked_by AS 'Locked By'
         FROM job_budgets b
