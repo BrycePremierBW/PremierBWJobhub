@@ -9,9 +9,13 @@ matching rules independent of Streamlit so they are easy to test.
 from __future__ import annotations
 
 from difflib import SequenceMatcher
+import io
+from pathlib import PurePosixPath
 import re
+import sys
 import unicodedata
 from typing import Any, Iterable, Mapping
+import zipfile
 
 
 _ADDRESS_TOKENS = {
@@ -60,6 +64,150 @@ _LOCALITY_CORRECTIONS = {
     "maroochydoore": "maroochydore",
     "glasshouse": "glass house",
 }
+
+_JOB_PACK_MANIFEST = "job_manifest.json"
+_NESTED_JOB_PACK_LIMIT = 100
+_MAX_NESTED_PACK_BYTES = 200 * 1024 * 1024
+
+
+class NestedJobPackUpload:
+    """Small UploadedFile-compatible wrapper for a Job Pack found inside a ZIP."""
+
+    def __init__(self, name: str, content: bytes):
+        self.name = name
+        self.size = len(content)
+        self.type = "application/zip"
+        self._buffer = io.BytesIO(content)
+
+    def read(self, *args):
+        return self._buffer.read(*args)
+
+    def seek(self, *args):
+        return self._buffer.seek(*args)
+
+    def tell(self):
+        return self._buffer.tell()
+
+    def getvalue(self):
+        return self._buffer.getvalue()
+
+    def getbuffer(self):
+        return self._buffer.getbuffer()
+
+
+def _uploaded_bytes(uploaded_file: Any) -> bytes:
+    position = None
+    try:
+        position = uploaded_file.tell()
+    except Exception:
+        position = None
+    try:
+        uploaded_file.seek(0)
+    except Exception:
+        pass
+    try:
+        data = uploaded_file.read()
+    finally:
+        if position is not None:
+            try:
+                uploaded_file.seek(position)
+            except Exception:
+                pass
+    return data or b""
+
+
+def _is_zip_with_job_manifest(content: bytes) -> bool:
+    if not content:
+        return False
+    try:
+        with zipfile.ZipFile(io.BytesIO(content)) as archive:
+            return any(PurePosixPath(name).name == _JOB_PACK_MANIFEST for name in archive.namelist())
+    except (OSError, zipfile.BadZipFile):
+        return False
+
+
+def _nested_job_pack_uploads(uploaded_file: Any) -> list[NestedJobPackUpload]:
+    """Return inner Job Pack ZIPs when a user uploads one master archive.
+
+    A normal JobHub Job Pack already contains ``job_manifest.json``.  A batch
+    archive contains several inner ``*_JobHub_Import.zip`` files.  This helper
+    safely detects the batch case without extracting files to disk.
+    """
+    outer_content = _uploaded_bytes(uploaded_file)
+    if not outer_content or _is_zip_with_job_manifest(outer_content):
+        return []
+
+    try:
+        with zipfile.ZipFile(io.BytesIO(outer_content)) as archive:
+            uploads: list[NestedJobPackUpload] = []
+            for info in archive.infolist():
+                if len(uploads) >= _NESTED_JOB_PACK_LIMIT:
+                    break
+                if info.is_dir() or not info.filename.casefold().endswith(".zip"):
+                    continue
+                if info.flag_bits & 0x1:
+                    continue
+                if int(info.file_size or 0) > _MAX_NESTED_PACK_BYTES:
+                    continue
+                name = PurePosixPath(info.filename).name
+                content = archive.read(info)
+                if _is_zip_with_job_manifest(content):
+                    uploads.append(NestedJobPackUpload(name, content))
+            return sorted(uploads, key=lambda item: item.name.casefold())
+    except (OSError, zipfile.BadZipFile):
+        return []
+
+
+def expand_nested_job_pack_uploads(uploaded_files: Any) -> Any:
+    """Expand a master ZIP into the inner Job Pack ZIPs for the import page."""
+    if not uploaded_files:
+        return uploaded_files
+
+    single_upload = not isinstance(uploaded_files, (list, tuple))
+    uploads = [uploaded_files] if single_upload else list(uploaded_files)
+    expanded: list[Any] = []
+    changed = False
+
+    for upload in uploads:
+        nested = _nested_job_pack_uploads(upload)
+        if nested:
+            expanded.extend(nested)
+            changed = True
+        else:
+            expanded.append(upload)
+
+    if single_upload and not changed:
+        return uploaded_files
+    return expanded
+
+
+def install_nested_job_pack_uploader() -> bool:
+    """Patch only the Job Pack upload widget to accept a master ZIP.
+
+    The main app imports this module after importing Streamlit.  Tests and other
+    non-Streamlit code can import the matching helpers without pulling Streamlit
+    in or changing global behaviour.
+    """
+    streamlit_module = sys.modules.get("streamlit")
+    if streamlit_module is None:
+        return False
+    original = getattr(streamlit_module, "file_uploader", None)
+    if original is None or getattr(original, "_pb_nested_job_pack_wrapper", False):
+        return False
+
+    def pb_nested_job_pack_file_uploader(*args, **kwargs):
+        uploaded = original(*args, **kwargs)
+        if kwargs.get("key") == "takeoff_job_pack_upload":
+            return expand_nested_job_pack_uploads(uploaded)
+        return uploaded
+
+    pb_nested_job_pack_file_uploader._pb_nested_job_pack_wrapper = True
+    pb_nested_job_pack_file_uploader._pb_original_file_uploader = original
+    streamlit_module.file_uploader = pb_nested_job_pack_file_uploader
+    return True
+
+
+install_nested_job_pack_uploader()
 
 
 def _ascii_words(value: Any) -> list[str]:
