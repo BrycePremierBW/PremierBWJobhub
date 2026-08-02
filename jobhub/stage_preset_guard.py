@@ -1,30 +1,61 @@
 """Stage preset helpers for Premier Brushworks JobHub.
 
-This guard keeps the stage workflow safe by adding the requested Premier
-Brushworks stage presets to the existing Add Stage form. The stage form uses
-Streamlit column widgets (``a1.text_input`` / ``a3.number_input``), so this
-module patches both the top-level ``st`` helpers and DeltaGenerator column
-methods.
+This guard keeps the stage workflow safe by adding Premier Brushworks stage
+presets to the existing Add Stage form. The stage form uses Streamlit column
+widgets (``a1.text_input`` / ``a3.number_input``), so this module patches both
+the top-level ``st`` helpers and DeltaGenerator column methods.
 """
 
 from __future__ import annotations
 
 import sys
+from dataclasses import dataclass
 from typing import Any, Callable
 
 
-STAGE_PRESET_SECTIONS: dict[str, list[tuple[str, float]]] = {
-    "Internal": [
-        ("Internal prep and spray Sealer", 30.0),
-        ("prep and spray finish coats", 30.0),
-        ("cut and roll walls and paint doors", 30.0),
-        ("touch ups", 10.0),
-    ],
-    "External": [
-        ("upper scaff work", 45.0),
-        ("lower", 45.0),
-        ("touch ups", 10.0),
-    ],
+@dataclass(frozen=True)
+class StagePreset:
+    label: str
+    stage_name: str
+    percent: float
+
+
+SIMPLE_STAGE_PRESETS: list[StagePreset] = [
+    StagePreset("All / whole job — 100%", "Whole job", 100.0),
+    StagePreset("Internal — 100%", "Internal", 100.0),
+    StagePreset("External — 100%", "External", 100.0),
+]
+
+INTERNAL_STAGE_PRESETS: list[StagePreset] = [
+    StagePreset("Internal — 100%", "Internal", 100.0),
+    StagePreset("Internal prep and spray Sealer — 30%", "Internal prep and spray Sealer", 30.0),
+    StagePreset("prep and spray finish coats — 30%", "prep and spray finish coats", 30.0),
+    StagePreset("cut and roll walls and paint doors — 30%", "cut and roll walls and paint doors", 30.0),
+    StagePreset("touch ups — 10%", "touch ups", 10.0),
+]
+
+EXTERNAL_STAGE_PRESETS: list[StagePreset] = [
+    StagePreset("External — 100%", "External", 100.0),
+    StagePreset("upper scaff work — 45%", "upper scaff work", 45.0),
+    StagePreset("lower — 45%", "lower", 45.0),
+    StagePreset("touch ups — 10%", "touch ups", 10.0),
+]
+
+ALL_STAGE_PRESETS: list[StagePreset] = [
+    *SIMPLE_STAGE_PRESETS,
+    StagePreset("Internal prep and spray Sealer — 30%", "Internal prep and spray Sealer", 30.0),
+    StagePreset("prep and spray finish coats — 30%", "prep and spray finish coats", 30.0),
+    StagePreset("cut and roll walls and paint doors — 30%", "cut and roll walls and paint doors", 30.0),
+    StagePreset("Internal touch ups — 10%", "touch ups", 10.0),
+    StagePreset("upper scaff work — 45%", "upper scaff work", 45.0),
+    StagePreset("lower — 45%", "lower", 45.0),
+    StagePreset("External touch ups — 10%", "touch ups", 10.0),
+]
+
+STAGE_PRESET_SECTIONS: dict[str, list[StagePreset]] = {
+    "All": ALL_STAGE_PRESETS,
+    "Internal": INTERNAL_STAGE_PRESETS,
+    "External": EXTERNAL_STAGE_PRESETS,
 }
 
 ADD_CUSTOM_STAGE = "Add item not listed"
@@ -56,17 +87,24 @@ def _stage_sections() -> list[str]:
     return list(STAGE_PRESET_SECTIONS.keys())
 
 
+def _presets_for_section(section: str) -> list[StagePreset]:
+    return STAGE_PRESET_SECTIONS.get(section) or STAGE_PRESET_SECTIONS["All"]
+
+
 def _preset_labels(section: str) -> list[str]:
-    presets = STAGE_PRESET_SECTIONS.get(section) or STAGE_PRESET_SECTIONS["Internal"]
-    return [name for name, _ in presets] + [ADD_CUSTOM_STAGE]
+    return [preset.label for preset in _presets_for_section(section)] + [ADD_CUSTOM_STAGE]
 
 
-def _preset_percent(stage_name: str, section: str | None = None) -> float | None:
-    sections = [section] if section in STAGE_PRESET_SECTIONS else _stage_sections()
-    for section_name in sections:
-        for preset_name, percent in STAGE_PRESET_SECTIONS[section_name]:
-            if stage_name == preset_name:
-                return percent
+def _preset_for_choice(section: str, choice: str) -> StagePreset | None:
+    for preset in _presets_for_section(section):
+        if choice == preset.label or choice == preset.stage_name:
+            return preset
+    # If state holds a label from another section after a rerun, still resolve it
+    # before the selector normalises on the next render.
+    for presets in STAGE_PRESET_SECTIONS.values():
+        for preset in presets:
+            if choice == preset.label or choice == preset.stage_name:
+                return preset
     return None
 
 
@@ -82,12 +120,12 @@ def _normalise_stage_state(st: Any, section: str) -> None:
 
 
 def _sync_percent_state(st: Any, section: str, choice: str) -> None:
-    percent = _preset_percent(choice, section)
+    preset = _preset_for_choice(section, choice)
     state_key = f"{section}:{choice}"
     if st.session_state.get(_LAST_STAGE_CHOICE_KEY) != state_key:
-        if percent is not None:
-            st.session_state[_STAGE_PERCENT_KEY] = float(percent)
-            st.session_state["pb_stage_preset_selected_percent"] = float(percent)
+        if preset is not None:
+            st.session_state[_STAGE_PERCENT_KEY] = float(preset.percent)
+            st.session_state["pb_stage_preset_selected_percent"] = float(preset.percent)
         elif choice == ADD_CUSTOM_STAGE:
             st.session_state[_STAGE_PERCENT_KEY] = float(
                 st.session_state.get(_STAGE_PERCENT_KEY, 0.0) or 0.0
@@ -104,38 +142,41 @@ def _render_stage_name_selector(
 ) -> str:
     if callable(caption_fn):
         caption_fn(
-            "Stage section: choose Internal or External, then select a standard "
-            "Premier Brushworks stage or choose Add item not listed."
+            "Stage section: choose All, Internal or External. Use the 100% Internal/External/Whole job "
+            "options when a job does not need detailed stage breakdowns."
         )
 
     section_options = _stage_sections()
-    current_section = str(st.session_state.get(_STAGE_SECTION_KEY) or "Internal")
+    current_section = str(st.session_state.get(_STAGE_SECTION_KEY) or "All")
     if current_section not in section_options:
-        current_section = "Internal"
+        current_section = "All"
         st.session_state[_STAGE_SECTION_KEY] = current_section
     section = selectbox_fn(
         "Stage section",
         section_options,
         index=section_options.index(current_section),
         key=_STAGE_SECTION_KEY,
-        help="Internal shows sealer, finish coats, walls/doors and touch-ups. External shows upper scaffold, lower and touch-ups.",
+        help="All shows simple 100% options and all detailed stages. Internal and External narrow the list.",
     )
 
-    _normalise_stage_state(st, str(section))
-    labels = _preset_labels(str(section))
+    section = str(section)
+    _normalise_stage_state(st, section)
+    labels = _preset_labels(section)
     choice = selectbox_fn(
         "Stage selection",
         labels,
         index=labels.index(st.session_state.get(_STAGE_CHOICE_KEY, labels[0])),
         key=_STAGE_CHOICE_KEY,
-        help="The selected stage automatically fills the Job % allowance.",
+        help="Pick a simple 100% stage or a detailed preset. Add item not listed lets you type a custom stage.",
     )
-    st.session_state["pb_stage_preset_selected_section"] = str(section)
-    st.session_state["pb_stage_preset_selected_name"] = str(choice)
-    _sync_percent_state(st, str(section), str(choice))
+    choice = str(choice)
+    preset = _preset_for_choice(section, choice)
+    st.session_state["pb_stage_preset_selected_section"] = section
+    st.session_state["pb_stage_preset_selected_name"] = choice
+    _sync_percent_state(st, section, choice)
 
-    if _preset_percent(str(choice), str(section)) is not None:
-        return str(choice)
+    if preset is not None:
+        return preset.stage_name
     return str(
         text_input_fn(
             "Custom Stage Name",
@@ -148,17 +189,17 @@ def _render_stage_name_selector(
 
 
 def _stage_percent_kwargs(st: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
-    section = str(st.session_state.get("pb_stage_preset_selected_section") or "Internal")
+    section = str(st.session_state.get("pb_stage_preset_selected_section") or "All")
     selected = str(st.session_state.get("pb_stage_preset_selected_name") or "")
-    percent = _preset_percent(selected, section)
+    preset = _preset_for_choice(section, selected)
     new_kwargs = dict(kwargs)
     new_kwargs.setdefault("key", _STAGE_PERCENT_KEY)
-    if percent is not None:
+    if preset is not None:
         _sync_percent_state(st, section, selected)
-        new_kwargs["value"] = float(percent)
+        new_kwargs["value"] = float(preset.percent)
         new_kwargs.setdefault(
             "help",
-            "Auto-filled from the selected standard stage. You can still change it before saving.",
+            "Auto-filled from the selected stage preset. You can still change it before saving.",
         )
     elif selected == ADD_CUSTOM_STAGE:
         new_kwargs.setdefault("help", "Enter the job percentage for the custom stage.")
