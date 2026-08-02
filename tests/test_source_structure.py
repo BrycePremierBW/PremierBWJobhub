@@ -86,6 +86,7 @@ class SourceStructureTests(unittest.TestCase):
             self.assertIn(label, source)
         self.assertIn("def save_operating_settings", source)
         self.assertIn("overhead_recovery_metrics", source)
+        self.assertIn("today_text = jobhub_today().isoformat()", source)
         self.assertIn("def pb_dashboard_navigation_tile", source)
         self.assertIn("def pb_dashboard_widget_link", source)
         for target in (

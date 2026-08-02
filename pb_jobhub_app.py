@@ -22,6 +22,7 @@ from psycopg2.pool import ThreadedConnectionPool
 from pypdf import PdfReader, PdfWriter
 import streamlit as st
 from jobhub_feedback import error as pb_error, replay_pending as pb_replay_pending, rerun as pb_rerun, success as pb_success
+from jobhub_time import jobhub_today
 from pb_jobhub_visual_scheduler import (
     init_linked_schema,
     render_job_folder_schedule_editor,
@@ -15016,7 +15017,7 @@ def dashboard_job_progress(active_jobs):
 def render_operational_dashboard():
     """Render the widget-based management dashboard."""
     st.subheader("Operations Dashboard")
-    today_text = str(date.today())
+    today_text = jobhub_today().isoformat()
     closed_statuses = ["complete", "completed", "closed", "paid", "archived"]
 
     active_jobs = safe_df_query(

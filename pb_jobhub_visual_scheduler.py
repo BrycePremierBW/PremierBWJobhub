@@ -14,6 +14,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 from jobhub_feedback import error as pb_error, replay_pending as pb_replay_pending, rerun as pb_rerun, success as pb_success
+from jobhub_time import jobhub_today
 
 try:
     import psycopg2
@@ -446,7 +447,7 @@ def daterange(start: date, end: date) -> Iterator[date]:
 
 def to_date(value, default: date | None = None) -> date:
     if value in (None, "", pd.NaT):
-        return default or date.today()
+        return default or jobhub_today()
     if isinstance(value, date) and not isinstance(value, datetime):
         return value
     return pd.to_datetime(value).date()
@@ -465,8 +466,8 @@ def time_value(value, default=time(7, 0)) -> time:
 
 
 def calculated_hours(start_text: str, finish_text: str) -> float:
-    start_dt = datetime.combine(date.today(), time_value(start_text))
-    finish_dt = datetime.combine(date.today(), time_value(finish_text))
+    start_dt = datetime.combine(jobhub_today(), time_value(start_text))
+    finish_dt = datetime.combine(jobhub_today(), time_value(finish_text))
     if finish_dt <= start_dt:
         return 0.0
     return round((finish_dt - start_dt).total_seconds() / 3600, 2)
@@ -1743,7 +1744,7 @@ def sidebar(user: dict) -> str:
 
 def page_dashboard() -> None:
     st.title("Staff Scheduler Dashboard")
-    selected = st.date_input("Week commencing", value=week_start(date.today()))
+    selected = st.date_input("Week commencing", value=week_start(jobhub_today()))
     start = week_start(to_date(selected))
     end = start + timedelta(days=6)
     assignments = assignment_rows(start, end)
@@ -1896,7 +1897,7 @@ def page_schedule(user: dict) -> None:
         return
 
     c1, c2 = st.columns(2)
-    selected = c1.date_input("Board week", value=week_start(date.today()))
+    selected = c1.date_input("Board week", value=week_start(jobhub_today()))
     display_days = c2.selectbox("Board range", [7, 14, 21, 28], index=1, format_func=lambda x: f"{x} days")
     start = week_start(to_date(selected))
     end = start + timedelta(days=display_days - 1)
@@ -2313,8 +2314,8 @@ def page_leave(user: dict) -> None:
         with st.form("manager_leave_request"):
             employee_name = st.selectbox("Employee", staff["name"].tolist())
             c1, c2, c3 = st.columns(3)
-            start_date = c1.date_input("Start date", value=date.today())
-            end_date = c2.date_input("End date", value=date.today())
+            start_date = c1.date_input("Start date", value=jobhub_today())
+            end_date = c2.date_input("End date", value=jobhub_today())
             leave_type = c3.selectbox("Leave type", ["Annual Leave", "Personal Leave", "RDO", "Unpaid Leave", "Other"])
             reason = st.text_area("Reason / notes")
             status = st.selectbox("Initial status", ["Pending", "Approved"], index=0)
@@ -2404,7 +2405,7 @@ def page_crew_suggestions(user: dict) -> None:
         "JobHub compares job dates, estimator labour hours, existing allocations, leave, "
         "staff roles and current progress. Suggestions never alter the schedule until approved."
     )
-    start = to_date(st.date_input("Suggestion period starts", value=date.today()))
+    start = to_date(st.date_input("Suggestion period starts", value=jobhub_today()))
     days = st.selectbox("Planning range", [7, 14, 21, 28], index=1, format_func=lambda x: f"{x} days")
     end = start + timedelta(days=int(days) - 1)
     staff = active_staff()
@@ -2688,8 +2689,8 @@ def page_sync() -> None:
 
 def page_export() -> None:
     st.title("Export Shared Scheduling Data")
-    start = st.date_input("Start date", value=week_start(date.today()))
-    end = st.date_input("End date", value=week_start(date.today()) + timedelta(days=27))
+    start = st.date_input("Start date", value=week_start(jobhub_today()))
+    end = st.date_input("End date", value=week_start(jobhub_today()) + timedelta(days=27))
     if to_date(end) < to_date(start):
         pb_error("End date must be on or after start date.")
         return
@@ -2719,7 +2720,7 @@ def page_my_schedule(user: dict) -> None:
     if not employee_id:
         st.warning("Your JobHub account is not linked to an employee record. Ask an administrator to link it.")
         return
-    selected = st.date_input("Week commencing", value=week_start(date.today()))
+    selected = st.date_input("Week commencing", value=week_start(jobhub_today()))
     start = week_start(to_date(selected))
     end = start + timedelta(days=13)
     assignments = assignment_rows(start, end, int(employee_id))
@@ -2740,8 +2741,8 @@ def page_my_leave(user: dict) -> None:
         return
     with st.form("employee_leave_request"):
         c1, c2, c3 = st.columns(3)
-        start_date = c1.date_input("Start date", value=date.today())
-        end_date = c2.date_input("End date", value=date.today())
+        start_date = c1.date_input("Start date", value=jobhub_today())
+        end_date = c2.date_input("End date", value=jobhub_today())
         leave_type = c3.selectbox("Leave type", ["Annual Leave", "Personal Leave", "RDO", "Unpaid Leave", "Other"])
         reason = st.text_area("Reason / notes")
         submit = st.form_submit_button("Submit request", type="primary", width="stretch")
@@ -2827,10 +2828,10 @@ def main() -> None:
 
 def _scheduler_date_range(key_prefix: str, default_days: int = 13) -> tuple[date, date]:
     c1, c2 = st.columns(2)
-    start = c1.date_input("From", value=week_start(date.today()), key=f"{key_prefix}_from")
+    start = c1.date_input("From", value=week_start(jobhub_today()), key=f"{key_prefix}_from")
     end = c2.date_input(
         "To",
-        value=week_start(date.today()) + timedelta(days=default_days),
+        value=week_start(jobhub_today()) + timedelta(days=default_days),
         key=f"{key_prefix}_to",
     )
     start_date = to_date(start)
@@ -3065,7 +3066,7 @@ def render_job_folder_schedule_editor(job_id: int, user: dict | None = None) -> 
     with add_tab:
         pending_key = f"job_folder_add_clashes_{job_id}"
         if not render_tile_clash_choices(pending_key, f"job-folder-{job_id}"):
-            job_start = to_date(job.iloc[0].get("start_date"), date.today())
+            job_start = to_date(job.iloc[0].get("start_date"), jobhub_today())
             with st.form(f"job_folder_schedule_add_{job_id}"):
                 a1, a2, a3 = st.columns(3)
                 selected_staff = a1.multiselect("Employees", staff["name"].astype(str).tolist())
