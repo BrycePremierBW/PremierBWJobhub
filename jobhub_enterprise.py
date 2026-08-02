@@ -29,6 +29,8 @@ from typing import Any, Callable
 import pandas as pd
 import streamlit as st
 
+from jobhub_production import remaining_contract_labour
+
 ENTERPRISE_BUILD = "2026.07.27-enterprise-foundation-v1"
 PLANNING_LABOUR_RATE = 60.0
 
@@ -583,14 +585,30 @@ def enterprise_job_cost_dataframe(ctx: dict[str, Any]) -> pd.DataFrame:
         + result["Budget Subcontractors"] + result["Budget Sundries"]
     )
     result["Actual Material Cost"] = result[["received_material_cost", "supplier_invoiced"]].max(axis=1)
+    result["Material Commitment"] = result[[
+        "Budget Materials", "committed_material_cost", "received_material_cost",
+        "po_committed", "po_approved", "supplier_invoiced",
+    ]].max(axis=1)
     result["Cost to Date"] = result["actual_labour_cost"] + result["Actual Material Cost"]
 
     progress_fraction = (result["physical_progress"] / 100).clip(lower=0, upper=1)
-    remaining_budget_hours = (result["Budget Labour Hours"] - result["actual_labour_hours"]).clip(lower=0)
-    result["Forecast Remaining Labour Hours"] = result["manual_remaining_hours"].where(
-        result["manual_remaining_hours"] > 0,
-        remaining_budget_hours,
+    contract_labour = result.apply(
+        lambda row: remaining_contract_labour(
+            contract_value=row["Revised Contract"],
+            actual_labour_hours=row["actual_labour_hours"],
+            material_commitment=row["Material Commitment"],
+            access_allowance=row["Budget Access"],
+            subcontractor_allowance=row["Budget Subcontractors"],
+            sundries_allowance=row["Budget Sundries"],
+        ),
+        axis=1,
     )
+    result["Contract Labour Hours"] = contract_labour.map(lambda item: item["allowed_labour_hours"])
+    result["Contract Labour Work Value"] = contract_labour.map(lambda item: item["labour_work_value"])
+    result["Used Labour Work Value"] = contract_labour.map(lambda item: item["used_labour_work_value"])
+    result["Remaining Labour Work Value"] = contract_labour.map(lambda item: item["remaining_labour_work_value"])
+    result["Forecast Remaining Labour Hours"] = contract_labour.map(lambda item: item["remaining_labour_hours"])
+    result["Hours Over Contract Allowance"] = contract_labour.map(lambda item: item["hours_over_allowance"])
     result["Forecast Labour Cost"] = (
         result["actual_labour_cost"]
         + result["Forecast Remaining Labour Hours"] * PLANNING_LABOUR_RATE
@@ -608,7 +626,7 @@ def enterprise_job_cost_dataframe(ctx: dict[str, Any]) -> pd.DataFrame:
         result["Forecast Profit"] / result["Revised Contract"].replace(0, float("nan")) * 100
     ).fillna(0)
     result["Labour Used %"] = (
-        result["actual_labour_hours"] / result["Budget Labour Hours"].replace(0, float("nan")) * 100
+        result["actual_labour_hours"] / result["Contract Labour Hours"].replace(0, float("nan")) * 100
     ).fillna(0)
     result["Billing %"] = (
         result["claimed"] / result["Revised Contract"].replace(0, float("nan")) * 100
@@ -683,6 +701,13 @@ def render_job_control(ctx: dict[str, Any]) -> None:
     m4.metric("Forecast GP", f"{_f(row['Forecast GP %']):.1f}%")
     m5.metric("Risk", _clean(row["Risk"]))
 
+    h1, h2, h3, h4, h5 = st.columns(5)
+    h1.metric("Hours remaining", f"{_f(row['Forecast Remaining Labour Hours']):,.1f} h")
+    h2.metric("Contract labour allowance", f"{_f(row['Contract Labour Hours']):,.1f} h")
+    h3.metric("Timesheet hours used", f"{_f(row['actual_labour_hours']):,.1f} h")
+    h4.metric("Materials reserved", _money(row["Material Commitment"]))
+    h5.metric("Work target", "$125 / hour")
+
     if row["Risk"] in {"Critical", "Needs contract value"}:
         st.error(f"This job is flagged: {row['Risk']}.")
     elif row["Risk"] in {"Watch", "Labour ahead of progress", "Needs progress update"}:
@@ -702,11 +727,11 @@ def render_job_control(ctx: dict[str, Any]) -> None:
                 1.0,
                 format="%.0f%%",
             )
-            remaining = st.number_input(
-                "Forecast labour hours still required",
-                min_value=0.0,
-                value=float(max(0, _f(row["Forecast Remaining Labour Hours"]))),
-                step=1.0,
+            remaining = float(max(0, _f(row["Forecast Remaining Labour Hours"])))
+            st.metric("Automatically calculated labour hours remaining", f"{remaining:,.1f} h")
+            st.caption(
+                "Revised contract, less the strongest known material commitment and other "
+                "non-labour allowances, divided by $125 per painter-hour, less timesheet hours used."
             )
             finish = st.date_input("Forecast completion date", value=date.today()).isoformat()
             notes = st.text_area("Progress notes / recovery actions")
@@ -731,7 +756,11 @@ def render_job_control(ctx: dict[str, Any]) -> None:
                 ["Cash received", row["paid"]],
                 ["Actual labour cost", row["actual_labour_cost"]],
                 ["Actual/verified material cost", row["Actual Material Cost"]],
+                ["Material commitment used in hours", row["Material Commitment"]],
                 ["PO commitments", row["po_committed"]],
+                ["Contract labour work value", row["Contract Labour Work Value"]],
+                ["Timesheet work value used at $125/hour", row["Used Labour Work Value"]],
+                ["Remaining labour work value", row["Remaining Labour Work Value"]],
                 ["Budget direct cost", row["Budget Direct Cost"]],
                 ["Forecast final direct cost", row["Forecast Final Direct Cost"]],
             ],
@@ -748,7 +777,8 @@ def render_job_control(ctx: dict[str, Any]) -> None:
     display_cols = [
         "Job No", "Job Name", "Builder / Client", "Status", "Leading Hand", "Risk",
         "physical_progress", "Labour Used %", "Revised Contract", "Cost to Date",
-        "Forecast Final Direct Cost", "Cost Variance", "Forecast GP %", "Billing %", "Cash Collected %",
+        "Material Commitment", "Forecast Remaining Labour Hours", "Forecast Final Direct Cost",
+        "Cost Variance", "Forecast GP %", "Billing %", "Cash Collected %",
     ]
     portfolio = df[[col for col in display_cols if col in df.columns]].copy()
     portfolio = portfolio.rename(columns={"physical_progress": "Physical Progress %"})
@@ -759,6 +789,8 @@ def render_job_control(ctx: dict[str, Any]) -> None:
         column_config={
             "Revised Contract": st.column_config.NumberColumn(format="$%.2f"),
             "Cost to Date": st.column_config.NumberColumn(format="$%.2f"),
+            "Material Commitment": st.column_config.NumberColumn(format="$%.2f"),
+            "Forecast Remaining Labour Hours": st.column_config.NumberColumn(format="%.1f h"),
             "Forecast Final Direct Cost": st.column_config.NumberColumn(format="$%.2f"),
             "Cost Variance": st.column_config.NumberColumn(format="$%.2f"),
             "Forecast GP %": st.column_config.NumberColumn(format="%.1f%%"),

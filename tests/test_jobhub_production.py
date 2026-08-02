@@ -11,6 +11,7 @@ from jobhub_production import (
     overhead_recovery_metrics,
     production_sell_pricing,
     production_variance,
+    remaining_contract_labour,
     validate_production_targets,
 )
 
@@ -67,6 +68,32 @@ class ProductionTargetTests(unittest.TestCase):
         self.assertEqual(result["net_sell_value_per_unit"], 65.0)
         self.assertAlmostEqual(result["target_units_per_day"], 1000 / 65)
         self.assertEqual(result["planning_labour_cost"], 6240.0)
+
+    def test_remaining_hours_come_from_contract_after_materials_and_timesheets(self):
+        result = remaining_contract_labour(
+            contract_value=100000,
+            material_commitment=20000,
+            access_allowance=5000,
+            sundries_allowance=2500,
+            subcontractor_allowance=2500,
+            actual_labour_hours=100,
+        )
+
+        self.assertEqual(result["production_value_per_hour"], 125.0)
+        self.assertEqual(result["non_labour_commitment"], 30000.0)
+        self.assertEqual(result["allowed_labour_hours"], 560.0)
+        self.assertEqual(result["remaining_labour_hours"], 460.0)
+        self.assertEqual(result["remaining_labour_work_value"], 57500.0)
+
+    def test_remaining_hours_never_go_below_zero(self):
+        result = remaining_contract_labour(
+            contract_value=10000,
+            material_commitment=2000,
+            actual_labour_hours=80,
+        )
+
+        self.assertEqual(result["remaining_labour_hours"], 0.0)
+        self.assertEqual(result["hours_over_allowance"], 16.0)
 
     def test_invalid_value_order_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "ordered low, target, then high"):
