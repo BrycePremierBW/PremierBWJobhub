@@ -56,8 +56,6 @@ from jobhub_core import (
 )
 from jobhub_production import (
     DEFAULT_DAY_HOURS,
-    DEFAULT_VALUE_HIGH,
-    DEFAULT_VALUE_LOW,
     DEFAULT_VALUE_TARGET,
     budget_production_allowance,
     crew_duration_days,
@@ -67,7 +65,6 @@ from jobhub_production import (
     overhead_recovery_metrics,
     production_sell_pricing,
     production_variance,
-    validate_production_targets,
 )
 # PB_FULL_VISUAL_STAFF_SCHEDULER_V1
 
@@ -81,7 +78,7 @@ MAX_TAKEOFF_PACK_FILES = 300
 MAX_IMAGE_PIXELS = 25_000_000
 Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 
-PB_JOBHUB_BUILD = "2026.08.03-mobile-sidebar-production-v5"
+PB_JOBHUB_BUILD = "2026.08.03-mobile-sidebar-simple-pricing-v6"
 PLANNING_LABOUR_RATE = 60.0
 
 
@@ -2710,7 +2707,7 @@ def apply_schema_migrations():
                 ("paid_hours_week", "Paid hours per painter", "Capacity", 38.0, "hours / week", 11),
                 ("productive_utilisation", "Productive utilisation", "Capacity", 80.0, "%", 12),
                 ("production_value_target", "Completed-work target", "Capacity", 1000.0, "$ / painter day", 13),
-                ("planning_hourly_rate", "Planning labour rate", "Capacity", 60.0, "$ / painter hour", 14),
+                ("planning_hourly_rate", "Forecast labour cost", "Capacity", 60.0, "$ / paid hour", 14),
             ]
             for setting in settings:
                 cur.execute(
@@ -2725,6 +2722,85 @@ def apply_schema_migrations():
             cur.execute(
                 "INSERT INTO schema_migrations (migration_id, applied_at) VALUES (?, ?)",
                 (production_target_migration_id, now),
+            )
+
+        simple_pricing_migration_id = "20260803_simple_production_pricing_v1"
+        if simple_pricing_migration_id not in applied:
+            # The $1,000 painter-day figure already includes wages, overheads
+            # and profit. Remove older optional pricing bands and percentages.
+            cur.execute(
+                """
+                UPDATE estimate_working_sheets
+                SET production_day_hours=8,production_value_low=1000,
+                    production_value_target=1000,production_value_high=1000,
+                    margin_percent=0,contingency_percent=0,
+                    pricing_method='Production Target Included'
+                """
+            )
+            cur.execute(
+                """
+                UPDATE estimate_baselines
+                SET production_day_hours=8,production_value_target=1000
+                """
+            )
+            cur.execute(
+                """
+                UPDATE job_budgets
+                SET production_day_hours=8,production_value_target=1000,target_gp_percent=0
+                """
+            )
+            cur.execute(
+                """
+                UPDATE business_operating_settings
+                SET numeric_value=1000,label='Completed-work target',unit='$ / painter day'
+                WHERE setting_key='production_value_target'
+                """
+            )
+            cur.execute(
+                """
+                UPDATE business_operating_settings
+                SET label='Forecast labour cost',unit='$ / paid hour'
+                WHERE setting_key='planning_hourly_rate'
+                """
+            )
+            cur.execute(
+                """
+                SELECT e.id,COALESCE(e.labour_hours,0),COALESCE(e.material_allowance,0),
+                       COALESCE(e.access_equipment_allowance,0),
+                       COALESCE(e.subcontractor_allowance,0),COALESCE(e.sundries_allowance,0),
+                       COALESCE(e.gst_percent,10),
+                       COALESCE((SELECT SUM(li.line_total) FROM estimate_line_items li
+                                WHERE li.estimate_id=e.id),0)
+                FROM estimate_working_sheets e
+                """
+            )
+            estimate_rows = cur.fetchall()
+            for estimate_row in estimate_rows:
+                totals = production_sell_pricing(
+                    line_total=estimate_row[7],
+                    labour_hours=estimate_row[1],
+                    material_allowance=estimate_row[2],
+                    access_equipment_allowance=estimate_row[3],
+                    subcontractor_allowance=estimate_row[4],
+                    sundries_allowance=estimate_row[5],
+                    gst_percent=estimate_row[6],
+                    day_hours=DEFAULT_DAY_HOURS,
+                    value_target=DEFAULT_VALUE_TARGET,
+                )
+                cur.execute(
+                    """
+                    UPDATE estimate_working_sheets
+                    SET total_ex_gst=?,gst_amount=?,total_inc_gst=? WHERE id=?
+                    """,
+                    (
+                        totals["total_ex_gst"], totals["gst_amount"],
+                        totals["total_inc_gst"], estimate_row[0],
+                    ),
+                )
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            cur.execute(
+                "INSERT INTO schema_migrations (migration_id, applied_at) VALUES (?, ?)",
+                (simple_pricing_migration_id, now),
             )
 
         conn.commit()
@@ -9784,7 +9860,8 @@ def parse_takeoff_job_pack(uploaded_file):
         "subcontractor_allowance": _takeoff_float(_takeoff_value(estimate_manifest, "subcontractor_allowance", default=_takeoff_value(budget_manifest, "subcontractor_allowance", default=0))),
         "sundries_allowance": _takeoff_float(_takeoff_value(estimate_manifest, "sundries_allowance", "consumables_allowance", default=_takeoff_value(budget_manifest, "sundries_allowance", "consumables_allowance", default=0))),
         "target_gp_percent": _takeoff_float(_takeoff_value(estimate_manifest, "target_gp_percent", "margin_percent", default=_takeoff_value(budget_manifest, "target_gp_percent", "margin_percent", default=35)), 35),
-        "contingency_percent": _takeoff_float(_takeoff_value(estimate_manifest, "contingency_percent", default=0)),
+        # Retained as a zero-valued compatibility field for older Job Packs.
+        "contingency_percent": 0.0,
         "gst_percent": _takeoff_float(_takeoff_value(estimate_manifest, "gst_percent", default=10), 10),
         "pricing_method": _takeoff_text(_takeoff_value(estimate_manifest, "pricing_method"), "Target Gross Margin"),
         "notes": _takeoff_text(_takeoff_value(estimate_manifest, "notes", default=_takeoff_value(manifest, "notes"))),
@@ -10038,7 +10115,7 @@ def import_takeoff_job_pack(
         # Retain legacy manifest fields for compatibility, but do not add a
         # second margin/markup percentage to imported estimates.
         target_gp = 0.0
-        contingency = _takeoff_float(summary.get("contingency_percent"))
+        contingency = 0.0
         gst_percent = _takeoff_float(summary.get("gst_percent"), 10.0)
         pricing_method = "Production Target Included"
         line_total = _takeoff_float(summary.get("line_pricing_total")) if use_imported_line_pricing else 0.0
@@ -10873,7 +10950,7 @@ def estimate_totals(
         access_equipment_allowance=access_equipment_allowance,
         subcontractor_allowance=subcontractor_allowance,
         sundries_allowance=sundries_allowance,
-        contingency_percent=contingency_percent,
+        contingency_percent=0.0,
         gst_percent=gst_percent,
         day_hours=day_hours,
         value_target=value_target,
@@ -11019,60 +11096,17 @@ def render_estimate_production_progress(estimate_id, job_id, current):
     st.subheader("Production target and expected progress")
     st.caption(
         "Each measured line is converted to the quantity one painter should complete in an "
-        "8-hour day for the $800 warning level and the $1,000 completed-work target. Timesheet hours then show "
-        "the percentage that should be complete by now."
+        "8-hour day at the profit-inclusive $1,000 completed-work target. Timesheet hours then "
+        "show the percentage that should be complete by now."
     )
     render_estimate_baseline_panel(estimate_id, job_id, current)
 
-    day_hours = float(current.get("production_day_hours") or DEFAULT_DAY_HOURS)
-    value_low = float(current.get("production_value_low") or DEFAULT_VALUE_LOW)
-    value_target = float(current.get("production_value_target") or DEFAULT_VALUE_TARGET)
-    value_high = float(current.get("production_value_high") or DEFAULT_VALUE_HIGH)
-    with st.expander("Production settings", expanded=False):
-        with st.form(f"estimate_production_settings_{estimate_id}"):
-            s1, s2, s3, s4 = st.columns(4)
-            edit_day_hours = s1.number_input(
-                "Painter-day hours", min_value=1.0, max_value=24.0,
-                value=day_hours, step=0.5,
-            )
-            edit_low = s2.number_input(
-                "Low value / day", min_value=1.0, value=value_low, step=50.0,
-            )
-            edit_target = s3.number_input(
-                "Target value / day", min_value=1.0, value=value_target, step=50.0,
-            )
-            edit_high = s4.number_input(
-                "High value / day", min_value=1.0, value=value_high, step=50.0,
-            )
-            save_settings = st.form_submit_button(
-                "Save production settings", type="primary", width="stretch",
-            )
-        if save_settings:
-            try:
-                settings = validate_production_targets(
-                    day_hours=edit_day_hours,
-                    value_low=edit_low,
-                    value_target=edit_target,
-                    value_high=edit_high,
-                )
-            except ValueError as exc:
-                pb_error(str(exc))
-            else:
-                execute(
-                    """
-                    UPDATE estimate_working_sheets
-                    SET production_day_hours=?,production_value_low=?,production_value_target=?,
-                        production_value_high=?,updated_at=?
-                    WHERE id=?
-                    """,
-                    (
-                        settings["day_hours"], settings["value_low"],
-                        settings["value_target"], settings["value_high"],
-                        datetime.now().strftime("%Y-%m-%d %H:%M:%S"), estimate_id,
-                    ),
-                )
-                pb_success("Production settings saved.")
-                refresh()
+    # One operating rule keeps estimates, job budgets and progress consistent.
+    day_hours = DEFAULT_DAY_HOURS
+    value_target = DEFAULT_VALUE_TARGET
+    value_low = value_target
+    value_high = value_target
+    st.metric("Labour Rate", "$1,000 / painter per 8-hour day")
 
     lines = df_query(
         """
@@ -11164,9 +11198,7 @@ def render_estimate_production_progress(estimate_id, job_id, current):
         st.info("No estimate lines are currently included in production tracking.")
         return
 
-    warning_qty_column = f"Warning Qty / {day_hours:g}h (${value_low:,.0f})"
     target_qty_column = f"Target Qty / {day_hours:g}h (${value_target:,.0f})"
-    stretch_qty_column = f"Stretch Qty / {day_hours:g}h (${value_high:,.0f})"
     production_rows = []
     for _, line in tracked.iterrows():
         metrics = line_production_metrics(
@@ -11180,18 +11212,12 @@ def render_estimate_production_progress(estimate_id, job_id, current):
             "Description": str(line["item_description"] or ""),
             "Qty": float(line["qty"] or 0),
             "Unit": str(line["unit"] or "item"),
-            warning_qty_column: float(metrics["units_per_day_low"]),
             target_qty_column: float(metrics["units_per_day_target"]),
-            stretch_qty_column: float(metrics["units_per_day_high"]),
             "Target Hours": float(metrics["labour_hours_at_target"] or fallback_hours),
-            "Low-value Hours": float(metrics["labour_hours_at_low"] or fallback_hours),
-            "High-value Hours": float(metrics["labour_hours_at_high"] or fallback_hours),
             "Work Value": float(metrics["work_value"]),
         })
     production_df = pd.DataFrame(production_rows)
     target_hours = float(production_df["Target Hours"].sum())
-    low_hours = float(production_df["Low-value Hours"].sum())
-    high_hours = float(production_df["High-value Hours"].sum())
     actual_df = df_query(
         """
         SELECT COALESCE(SUM(total_hours),0) AS actual_hours
@@ -11208,12 +11234,11 @@ def render_estimate_production_progress(estimate_id, job_id, current):
     ))
     duration = crew_duration_days(target_hours, crew_size, day_hours) if target_hours > 0 else 0.0
 
-    m1, m2, m3, m4, m5 = st.columns(5)
+    m1, m2, m3, m4 = st.columns(4)
     m1.metric("Target Painter Hours", f"{target_hours:,.1f}")
-    m2.metric("Expected Range", f"{high_hours:,.1f}–{low_hours:,.1f} h")
-    m3.metric(f"Duration · {crew_size} painter{'s' if crew_size != 1 else ''}", f"{duration:,.1f} days")
-    m4.metric("Timesheet Hours Used", f"{actual_hours:,.1f}")
-    m5.metric("Should Be Complete", f"{progress['raw_expected_percent']:,.1f}%")
+    m2.metric(f"Duration · {crew_size} painter{'s' if crew_size != 1 else ''}", f"{duration:,.1f} days")
+    m3.metric("Timesheet Hours Used", f"{actual_hours:,.1f}")
+    m4.metric("Should Be Complete", f"{progress['raw_expected_percent']:,.1f}%")
     if progress["hours_over_budget"] > 0:
         st.warning(
             f"Timesheets are {progress['hours_over_budget']:,.1f} hours beyond the $1,000/day target. "
@@ -11227,13 +11252,11 @@ def render_estimate_production_progress(estimate_id, job_id, current):
 
     st.markdown("#### Quantity required per painter per 8-hour day")
     st.dataframe(
-        production_df.drop(columns=["Low-value Hours", "High-value Hours"]),
+        production_df,
         hide_index=True,
         width="stretch",
         column_config={
-            warning_qty_column: st.column_config.NumberColumn(format="%.2f"),
             target_qty_column: st.column_config.NumberColumn(format="%.2f"),
-            stretch_qty_column: st.column_config.NumberColumn(format="%.2f"),
             "Target Hours": st.column_config.NumberColumn(format="%.1f"),
             "Work Value": st.column_config.NumberColumn(format="$%.2f"),
         },
@@ -11395,14 +11418,8 @@ def estimate_working_sheet_page():
 
             col5, col6 = st.columns(2)
             labour_hours = col5.number_input("Labour Hours", min_value=0.0, step=1.0, value=float(current["labour_hours"] or 0))
-            labour_rate = col6.number_input(
-                "Planning Labour Rate",
-                min_value=0.0,
-                step=5.0,
-                value=PLANNING_LABOUR_RATE,
-                disabled=True,
-                help="Estimates use the fixed planning rate. Actual job costs use each employee's recorded wage cost.",
-            )
+            labour_rate = PLANNING_LABOUR_RATE
+            col6.metric("Labour Rate", "$1,000 / painter per 8-hour day")
 
             col7, col8, col9, col10 = st.columns(4)
             material_allowance = col7.number_input("Material Allowance", min_value=0.0, step=100.0, value=float(current["material_allowance"] or 0))
@@ -11411,15 +11428,11 @@ def estimate_working_sheet_page():
             sundries_allowance = col10.number_input("Sundries / Consumables", min_value=0.0, step=50.0, value=float(current["sundries_allowance"] or 0))
 
             st.info(
-                f"Pricing uses the profit-inclusive ${float(current.get('production_value_target') or DEFAULT_VALUE_TARGET):,.0f} "
-                "completed-work target per painter per 8-hour day. No extra profit or markup percentage is added."
+                "The $1,000 daily rate already covers wages, overheads and profit. JobHub does not "
+                "add a second margin, markup or contingency percentage."
             )
-            col11, col12 = st.columns(2)
-            contingency_percent = col11.number_input(
-                "Contingency % (optional)", min_value=0.0, max_value=100.0,
-                step=1.0, value=float(current["contingency_percent"] or 0),
-            )
-            gst_percent = col12.number_input(
+            contingency_percent = 0.0
+            gst_percent = st.number_input(
                 "GST %", min_value=0.0, max_value=100.0,
                 step=1.0, value=float(current["gst_percent"] or 10),
             )
@@ -11559,10 +11572,11 @@ def estimate_working_sheet_page():
     with tab_view:
         summary_df = df_query("""
             SELECT e.estimate_no AS 'Estimate No', e.revision AS 'Revision', e.estimate_date AS 'Date', e.status AS 'Status',
-                   j.job_no AS 'Job No', j.job_name AS 'Job Name', e.labour_hours AS 'Labour Hours', e.labour_rate AS 'Labour Rate',
+                   j.job_no AS 'Job No', j.job_name AS 'Job Name', e.labour_hours AS 'Labour Hours',
+                   COALESCE(e.production_value_target,1000) AS 'Labour Rate ($ / Painter Day)',
                    e.material_allowance AS 'Material Allowance', e.access_equipment_allowance AS 'Access / Equipment',
                    e.subcontractor_allowance AS 'Subcontractor', e.sundries_allowance AS 'Sundries',
-                   e.contingency_percent AS 'Contingency %', e.total_ex_gst AS 'Total Ex GST', e.gst_amount AS 'GST',
+                   e.total_ex_gst AS 'Total Ex GST', e.gst_amount AS 'GST',
                    e.total_inc_gst AS 'Total Inc GST', e.notes AS 'Notes'
             FROM estimate_working_sheets e
             JOIN jobs j ON j.id = e.job_id
@@ -12471,7 +12485,7 @@ def job_cost_summary_dataframe():
                e.estimate_no AS 'Latest Estimate',
                e.revision AS 'Estimate Revision',
                COALESCE(e.labour_hours, 0) AS 'Estimated Labour Hours',
-               COALESCE(e.labour_rate, 0) AS 'Estimated Labour Rate',
+               COALESCE(e.production_value_target, 1000) AS 'Labour Rate ($ / Painter Day)',
                COALESCE(e.material_allowance, 0) AS 'Estimated Materials',
                COALESCE(e.access_equipment_allowance, 0) AS 'Estimated Access / Equipment',
                COALESCE(e.subcontractor_allowance, 0) AS 'Estimated Subcontractor',
@@ -12496,7 +12510,7 @@ def job_cost_summary_dataframe():
     number_cols = [
         "Contract Value", "Committed Material Cost", "Actual Material Cost", "Material Qty Required", "Material Qty Received",
         "Material Lines", "Wage Hours", "Actual Labour Cost", "Wage Lines", "Timesheet Hours",
-        "Timesheet Lines", "Estimated Labour Hours", "Estimated Labour Rate", "Estimated Materials",
+        "Timesheet Lines", "Estimated Labour Hours", "Labour Rate ($ / Painter Day)", "Estimated Materials",
         "Estimated Access / Equipment", "Estimated Subcontractor", "Estimated Sundries",
         "Estimate Total Ex GST", "Estimate Total Inc GST"
     ]
@@ -12505,7 +12519,7 @@ def job_cost_summary_dataframe():
         if col not in df.columns:
             df[col] = 0.0
         df[col] = df[col].fillna(0)
-    df["Estimated Labour Rate"] = PLANNING_LABOUR_RATE
+    df["Labour Rate ($ / Painter Day)"] = DEFAULT_VALUE_TARGET
 
     for col in ["Latest Estimate", "Estimate Revision"]:
         if col not in df.columns:
@@ -14506,7 +14520,7 @@ def pb_control_budget_lock(df):
     a2.metric("Paint + Other Allowances", f"${float(allowance['non_painter_allowances']):,.0f}")
     a3.metric("Painter Production Value", f"${float(allowance['painter_production_value']):,.0f}")
     a4.metric("Allowed Painter Hours", f"{float(allowance['allowed_painter_hours']):,.1f}")
-    a5.metric("Planning Labour Cost", f"${float(allowance['planning_labour_cost']):,.0f}")
+    a5.metric("Forecast Wage Cost", f"${float(allowance['planning_labour_cost']):,.0f}")
     r1, r2, r3 = st.columns(3)
     r1.metric(
         f"Net Sell / {allowance['measurement_unit']}",
@@ -14530,7 +14544,7 @@ def pb_control_budget_lock(df):
         quoted_labour_hours = calculated_hours
         quoted_labour_cost = calculated_cost
         l1.metric("Locked Labour Hours", f"{quoted_labour_hours:,.1f}")
-        l2.metric("Planning Labour Cost at $60/hour", f"${quoted_labour_cost:,.0f}")
+        l2.metric("Forecast Wage Cost", f"${quoted_labour_cost:,.0f}")
     else:
         quoted_labour_hours = l1.number_input(
             "Locked Labour Hours", min_value=0.0,
@@ -14538,13 +14552,13 @@ def pb_control_budget_lock(df):
             step=1.0, key=f"budget_labour_hours_{job_id}",
         )
         quoted_labour_cost = l2.number_input(
-            "Planning Labour Cost at $60/hour", min_value=0.0,
+            "Forecast Wage Cost", min_value=0.0,
             value=pb_float(current.get("quoted_labour_cost", 0)),
             step=100.0, key=f"budget_labour_cost_{job_id}",
         )
     st.caption(
-        "The $1,000 completed-work target already includes overhead and profit. The $60/hour "
-        "figure is planning cost only; actual job cost continues to use each employee's real rate."
+        "Labour rate: $1,000 of completed work per painter per 8-hour day. Forecast wage cost is "
+        "kept separate; actual job cost uses each employee's real recorded wage."
     )
     notes = st.text_area(
         "Budget Notes", value=str(current.get("notes", "") or ""), key=f"budget_notes_{job_id}",
@@ -14592,7 +14606,7 @@ def pb_control_budget_lock(df):
                b.production_measurement_basis AS 'Measurement Basis',
                b.production_area_quantity AS 'Measured Qty',
                b.quoted_labour_hours AS 'Allowed Labour Hours',
-               b.quoted_labour_cost AS 'Planning Labour Cost',b.quoted_materials AS 'Paint / Materials',
+               b.quoted_labour_cost AS 'Forecast Wage Cost',b.quoted_materials AS 'Paint / Materials',
                b.quoted_access_equipment AS 'Access',b.quoted_subcontractors AS 'Subcontractors',
                b.quoted_sundries AS 'Sundries',b.locked_at AS 'Locked At',b.locked_by AS 'Locked By'
         FROM job_budgets b JOIN jobs j ON j.id=b.job_id ORDER BY j.job_no
@@ -14946,7 +14960,7 @@ OPERATING_SETTING_DEFAULTS = {
     "paid_hours_week": ("Paid hours per painter", "Capacity", 38.0, "hours / week", 11),
     "productive_utilisation": ("Productive utilisation", "Capacity", 80.0, "%", 12),
     "production_value_target": ("Completed-work target", "Capacity", 1000.0, "$ / painter day", 13),
-    "planning_hourly_rate": ("Planning labour rate", "Capacity", 60.0, "$ / painter hour", 14),
+    "planning_hourly_rate": ("Forecast labour cost", "Capacity", 60.0, "$ / paid hour", 14),
 }
 
 
@@ -15275,15 +15289,15 @@ def render_operational_dashboard():
             )
             st.caption(
                 f"Bridge: ${metrics['production_value_per_hour']:,.2f} completed work − "
-                f"${metrics['planning_hourly_rate']:,.2f} planning labour − "
+                f"${metrics['planning_hourly_rate']:,.2f} forecast wages − "
                 f"${metrics['paid_hour_overhead_recovery']:,.2f} overhead. At "
                 f"{settings['productive_utilisation']:.0f}% productive utilisation, profit is "
                 f"${metrics['profit_per_hour_productive_basis']:,.2f}/h."
             )
             st.caption(
-                "Only include wages in monthly overhead when they are additional to the planning "
-                "labour rate. Set wage overhead to $0 if the same painters' wages are already "
-                "covered by that hourly rate, so wages are not counted twice."
+                "Only include wages in monthly overhead when they are additional to the forecast "
+                "wage cost. Set wage overhead to $0 if the same wages are already covered by the "
+                "hourly forecast, so they are not counted twice."
             )
             with st.expander("Edit operating assumptions"):
                 if not is_manager_or_admin():
@@ -17591,12 +17605,11 @@ def render_job_linked_info(job_id, expanded=True):
                estimate_date AS "Date",
                status AS "Status",
                labour_hours AS "Labour Hours",
-               labour_rate AS "Labour Rate",
+               COALESCE(production_value_target,1000) AS "Labour Rate ($ / Painter Day)",
                material_allowance AS "Material Allowance",
                access_equipment_allowance AS "Access / Equipment",
                subcontractor_allowance AS "Subcontractor",
                sundries_allowance AS "Sundries",
-               contingency_percent AS "Contingency %",
                total_ex_gst AS "Total Ex GST",
                gst_amount AS "GST",
                total_inc_gst AS "Total Inc GST",
@@ -21140,12 +21153,11 @@ elif menu == "Reports / Export":
                        e.estimate_date AS 'Date',
                        e.status AS 'Status',
                        e.labour_hours AS 'Labour Hours',
-                       e.labour_rate AS 'Labour Rate',
+                       COALESCE(e.production_value_target,1000) AS 'Labour Rate ($ / Painter Day)',
                        e.material_allowance AS 'Material Allowance',
                        e.access_equipment_allowance AS 'Access / Equipment',
                        e.subcontractor_allowance AS 'Subcontractor',
                        e.sundries_allowance AS 'Sundries',
-                       e.contingency_percent AS 'Contingency %',
                        e.total_ex_gst AS 'Total Ex GST',
                        e.gst_amount AS 'GST',
                        e.total_inc_gst AS 'Total Inc GST',

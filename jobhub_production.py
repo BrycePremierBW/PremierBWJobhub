@@ -12,7 +12,7 @@ from typing import Any
 
 
 DEFAULT_DAY_HOURS = 8.0
-DEFAULT_VALUE_LOW = 800.0
+DEFAULT_VALUE_LOW = 1000.0
 DEFAULT_VALUE_TARGET = 1000.0
 DEFAULT_VALUE_HIGH = 1000.0
 
@@ -371,11 +371,14 @@ def production_sell_pricing(
             (sundries_allowance, "Sundries allowance"),
         )
     )
-    contingency = _non_negative_number(contingency_percent, "Contingency percent")
     gst = _non_negative_number(gst_percent, "GST percent")
     subtotal = work_sell_value + allowances
-    contingency_amount = subtotal * contingency / 100.0
-    total_ex_gst = subtotal + contingency_amount
+    # Kept in the call signature so older Job Packs remain importable, but the
+    # profit-inclusive painter-day target is the only pricing uplift JobHub uses.
+    # No separate contingency percentage is applied.
+    _ = contingency_percent
+    contingency_amount = 0.0
+    total_ex_gst = subtotal
     gst_amount = total_ex_gst * gst / 100.0
     return {
         "line_total": round(lines, 2),

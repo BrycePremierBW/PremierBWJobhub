@@ -19,7 +19,7 @@ class ProductionTargetTests(unittest.TestCase):
     def test_m2_rate_converts_daily_value_to_required_quantity(self):
         metrics = line_production_metrics(quantity=500, unit_rate=45, unit="m²")
 
-        self.assertAlmostEqual(metrics["units_per_day_low"], 800 / 45)
+        self.assertAlmostEqual(metrics["units_per_day_low"], 1000 / 45)
         self.assertAlmostEqual(metrics["units_per_day_target"], 1000 / 45)
         self.assertAlmostEqual(metrics["units_per_day_high"], 1000 / 45)
         self.assertAlmostEqual(metrics["labour_hours_at_target"], 180.0)
@@ -127,6 +127,17 @@ class ProductionTargetTests(unittest.TestCase):
         self.assertEqual(result["margin_amount"], 0.0)
         self.assertEqual(result["total_ex_gst"], 11000.0)
         self.assertEqual(result["total_inc_gst"], 12100.0)
+
+    def test_legacy_contingency_input_is_ignored(self):
+        result = production_sell_pricing(
+            line_total=10000,
+            labour_hours=0,
+            contingency_percent=25,
+            gst_percent=10,
+        )
+
+        self.assertEqual(result["contingency_amount"], 0.0)
+        self.assertEqual(result["total_ex_gst"], 10000.0)
 
 
 if __name__ == "__main__":
