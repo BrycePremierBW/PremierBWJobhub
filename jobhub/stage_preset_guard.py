@@ -8,8 +8,12 @@ the top-level ``st`` helpers and DeltaGenerator column methods.
 
 from __future__ import annotations
 
+import json
+import os
 import sys
 from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Callable
 
 
@@ -18,41 +22,43 @@ class StagePreset:
     label: str
     stage_name: str
     percent: float
+    section: str = "All"
+    custom: bool = False
 
 
 SIMPLE_STAGE_PRESETS: list[StagePreset] = [
-    StagePreset("All / whole job — 100%", "Whole job", 100.0),
-    StagePreset("Internal — 100%", "Internal", 100.0),
-    StagePreset("External — 100%", "External", 100.0),
+    StagePreset("All / whole job — 100%", "Whole job", 100.0, "All"),
+    StagePreset("Internal — 100%", "Internal", 100.0, "Internal"),
+    StagePreset("External — 100%", "External", 100.0, "External"),
 ]
 
 INTERNAL_STAGE_PRESETS: list[StagePreset] = [
-    StagePreset("Internal — 100%", "Internal", 100.0),
-    StagePreset("Internal prep and spray Sealer — 30%", "Internal prep and spray Sealer", 30.0),
-    StagePreset("prep and spray finish coats — 30%", "prep and spray finish coats", 30.0),
-    StagePreset("cut and roll walls and paint doors — 30%", "cut and roll walls and paint doors", 30.0),
-    StagePreset("touch ups — 10%", "touch ups", 10.0),
+    StagePreset("Internal — 100%", "Internal", 100.0, "Internal"),
+    StagePreset("Internal prep and spray Sealer — 30%", "Internal prep and spray Sealer", 30.0, "Internal"),
+    StagePreset("prep and spray finish coats — 30%", "prep and spray finish coats", 30.0, "Internal"),
+    StagePreset("cut and roll walls and paint doors — 30%", "cut and roll walls and paint doors", 30.0, "Internal"),
+    StagePreset("touch ups — 10%", "touch ups", 10.0, "Internal"),
 ]
 
 EXTERNAL_STAGE_PRESETS: list[StagePreset] = [
-    StagePreset("External — 100%", "External", 100.0),
-    StagePreset("upper scaff work — 45%", "upper scaff work", 45.0),
-    StagePreset("lower — 45%", "lower", 45.0),
-    StagePreset("touch ups — 10%", "touch ups", 10.0),
+    StagePreset("External — 100%", "External", 100.0, "External"),
+    StagePreset("upper scaff work — 45%", "upper scaff work", 45.0, "External"),
+    StagePreset("lower — 45%", "lower", 45.0, "External"),
+    StagePreset("touch ups — 10%", "touch ups", 10.0, "External"),
 ]
 
 ALL_STAGE_PRESETS: list[StagePreset] = [
     *SIMPLE_STAGE_PRESETS,
-    StagePreset("Internal prep and spray Sealer — 30%", "Internal prep and spray Sealer", 30.0),
-    StagePreset("prep and spray finish coats — 30%", "prep and spray finish coats", 30.0),
-    StagePreset("cut and roll walls and paint doors — 30%", "cut and roll walls and paint doors", 30.0),
-    StagePreset("Internal touch ups — 10%", "touch ups", 10.0),
-    StagePreset("upper scaff work — 45%", "upper scaff work", 45.0),
-    StagePreset("lower — 45%", "lower", 45.0),
-    StagePreset("External touch ups — 10%", "touch ups", 10.0),
+    StagePreset("Internal prep and spray Sealer — 30%", "Internal prep and spray Sealer", 30.0, "Internal"),
+    StagePreset("prep and spray finish coats — 30%", "prep and spray finish coats", 30.0, "Internal"),
+    StagePreset("cut and roll walls and paint doors — 30%", "cut and roll walls and paint doors", 30.0, "Internal"),
+    StagePreset("Internal touch ups — 10%", "touch ups", 10.0, "Internal"),
+    StagePreset("upper scaff work — 45%", "upper scaff work", 45.0, "External"),
+    StagePreset("lower — 45%", "lower", 45.0, "External"),
+    StagePreset("External touch ups — 10%", "touch ups", 10.0, "External"),
 ]
 
-STAGE_PRESET_SECTIONS: dict[str, list[StagePreset]] = {
+BASE_STAGE_PRESET_SECTIONS: dict[str, list[StagePreset]] = {
     "All": ALL_STAGE_PRESETS,
     "Internal": INTERNAL_STAGE_PRESETS,
     "External": EXTERNAL_STAGE_PRESETS,
@@ -63,8 +69,113 @@ _STAGE_SECTION_KEY = "pb_stage_preset_section"
 _STAGE_CHOICE_KEY = "pb_stage_preset_stage_name_choice"
 _STAGE_CUSTOM_KEY = "pb_stage_preset_custom_stage_name"
 _STAGE_PERCENT_KEY = "pb_stage_preset_job_percent"
+_SAVE_CUSTOM_KEY = "pb_stage_preset_save_custom"
+_SAVE_STATUS_KEY = "pb_stage_preset_save_status"
 _LAST_STAGE_CHOICE_KEY = "pb_stage_preset_last_choice"
 _LAST_STAGE_SECTION_KEY = "pb_stage_preset_last_section"
+
+
+def _custom_preset_file() -> Path:
+    return Path(os.getenv("DATA_DIR", "/var/data")) / "jobhub_custom_stage_presets.json"
+
+
+def _clean_stage_name(value: Any) -> str:
+    return " ".join(str(value or "").strip().split())[:120]
+
+
+def _percent_label(percent: float) -> str:
+    return f"{float(percent):g}%"
+
+
+def _load_custom_presets() -> list[StagePreset]:
+    path = _custom_preset_file()
+    if not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    items = payload.get("custom_stages") if isinstance(payload, dict) else []
+    if not isinstance(items, list):
+        return []
+
+    presets: list[StagePreset] = []
+    seen: set[tuple[str, str]] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        stage_name = _clean_stage_name(item.get("stage_name"))
+        if not stage_name:
+            continue
+        section = str(item.get("section") or "All").strip()
+        if section not in BASE_STAGE_PRESET_SECTIONS:
+            section = "All"
+        try:
+            percent = max(0.0, min(100.0, float(item.get("percent", 0.0) or 0.0)))
+        except Exception:
+            percent = 0.0
+        key = (section.casefold(), stage_name.casefold())
+        if key in seen:
+            continue
+        seen.add(key)
+        label = f"Saved: {stage_name} — {_percent_label(percent)}"
+        presets.append(StagePreset(label, stage_name, percent, section, custom=True))
+    return presets
+
+
+def _save_custom_preset(section: str, stage_name: str, percent: float) -> bool:
+    clean_name = _clean_stage_name(stage_name)
+    if not clean_name:
+        return False
+    if section not in BASE_STAGE_PRESET_SECTIONS:
+        section = "All"
+    try:
+        clean_percent = max(0.0, min(100.0, float(percent or 0.0)))
+    except Exception:
+        clean_percent = 0.0
+
+    path = _custom_preset_file()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                payload = {}
+        else:
+            payload = {}
+        items = payload.get("custom_stages")
+        if not isinstance(items, list):
+            items = []
+
+        key = (section.casefold(), clean_name.casefold())
+        updated = False
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            item_key = (
+                str(item.get("section") or "All").casefold(),
+                _clean_stage_name(item.get("stage_name")).casefold(),
+            )
+            if item_key == key:
+                item["percent"] = clean_percent
+                item["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                updated = True
+                break
+        if not updated:
+            items.append(
+                {
+                    "section": section,
+                    "stage_name": clean_name,
+                    "percent": clean_percent,
+                    "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                }
+            )
+        payload["custom_stages"] = items
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        return True
+    except Exception:
+        return False
 
 
 def _is_add_stage_name_input(label: Any, kwargs: dict[str, Any]) -> bool:
@@ -84,11 +195,26 @@ def _is_add_stage_percent_input(label: Any, kwargs: dict[str, Any]) -> bool:
 
 
 def _stage_sections() -> list[str]:
-    return list(STAGE_PRESET_SECTIONS.keys())
+    return list(BASE_STAGE_PRESET_SECTIONS.keys())
+
+
+def _custom_presets_for_section(section: str) -> list[StagePreset]:
+    custom = _load_custom_presets()
+    if section == "All":
+        return custom
+    return [preset for preset in custom if preset.section == section]
 
 
 def _presets_for_section(section: str) -> list[StagePreset]:
-    return STAGE_PRESET_SECTIONS.get(section) or STAGE_PRESET_SECTIONS["All"]
+    base = list(BASE_STAGE_PRESET_SECTIONS.get(section) or BASE_STAGE_PRESET_SECTIONS["All"])
+    custom = _custom_presets_for_section(section)
+    seen = {(preset.stage_name.casefold(), round(float(preset.percent), 4), preset.section) for preset in base}
+    for preset in custom:
+        key = (preset.stage_name.casefold(), round(float(preset.percent), 4), preset.section)
+        if key not in seen:
+            base.append(preset)
+            seen.add(key)
+    return base
 
 
 def _preset_labels(section: str) -> list[str]:
@@ -101,8 +227,8 @@ def _preset_for_choice(section: str, choice: str) -> StagePreset | None:
             return preset
     # If state holds a label from another section after a rerun, still resolve it
     # before the selector normalises on the next render.
-    for presets in STAGE_PRESET_SECTIONS.values():
-        for preset in presets:
+    for section_name in _stage_sections():
+        for preset in _presets_for_section(section_name):
             if choice == preset.label or choice == preset.stage_name:
                 return preset
     return None
@@ -134,10 +260,28 @@ def _sync_percent_state(st: Any, section: str, choice: str) -> None:
         st.session_state[_LAST_STAGE_CHOICE_KEY] = state_key
 
 
+def _maybe_save_custom_preset(st: Any, percent: Any) -> None:
+    if str(st.session_state.get("pb_stage_preset_selected_name") or "") != ADD_CUSTOM_STAGE:
+        return
+    if not bool(st.session_state.get(_SAVE_CUSTOM_KEY, False)):
+        return
+    section = str(st.session_state.get("pb_stage_preset_selected_section") or "All")
+    stage_name = _clean_stage_name(st.session_state.get(_STAGE_CUSTOM_KEY))
+    if not stage_name:
+        return
+    saved = _save_custom_preset(section, stage_name, float(percent or 0.0))
+    st.session_state[_SAVE_STATUS_KEY] = (
+        f"Saved custom stage for future: {stage_name} ({section}, {_percent_label(float(percent or 0.0))})."
+        if saved
+        else "Could not save the custom stage preset. Check persistent storage and try again."
+    )
+
+
 def _render_stage_name_selector(
     st: Any,
     selectbox_fn: Callable[..., Any],
     text_input_fn: Callable[..., Any],
+    checkbox_fn: Callable[..., Any] | None,
     caption_fn: Callable[..., Any] | None,
 ) -> str:
     if callable(caption_fn):
@@ -175,9 +319,13 @@ def _render_stage_name_selector(
     st.session_state["pb_stage_preset_selected_name"] = choice
     _sync_percent_state(st, section, choice)
 
+    if callable(caption_fn) and st.session_state.get(_SAVE_STATUS_KEY):
+        caption_fn(str(st.session_state.get(_SAVE_STATUS_KEY)))
+
     if preset is not None:
         return preset.stage_name
-    return str(
+
+    custom_name = str(
         text_input_fn(
             "Custom Stage Name",
             value=str(st.session_state.get(_STAGE_CUSTOM_KEY, "") or ""),
@@ -186,6 +334,16 @@ def _render_stage_name_selector(
         )
         or ""
     )
+    if callable(checkbox_fn):
+        checkbox_fn(
+            "Save this custom stage for future",
+            value=bool(st.session_state.get(_SAVE_CUSTOM_KEY, False)),
+            key=_SAVE_CUSTOM_KEY,
+            help="Adds this custom stage to the Stage selection dropdown for future jobs.",
+        )
+    elif callable(caption_fn):
+        caption_fn("Custom stages can be saved for future once this form is loaded outside a column.")
+    return custom_name
 
 
 def _stage_percent_kwargs(st: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
@@ -217,6 +375,7 @@ def install_stage_preset_guard() -> bool:
     original_text_input = getattr(st, "text_input", None)
     original_number_input = getattr(st, "number_input", None)
     original_selectbox = getattr(st, "selectbox", None)
+    original_checkbox = getattr(st, "checkbox", None)
     original_caption = getattr(st, "caption", None)
 
     if (
@@ -231,6 +390,7 @@ def install_stage_preset_guard() -> bool:
                     st,
                     original_selectbox,
                     original_text_input,
+                    original_checkbox,
                     original_caption,
                 )
             return original_text_input(label, *args, **kwargs)
@@ -238,6 +398,9 @@ def install_stage_preset_guard() -> bool:
         def pb_stage_preset_number_input(label: Any, *args: Any, **kwargs: Any):
             if _is_add_stage_percent_input(label, kwargs):
                 kwargs = _stage_percent_kwargs(st, kwargs)
+                value = original_number_input(label, *args, **kwargs)
+                _maybe_save_custom_preset(st, value)
+                return value
             return original_number_input(label, *args, **kwargs)
 
         pb_stage_preset_text_input._pb_stage_preset_guard = True
@@ -256,6 +419,7 @@ def install_stage_preset_guard() -> bool:
         dg_text_input = getattr(delta_cls, "text_input", None)
         dg_number_input = getattr(delta_cls, "number_input", None)
         dg_selectbox = getattr(delta_cls, "selectbox", None)
+        dg_checkbox = getattr(delta_cls, "checkbox", None)
         dg_caption = getattr(delta_cls, "caption", None)
 
         if (
@@ -267,10 +431,12 @@ def install_stage_preset_guard() -> bool:
             def pb_dg_stage_preset_text_input(self: Any, label: Any, *args: Any, **kwargs: Any):
                 if _is_add_stage_name_input(label, kwargs):
                     caption_fn = (lambda message: dg_caption(self, message)) if callable(dg_caption) else None
+                    checkbox_fn = (lambda *a, **k: dg_checkbox(self, *a, **k)) if callable(dg_checkbox) else None
                     return _render_stage_name_selector(
                         st,
                         lambda *a, **k: dg_selectbox(self, *a, **k),
                         lambda *a, **k: dg_text_input(self, *a, **k),
+                        checkbox_fn,
                         caption_fn,
                     )
                 return dg_text_input(self, label, *args, **kwargs)
@@ -278,6 +444,9 @@ def install_stage_preset_guard() -> bool:
             def pb_dg_stage_preset_number_input(self: Any, label: Any, *args: Any, **kwargs: Any):
                 if _is_add_stage_percent_input(label, kwargs):
                     kwargs = _stage_percent_kwargs(st, kwargs)
+                    value = dg_number_input(self, label, *args, **kwargs)
+                    _maybe_save_custom_preset(st, value)
+                    return value
                 return dg_number_input(self, label, *args, **kwargs)
 
             pb_dg_stage_preset_text_input._pb_stage_preset_guard = True
