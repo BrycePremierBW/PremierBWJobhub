@@ -112,6 +112,23 @@ class RecentFeatureGuardSmokeTests(unittest.TestCase):
         for marker in forbidden:
             self.assertNotIn(marker, source)
 
+    def test_upload_po_handles_live_schema_differences(self):
+        source = read("jobhub/po_upload_guard.py")
+        required = [
+            "_table_columns",
+            "information_schema.columns",
+            "_ensure_table_column",
+            "_insert_existing_columns",
+            "Older JobHub databases have slightly different document-column names",
+            "job_documents",
+            "uploaded_at",
+            "doc_type",
+            "upload_date",
+            "date_uploaded",
+        ]
+        for marker in required:
+            self.assertIn(marker, source)
+
     def test_upload_po_calculates_amount_and_percentage(self):
         source = read("jobhub/po_upload_guard.py")
         required = [
