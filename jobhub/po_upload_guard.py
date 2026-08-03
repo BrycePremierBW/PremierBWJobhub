@@ -145,6 +145,64 @@ def _safe_float(value: Any) -> float:
         return 0.0
 
 
+def _table_columns(table: str) -> set[str]:
+    """Read live columns so inserts match Render/Postgres and local SQLite."""
+    try:
+        if _use_postgres():
+            df = _df_query(
+                """
+                SELECT column_name AS name
+                FROM information_schema.columns
+                WHERE table_name=?
+                """,
+                (table,),
+            )
+        else:
+            df = _df_query(f"PRAGMA table_info({table})")
+        if df is not None and not getattr(df, "empty", True):
+            return set(df.get("name", []).astype(str).tolist())
+    except Exception:
+        pass
+    return set()
+
+
+def _ensure_table_column(table: str, column: str, definition: str) -> None:
+    try:
+        if _use_postgres():
+            _execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {definition}")
+            return
+        existing = _table_columns(table)
+        if column not in existing:
+            _execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+    except Exception:
+        pass
+
+
+def _insert_existing_columns(table: str, values: dict[str, Any]) -> None:
+    """Insert only columns that exist in the live table.
+
+    Older JobHub databases have slightly different document-column names. This
+    prevents errors like missing ``uploaded_at`` while still saving every column
+    that the live schema supports.
+    """
+    existing = _table_columns(table)
+    if not existing:
+        existing = set(values)
+    columns = [column for column in values if column in existing]
+    if not columns:
+        raise RuntimeError(f"No matching columns found for {table}.")
+    placeholders = ",".join("?" for _ in columns)
+    column_sql = ",".join(columns)
+    params = tuple(values[column] for column in columns)
+    _execute(f"INSERT INTO {table} ({column_sql}) VALUES ({placeholders})", params)
+
+
+def _select_column_expr(existing: set[str], column: str, alias: str, default: str = "''") -> str:
+    if column in existing:
+        return f'{column} AS "{alias}"'
+    return f'{default} AS "{alias}"'
+
+
 def _job_options() -> dict[str, int]:
     try:
         jobs = _df_query(
@@ -199,19 +257,6 @@ def _stage_options(job_id: int) -> dict[str, int | None]:
     return options
 
 
-def _ensure_po_column(column: str, definition: str) -> None:
-    try:
-        if _use_postgres():
-            _execute(f"ALTER TABLE job_purchase_orders ADD COLUMN IF NOT EXISTS {column} {definition}")
-            return
-        columns = _df_query("PRAGMA table_info(job_purchase_orders)")
-        existing = set(columns.get("name", []).astype(str).tolist()) if hasattr(columns, "get") else set()
-        if column not in existing:
-            _execute(f"ALTER TABLE job_purchase_orders ADD COLUMN {column} {definition}")
-    except Exception:
-        pass
-
-
 def _ensure_schema() -> None:
     pk = "SERIAL PRIMARY KEY" if _use_postgres() else "INTEGER PRIMARY KEY AUTOINCREMENT"
     _execute(
@@ -230,6 +275,18 @@ def _ensure_schema() -> None:
         )
         """
     )
+    for column, definition in (
+        ("document_type", "TEXT"),
+        ("file_name", "TEXT"),
+        ("file_path", "TEXT"),
+        ("uploaded_at", "TEXT"),
+        ("created_at", "TEXT"),
+        ("uploaded_by", "TEXT"),
+        ("notes", "TEXT"),
+        ("mime_type", "TEXT"),
+    ):
+        _ensure_table_column("job_documents", column, definition)
+
     _execute(
         f"""
         CREATE TABLE IF NOT EXISTS job_purchase_orders (
@@ -254,13 +311,23 @@ def _ensure_schema() -> None:
         """
     )
     for column, definition in (
+        ("job_stage_id", "INTEGER"),
+        ("po_number", "TEXT"),
+        ("po_value_ex_gst", "REAL DEFAULT 0"),
+        ("file_name", "TEXT"),
+        ("file_path", "TEXT"),
+        ("status", "TEXT DEFAULT 'Uploaded'"),
+        ("received_date", "TEXT"),
+        ("uploaded_at", "TEXT"),
+        ("uploaded_by", "TEXT"),
+        ("notes", "TEXT"),
         ("po_scope_label", "TEXT"),
         ("po_scope_base_ex_gst", "REAL DEFAULT 0"),
         ("po_scope_percent", "REAL DEFAULT 0"),
         ("po_percent_of_job", "REAL DEFAULT 0"),
         ("po_calculation_mode", "TEXT"),
     ):
-        _ensure_po_column(column, definition)
+        _ensure_table_column("job_purchase_orders", column, definition)
 
 
 def _save_uploaded_file(job_id: int, po_number: str, uploaded_file: Any) -> tuple[str, str]:
@@ -313,45 +380,82 @@ def _record_po(
     calculation_mode: str,
 ) -> None:
     now = _now()
-    _execute(
-        """
-        INSERT INTO job_documents
-        (job_id,document_type,file_name,file_path,uploaded_at,created_at,uploaded_by,notes,mime_type)
-        VALUES (?,?,?,?,?,?,?,?,?)
-        """,
-        (
-            int(job_id), "Purchase Order", file_name, file_path, now, now,
-            uploaded_by, notes or f"PO {po_number}".strip(), "application/pdf",
-        ),
-    )
-    _execute(
-        """
-        INSERT INTO job_purchase_orders
-        (job_id,job_stage_id,po_number,po_value_ex_gst,file_name,file_path,status,
-         received_date,uploaded_at,uploaded_by,notes,po_scope_label,po_scope_base_ex_gst,
-         po_scope_percent,po_percent_of_job,po_calculation_mode)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-        """,
-        (
-            int(job_id), stage_id, po_number.strip(), float(value_ex_gst or 0),
-            file_name, file_path, "Uploaded", now[:10], now, uploaded_by, notes,
-            scope_label, float(scope_base_ex_gst or 0), float(scope_percent or 0),
-            float(percent_of_job or 0), calculation_mode,
-        ),
-    )
+    document_values = {
+        "job_id": int(job_id),
+        "document_type": "Purchase Order",
+        "doc_type": "Purchase Order",
+        "type": "Purchase Order",
+        "file_name": file_name,
+        "filename": file_name,
+        "name": file_name,
+        "file_path": file_path,
+        "path": file_path,
+        "uploaded_at": now,
+        "created_at": now,
+        "upload_date": now,
+        "date_uploaded": now,
+        "uploaded_by": uploaded_by,
+        "created_by": uploaded_by,
+        "notes": notes or f"PO {po_number}".strip(),
+        "description": notes or f"PO {po_number}".strip(),
+        "mime_type": "application/pdf",
+    }
+    _insert_existing_columns("job_documents", document_values)
+
+    po_values = {
+        "job_id": int(job_id),
+        "job_stage_id": stage_id,
+        "stage_id": stage_id,
+        "po_number": po_number.strip(),
+        "po_value_ex_gst": float(value_ex_gst or 0),
+        "value_ex_gst": float(value_ex_gst or 0),
+        "amount_ex_gst": float(value_ex_gst or 0),
+        "file_name": file_name,
+        "filename": file_name,
+        "file_path": file_path,
+        "path": file_path,
+        "status": "Uploaded",
+        "received_date": now[:10],
+        "uploaded_at": now,
+        "created_at": now,
+        "uploaded_by": uploaded_by,
+        "created_by": uploaded_by,
+        "notes": notes,
+        "po_scope_label": scope_label,
+        "po_scope_base_ex_gst": float(scope_base_ex_gst or 0),
+        "po_scope_percent": float(scope_percent or 0),
+        "po_percent_of_job": float(percent_of_job or 0),
+        "po_calculation_mode": calculation_mode,
+    }
+    _insert_existing_columns("job_purchase_orders", po_values)
 
 
 def _recent_pos(job_id: int) -> Any:
     try:
+        existing = _table_columns("job_purchase_orders")
+        if not existing:
+            return None
+        select_sql = ",".join(
+            [
+                _select_column_expr(existing, "po_number", "PO Number"),
+                _select_column_expr(existing, "po_value_ex_gst", "Value ex GST", "0"),
+                _select_column_expr(existing, "po_scope_label", "Scope"),
+                _select_column_expr(existing, "po_scope_base_ex_gst", "Scope Value ex GST", "0"),
+                _select_column_expr(existing, "po_scope_percent", "% of Scope", "0"),
+                _select_column_expr(existing, "po_percent_of_job", "% of Job", "0"),
+                _select_column_expr(existing, "status", "Status"),
+                _select_column_expr(existing, "received_date", "Received"),
+                _select_column_expr(existing, "file_name", "File"),
+                _select_column_expr(existing, "notes", "Notes"),
+            ]
+        )
+        order_column = "id" if "id" in existing else "job_id"
         return _df_query(
-            """
-            SELECT po_number AS 'PO Number',po_value_ex_gst AS 'Value ex GST',
-                   po_scope_label AS 'Scope',po_scope_base_ex_gst AS 'Scope Value ex GST',
-                   po_scope_percent AS '% of Scope',po_percent_of_job AS '% of Job',
-                   status AS 'Status',received_date AS 'Received',file_name AS 'File',notes AS 'Notes'
+            f"""
+            SELECT {select_sql}
             FROM job_purchase_orders
             WHERE job_id=?
-            ORDER BY id DESC
+            ORDER BY {order_column} DESC
             LIMIT 20
             """,
             (int(job_id),),
