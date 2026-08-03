@@ -41,6 +41,13 @@ def _app_attr(name: str, default: Any = None) -> Any:
     return default
 
 
+def _use_postgres() -> bool:
+    try:
+        return bool(_app_attr("USE_POSTGRES", False))
+    except Exception:
+        return False
+
+
 def _safe_rerun(st: Any) -> None:
     rerun = _app_attr("pb_rerun") or _app_attr("refresh") or getattr(st, "rerun", None)
     if callable(rerun):
@@ -163,11 +170,11 @@ def _stage_options(job_id: int) -> dict[str, int | None]:
 
 
 def _ensure_schema() -> None:
-    # job_documents normally exists.  This keeps older/local builds safe.
+    pk = "SERIAL PRIMARY KEY" if _use_postgres() else "INTEGER PRIMARY KEY AUTOINCREMENT"
     _execute(
-        """
+        f"""
         CREATE TABLE IF NOT EXISTS job_documents (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {pk},
             job_id INTEGER NOT NULL,
             document_type TEXT,
             file_name TEXT,
@@ -180,11 +187,10 @@ def _ensure_schema() -> None:
         )
         """
     )
-    # Dedicated PO metadata table.  If JobHub already has this table, this is a no-op.
     _execute(
-        """
+        f"""
         CREATE TABLE IF NOT EXISTS job_purchase_orders (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {pk},
             job_id INTEGER NOT NULL,
             job_stage_id INTEGER,
             po_number TEXT,
