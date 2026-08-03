@@ -13,6 +13,7 @@ from .progress_baseline_unlock_guard import install_progress_baseline_unlock_gua
 from .progress_external_options_guard import install_progress_external_options_guard
 from .push_configuration_guard import install_push_configuration_guard
 from .setup_defaults_guard import install_setup_defaults_guard
+from .setup_defaults_route_guard import install_setup_defaults_route_guard
 from .sidebar_readability_guard import install_sidebar_readability_guard
 from .stage_dwelling_builder_guard import install_stage_dwelling_builder_guard
 from .stage_preset_guard import install_stage_preset_guard
@@ -33,6 +34,7 @@ install_notification_wording_guard()
 install_mobile_sidebar_guard()
 install_sidebar_readability_guard()
 install_navigation_state_guard()
+install_setup_defaults_route_guard()
 install_setup_defaults_guard()
 install_po_upload_guard()
 install_po_upload_scope_return_guard()
