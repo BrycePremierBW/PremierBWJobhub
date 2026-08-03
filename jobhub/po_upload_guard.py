@@ -19,6 +19,11 @@ PO_UPLOAD_LABEL = "Upload PO"
 PO_UPLOAD_STATE_KEY = "_pb_show_po_upload_page"
 SESSION_GET_PATCH_KEY = "_pb_po_upload_session_get_guard"
 
+CALC_BY_AMOUNT = "Enter PO amount → calculate %"
+CALC_BY_PERCENT = "Enter % → calculate PO amount"
+BASIS_TOTAL_JOB = "Whole job value"
+BASIS_MANUAL_SCOPE = "Manual area / stage value"
+
 RESET_SAFE_VALUES = {
     "main_menu": "Dashboard",
     "management_menu": "Builders & Clients",
@@ -133,6 +138,13 @@ def _clean_filename(value: str) -> str:
     return name or "purchase_order.pdf"
 
 
+def _safe_float(value: Any) -> float:
+    try:
+        return float(value or 0)
+    except Exception:
+        return 0.0
+
+
 def _job_options() -> dict[str, int]:
     try:
         jobs = _df_query(
@@ -154,6 +166,19 @@ def _job_options() -> dict[str, int]:
     }
 
 
+def _job_value(job_id: int) -> float:
+    try:
+        job = _df_query(
+            "SELECT COALESCE(contract_value,0) AS contract_value FROM jobs WHERE id=?",
+            (int(job_id),),
+        )
+        if job is not None and not getattr(job, "empty", True):
+            return _safe_float(job.iloc[0]["contract_value"])
+    except Exception:
+        pass
+    return 0.0
+
+
 def _stage_options(job_id: int) -> dict[str, int | None]:
     options: dict[str, int | None] = {"Whole job / not stage-specific": None}
     try:
@@ -172,6 +197,19 @@ def _stage_options(job_id: int) -> dict[str, int | None]:
         for _, row in stages.iterrows():
             options[str(row["stage_name"] or f"Stage {int(row['id'])}")] = int(row["id"])
     return options
+
+
+def _ensure_po_column(column: str, definition: str) -> None:
+    try:
+        if _use_postgres():
+            _execute(f"ALTER TABLE job_purchase_orders ADD COLUMN IF NOT EXISTS {column} {definition}")
+            return
+        columns = _df_query("PRAGMA table_info(job_purchase_orders)")
+        existing = set(columns.get("name", []).astype(str).tolist()) if hasattr(columns, "get") else set()
+        if column not in existing:
+            _execute(f"ALTER TABLE job_purchase_orders ADD COLUMN {column} {definition}")
+    except Exception:
+        pass
 
 
 def _ensure_schema() -> None:
@@ -206,10 +244,23 @@ def _ensure_schema() -> None:
             received_date TEXT,
             uploaded_at TEXT,
             uploaded_by TEXT,
-            notes TEXT
+            notes TEXT,
+            po_scope_label TEXT,
+            po_scope_base_ex_gst REAL DEFAULT 0,
+            po_scope_percent REAL DEFAULT 0,
+            po_percent_of_job REAL DEFAULT 0,
+            po_calculation_mode TEXT
         )
         """
     )
+    for column, definition in (
+        ("po_scope_label", "TEXT"),
+        ("po_scope_base_ex_gst", "REAL DEFAULT 0"),
+        ("po_scope_percent", "REAL DEFAULT 0"),
+        ("po_percent_of_job", "REAL DEFAULT 0"),
+        ("po_calculation_mode", "TEXT"),
+    ):
+        _ensure_po_column(column, definition)
 
 
 def _save_uploaded_file(job_id: int, po_number: str, uploaded_file: Any) -> tuple[str, str]:
@@ -229,7 +280,38 @@ def _save_uploaded_file(job_id: int, po_number: str, uploaded_file: Any) -> tupl
     return file_name, str(file_path)
 
 
-def _record_po(job_id: int, stage_id: int | None, po_number: str, value_ex_gst: float, file_name: str, file_path: str, notes: str, uploaded_by: str) -> None:
+def _calculate_po_values(mode: str, scope_base: float, job_value: float, entered_amount: float, entered_percent: float) -> dict[str, float]:
+    clean_scope_base = max(0.0, _safe_float(scope_base))
+    clean_job_value = max(0.0, _safe_float(job_value))
+    if mode == CALC_BY_PERCENT:
+        scope_percent = max(0.0, _safe_float(entered_percent))
+        amount = clean_scope_base * scope_percent / 100.0 if clean_scope_base else 0.0
+    else:
+        amount = max(0.0, _safe_float(entered_amount))
+        scope_percent = amount / clean_scope_base * 100.0 if clean_scope_base else 0.0
+    job_percent = amount / clean_job_value * 100.0 if clean_job_value else 0.0
+    return {
+        "amount": round(amount, 2),
+        "scope_percent": round(scope_percent, 4),
+        "job_percent": round(job_percent, 4),
+    }
+
+
+def _record_po(
+    job_id: int,
+    stage_id: int | None,
+    po_number: str,
+    value_ex_gst: float,
+    file_name: str,
+    file_path: str,
+    notes: str,
+    uploaded_by: str,
+    scope_label: str,
+    scope_base_ex_gst: float,
+    scope_percent: float,
+    percent_of_job: float,
+    calculation_mode: str,
+) -> None:
     now = _now()
     _execute(
         """
@@ -245,12 +327,16 @@ def _record_po(job_id: int, stage_id: int | None, po_number: str, value_ex_gst: 
     _execute(
         """
         INSERT INTO job_purchase_orders
-        (job_id,job_stage_id,po_number,po_value_ex_gst,file_name,file_path,status,received_date,uploaded_at,uploaded_by,notes)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?)
+        (job_id,job_stage_id,po_number,po_value_ex_gst,file_name,file_path,status,
+         received_date,uploaded_at,uploaded_by,notes,po_scope_label,po_scope_base_ex_gst,
+         po_scope_percent,po_percent_of_job,po_calculation_mode)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         (
             int(job_id), stage_id, po_number.strip(), float(value_ex_gst or 0),
             file_name, file_path, "Uploaded", now[:10], now, uploaded_by, notes,
+            scope_label, float(scope_base_ex_gst or 0), float(scope_percent or 0),
+            float(percent_of_job or 0), calculation_mode,
         ),
     )
 
@@ -260,6 +346,8 @@ def _recent_pos(job_id: int) -> Any:
         return _df_query(
             """
             SELECT po_number AS 'PO Number',po_value_ex_gst AS 'Value ex GST',
+                   po_scope_label AS 'Scope',po_scope_base_ex_gst AS 'Scope Value ex GST',
+                   po_scope_percent AS '% of Scope',po_percent_of_job AS '% of Job',
                    status AS 'Status',received_date AS 'Received',file_name AS 'File',notes AS 'Notes'
             FROM job_purchase_orders
             WHERE job_id=?
@@ -286,13 +374,70 @@ def render_po_upload_page() -> None:
         return
     selected_job = st.selectbox("Job", list(jobs), key="po_upload_job")
     job_id = jobs[selected_job]
+    job_value = _job_value(job_id)
     stages = _stage_options(job_id)
 
     with st.form("po_upload_form", clear_on_submit=False):
         c1, c2, c3 = st.columns(3)
         po_number = c1.text_input("PO Number", placeholder="e.g. PO-12345")
-        value_ex_gst = c2.number_input("PO Value ex GST", min_value=0.0, step=100.0, value=0.0)
-        selected_stage = c3.selectbox("Stage", list(stages), key="po_upload_stage")
+        selected_stage = c2.selectbox("Stage / area", list(stages), key="po_upload_stage")
+        basis = c3.selectbox(
+            "Calculate % from",
+            [BASIS_TOTAL_JOB, BASIS_MANUAL_SCOPE],
+            help="Use manual area/stage value for Internal, External, upper scaffold, lower external or touch-ups.",
+        )
+
+        suggested_scope_label = selected_stage if selected_stage != "Whole job / not stage-specific" else "Whole job"
+        scope_label = st.text_input(
+            "Area / scope name",
+            value=suggested_scope_label,
+            placeholder="e.g. External, Internal, Upper scaff work",
+        )
+
+        if basis == BASIS_MANUAL_SCOPE:
+            scope_base = st.number_input(
+                "Area / stage value ex GST",
+                min_value=0.0,
+                step=100.0,
+                value=0.0,
+                help="Example: enter the external works total. The PO percentage is then calculated against this amount.",
+            )
+        else:
+            scope_base = job_value
+            st.metric("Whole job value ex GST", f"${job_value:,.2f}")
+
+        mode = st.radio(
+            "PO calculation mode",
+            [CALC_BY_AMOUNT, CALC_BY_PERCENT],
+            horizontal=True,
+            help="Choose whether you want to enter the dollar amount or the percentage.",
+        )
+        if mode == CALC_BY_PERCENT:
+            entered_percent = st.number_input(
+                "% of selected area / scope",
+                min_value=0.0,
+                max_value=1000.0,
+                step=1.0,
+                value=0.0,
+            )
+            entered_amount = 0.0
+        else:
+            entered_amount = st.number_input(
+                "PO Value ex GST",
+                min_value=0.0,
+                step=100.0,
+                value=0.0,
+            )
+            entered_percent = 0.0
+
+        calculated = _calculate_po_values(
+            mode, scope_base, job_value, entered_amount, entered_percent,
+        )
+        m1, m2, m3 = st.columns(3)
+        m1.metric("PO amount ex GST", f"${calculated['amount']:,.2f}")
+        m2.metric("% of selected scope", f"{calculated['scope_percent']:.2f}%")
+        m3.metric("% of whole job", f"{calculated['job_percent']:.2f}%")
+
         uploaded = st.file_uploader(
             "PO file",
             type=["pdf", "png", "jpg", "jpeg", "doc", "docx", "xlsx", "csv"],
@@ -308,6 +453,12 @@ def render_po_upload_page() -> None:
         if not po_number.strip():
             _error("Enter the PO number first.")
             return
+        if _safe_float(scope_base) <= 0:
+            _error("Enter a job, area or stage value first so JobHub can calculate the percentage.")
+            return
+        if calculated["amount"] <= 0:
+            _error("Enter a PO amount or percentage greater than zero.")
+            return
         try:
             user = (_app_attr("get_current_user", lambda: {})() or {})
             uploaded_by = str(user.get("username") or user.get("name") or "JobHub user")
@@ -316,13 +467,21 @@ def render_po_upload_page() -> None:
                 job_id,
                 stages[selected_stage],
                 po_number,
-                float(value_ex_gst or 0),
+                calculated["amount"],
                 file_name,
                 file_path,
                 notes.strip(),
                 uploaded_by,
+                scope_label.strip() or suggested_scope_label,
+                float(scope_base or 0),
+                calculated["scope_percent"],
+                calculated["job_percent"],
+                mode,
             )
-            _success(f"PO {po_number.strip()} uploaded and attached to the job.")
+            _success(
+                f"PO {po_number.strip()} uploaded: ${calculated['amount']:,.2f} ex GST, "
+                f"{calculated['scope_percent']:.2f}% of {scope_label.strip() or suggested_scope_label}."
+            )
             _safe_rerun(st)
         except Exception as exc:
             _error(f"PO upload failed: {exc}")
