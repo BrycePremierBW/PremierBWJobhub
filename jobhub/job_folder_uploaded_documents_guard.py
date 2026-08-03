@@ -8,7 +8,6 @@ from typing import Any
 
 
 JOB_FOLDERS_LABELS = {"Job Folders", "Job Folder"}
-DOCUMENTS_PANEL_KEY = "pb_job_folder_uploaded_documents_rendered"
 
 
 def _st() -> Any:
@@ -176,13 +175,6 @@ def render_uploaded_documents_panel() -> None:
     st = _st()
     if st is None:
         return
-    try:
-        if bool(st.session_state.get(DOCUMENTS_PANEL_KEY, False)):
-            return
-        st.session_state[DOCUMENTS_PANEL_KEY] = True
-    except Exception:
-        pass
-
     jobs = _job_options()
     if not jobs:
         return
