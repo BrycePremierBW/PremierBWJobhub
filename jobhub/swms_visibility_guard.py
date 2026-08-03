@@ -1,10 +1,9 @@
 """Make SWMS controls visible in employee, manager, and admin JobHub views.
 
-The main JobHub router uses a hard-coded menu list and validates session state
-on every rerun. This guard therefore avoids injecting fake menu choices. It
-adds a real Safety button beside the existing sidebar menu when the real main
-menu widget is rendered, then opens the SWMS page directly and stops the normal
-page route.
+The main JobHub app validates its hard-coded menu list on every rerun, so this
+module does not rely on storing a fake route in session state. It injects
+"SWMS / Safety Sign-off" into the real Streamlit radio options as they render
+and opens the SWMS page immediately when selected.
 """
 
 from __future__ import annotations
@@ -16,6 +15,28 @@ from . import swms_guard
 
 ADMIN_SWMS_LABEL = "SWMS / Safety Sign-off"
 ADMIN_SWMS_STATE_KEY = "_pb_show_admin_swms_page"
+
+
+MAIN_MENU_LABELS = {
+    "Dashboard", "Control Centre", "Operations Hub", "Jobs", "Job Folders",
+    "Estimating", "Site Operations", "Reports", "Management", "AI Assistant",
+    "Field Mode", "Employee Portal",
+}
+
+MANAGEMENT_LABELS = {
+    "User Accounts", "Builders & Clients", "Employees", "Staff Requests",
+    "Products", "Equipment",
+}
+
+SITE_LABELS = {
+    "Staff Scheduler", "Painting Intelligence", "Material Costs", "Wages",
+    "Timesheets", "Job Photos",
+}
+
+EMPLOYEE_TAB_LABELS = {
+    "My Job Info", "Requests", "Submit Timesheet", "View Equipment",
+    "Generate Forms", "Upload Photos", "Change Password",
+}
 
 
 def _safe_rerun(st: Any) -> None:
@@ -66,22 +87,48 @@ def _install_employee_tab_visibility() -> bool:
     return True
 
 
-def _is_main_menu_options(options: Any) -> bool:
+def _labels(options: Any) -> list[str]:
     try:
-        labels = {str(option) for option in list(options)}
+        return [str(option) for option in list(options)]
     except Exception:
-        return False
-
-    admin_or_manager_menu = (
-        "Dashboard" in labels
-        and ("Jobs" in labels or "Job Folders" in labels or "Control Centre" in labels)
-        and ("Management" in labels or "Operations Hub" in labels or "Site Operations" in labels)
-    )
-    employee_menu = {"Field Mode", "Employee Portal"}.issubset(labels)
-    return bool(admin_or_manager_menu or employee_menu)
+        return []
 
 
-def _clear_admin_swms_state(st: Any) -> None:
+def _should_inject_swms(label: Any, key: Any, options: Any) -> bool:
+    option_labels = set(_labels(options))
+    if ADMIN_SWMS_LABEL in option_labels:
+        return True
+
+    label_text = str(label or "").strip()
+    key_text = str(key or "").strip()
+
+    if label_text == "Menu" or key_text == "main_menu":
+        return bool(option_labels.intersection(MAIN_MENU_LABELS))
+    if label_text in {"Management Section", "Site Section"} or key_text in {"management_menu", "site_operations_menu"}:
+        return bool(option_labels.intersection(MANAGEMENT_LABELS | SITE_LABELS))
+    if label_text in {"Employee Portal", "Employee Section"} or key_text in {"employee_menu", "employee_portal_menu"}:
+        return bool(option_labels.intersection(EMPLOYEE_TAB_LABELS))
+
+    # Fallback for sidebar radios whose label/key has changed but whose options
+    # clearly match one of JobHub's navigation groups.
+    if len(option_labels.intersection(MAIN_MENU_LABELS)) >= 2:
+        return True
+    if len(option_labels.intersection(MANAGEMENT_LABELS | SITE_LABELS)) >= 2:
+        return True
+    return False
+
+
+def _with_swms_option(options: Any) -> Any:
+    try:
+        values = list(options)
+    except Exception:
+        return options
+    if ADMIN_SWMS_LABEL not in [str(value) for value in values]:
+        values.append(ADMIN_SWMS_LABEL)
+    return values
+
+
+def _clear_swms_state(st: Any) -> None:
     try:
         st.session_state.pop(ADMIN_SWMS_STATE_KEY, None)
         st.session_state["main_menu"] = "Employee Portal" if _employee_mode() else "Dashboard"
@@ -100,7 +147,7 @@ def _show_swms_page(st: Any) -> None:
             "employee electronic acknowledgements."
         )
     if st.button("← Back to start", key="admin_swms_back_to_dashboard"):
-        _clear_admin_swms_state(st)
+        _clear_swms_state(st)
         _safe_rerun(st)
     swms_guard.render_swms_panel(
         employee_mode=employee_mode,
@@ -109,61 +156,48 @@ def _show_swms_page(st: Any) -> None:
     st.stop()
 
 
-def _render_swms_launcher(st: Any) -> None:
-    # This runs during the real sidebar menu render, not during package import,
-    # so it does not violate Streamlit's set_page_config ordering.
-    if bool(st.session_state.get(ADMIN_SWMS_STATE_KEY)):
-        _show_swms_page(st)
-
-    st.sidebar.markdown("### Safety")
-    try:
-        clicked = st.sidebar.button(
-            ADMIN_SWMS_LABEL,
-            key="admin_swms_sidebar_launcher",
-            width="stretch",
-        )
-    except TypeError:
-        clicked = st.sidebar.button(
-            ADMIN_SWMS_LABEL,
-            key="admin_swms_sidebar_launcher",
-        )
-
-    if clicked:
-        st.session_state[ADMIN_SWMS_STATE_KEY] = True
-        _show_swms_page(st)
-
-
 def _patch_radio(owner: Any, st: Any) -> bool:
     original = getattr(owner, "radio", None)
-    if original is None or getattr(original, "_pb_swms_admin_launcher_guard", False):
+    if original is None or getattr(original, "_pb_swms_visible_menu_guard", False):
         return False
 
     def wrapper(*args: Any, **kwargs: Any):
         arg_list = list(args)
-        options = None
-        if len(arg_list) >= 2 and _is_main_menu_options(arg_list[1]):
-            options = arg_list[1]
-        elif len(arg_list) >= 3 and _is_main_menu_options(arg_list[2]):
-            options = arg_list[2]
-        elif "options" in kwargs and _is_main_menu_options(kwargs.get("options")):
-            options = kwargs.get("options")
+        label = None
+        options_index = None
 
-        if options is not None:
-            _render_swms_launcher(st)
+        # Supports both st.radio(label, options, ...) and
+        # DeltaGenerator.radio(self, label, options, ...).
+        if len(arg_list) >= 2 and isinstance(arg_list[0], str):
+            label = arg_list[0]
+            options_index = 1
+        elif len(arg_list) >= 3:
+            label = arg_list[1]
+            options_index = 2
+        elif "options" in kwargs:
+            label = arg_list[0] if arg_list else kwargs.get("label")
+
+        options = arg_list[options_index] if options_index is not None else kwargs.get("options")
+        should_inject = _should_inject_swms(label, kwargs.get("key"), options)
+        if should_inject:
+            if options_index is not None:
+                arg_list[options_index] = _with_swms_option(options)
+            else:
+                kwargs["options"] = _with_swms_option(options)
 
         result = original(*tuple(arg_list), **kwargs)
-        if str(result) == ADMIN_SWMS_LABEL:
+        if should_inject and str(result) == ADMIN_SWMS_LABEL:
             st.session_state[ADMIN_SWMS_STATE_KEY] = True
             _show_swms_page(st)
         return result
 
-    wrapper._pb_swms_admin_launcher_guard = True
+    wrapper._pb_swms_visible_menu_guard = True
     wrapper._pb_original = original
     setattr(owner, "radio", wrapper)
     return True
 
 
-def _install_sidebar_launcher() -> bool:
+def _install_menu_option() -> bool:
     st = sys.modules.get("streamlit")
     if st is None:
         return False
@@ -179,5 +213,5 @@ def _install_sidebar_launcher() -> bool:
 
 def install_swms_visibility_guard() -> bool:
     employee_installed = _install_employee_tab_visibility()
-    launcher_installed = _install_sidebar_launcher()
-    return bool(employee_installed or launcher_installed)
+    menu_installed = _install_menu_option()
+    return bool(employee_installed or menu_installed)
