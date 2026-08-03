@@ -98,6 +98,7 @@ class RecentFeatureGuardSmokeTests(unittest.TestCase):
             'PO_UPLOAD_LABEL = "Upload PO"',
             "_install_session_state_reset_guard",
             "RESET_SAFE_VALUES",
+            "MENU_MARKERS",
             "_session_value",
             "_show_page(st)",
             "st.stop()",
@@ -105,12 +106,16 @@ class RecentFeatureGuardSmokeTests(unittest.TestCase):
             "INTEGER PRIMARY KEY AUTOINCREMENT",
             "install_po_upload_guard",
         ]
+        forbidden = ["PO_UPLOAD_DOC_TYPES"]
         for marker in required:
             self.assertIn(marker, source)
+        for marker in forbidden:
+            self.assertNotIn(marker, source)
 
     def test_progress_tracker_has_external_options(self):
         source = read("jobhub/progress_external_options_guard.py")
         required = [
+            "importlib.import_module",
             "External — 100%",
             "Upper scaff / lower / touch-ups",
             "Coating steps",
@@ -118,6 +123,7 @@ class RecentFeatureGuardSmokeTests(unittest.TestCase):
             "upper_scaff_work",
             "lower_external",
             "touch ups",
+            "FALLBACK_COATING_STAGES",
             "install_progress_external_options_guard",
             "_install_external_schema_guard",
             "_install_external_editor_guard",
