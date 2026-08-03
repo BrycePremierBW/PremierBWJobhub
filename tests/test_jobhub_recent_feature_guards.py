@@ -66,17 +66,18 @@ class RecentFeatureGuardSmokeTests(unittest.TestCase):
             positions.append(source.index(call))
         self.assertEqual(positions, sorted(positions), "Guard install order changed unexpectedly")
 
-    def test_mobile_sidebar_phone_layout_is_hardened(self):
+    def test_mobile_phone_navigation_has_sidebar_independent_quick_menu(self):
         source = read("jobhub/mobile_sidebar_guard.py")
         required = [
-            "PB_JOBHUB_MOBILE_SIDEBAR_FINAL_FIX_V3",
-            "--pb-mobile-sidebar-width: min(78vw, 300px)",
-            "--pb-mobile-sidebar-width: min(74vw, 280px)",
-            "100dvh",
-            "overflow-wrap: anywhere",
-            "pb-mobile-sidebar-auto-close-v3",
-            "touchend",
-            "initial_sidebar_state"]
+            "PB_JOBHUB_MOBILE_PHONE_NAVIGATION_FIX_V4",
+            "Mobile Quick Menu",
+            "_install_mobile_quick_menu_guard",
+            "_patch_radio",
+            "_render_quick_menu",
+            "section[data-testid=\"stSidebar\"]",
+            "display: none !important",
+            "pb-mobile-sidebar-neutralise-v4",
+        ]
         for marker in required:
             self.assertIn(marker, source)
 
