@@ -8,6 +8,14 @@ from typing import Any
 from . import swms_guard
 
 ADMIN_SWMS_LABEL = "SWMS / Safety Sign-off"
+ADMIN_SWMS_STATE_KEY = "_pb_show_admin_swms_page"
+DASHBOARD_PATCH_KEY = "_pb_swms_dashboard_route_guard"
+
+
+def _safe_rerun(st: Any) -> None:
+    rerun = swms_guard._app("pb_rerun") or swms_guard._app("refresh") or getattr(st, "rerun", None)
+    if callable(rerun):
+        rerun()
 
 
 def _install_employee_tab_visibility() -> bool:
@@ -44,7 +52,7 @@ def _looks_like_main_menu(options: Any) -> bool:
     except Exception:
         return False
     if ADMIN_SWMS_LABEL in labels:
-        return False
+        return True
     markers = {
         "Dashboard", "Jobs", "Job Folders", "Estimating", "Site Operations",
         "Operations Hub", "Management", "Employee Portal", "Reports",
@@ -65,11 +73,46 @@ def _with_admin_swms(options: Any) -> list[Any]:
     return values
 
 
+def _clear_admin_swms_state(st: Any) -> None:
+    try:
+        st.session_state.pop(ADMIN_SWMS_STATE_KEY, None)
+        st.session_state["main_menu"] = "Dashboard"
+    except Exception:
+        pass
+
+
 def _show_admin_swms(st: Any) -> None:
     st.header("SWMS / Safety Sign-off")
     st.caption("Admin view: create job SWMS documents, download them, and review employee electronic acknowledgements.")
+    if st.button("← Back to Dashboard", key="admin_swms_back_to_dashboard"):
+        _clear_admin_swms_state(st)
+        _safe_rerun(st)
     swms_guard.render_swms_panel(employee_mode=False, key_prefix="admin_swms")
     st.stop()
+
+
+def _install_dashboard_route(st: Any) -> bool:
+    # The app validates the main menu against its original option list on every
+    # rerun. A dynamically added SWMS menu item can therefore reset back to
+    # Dashboard before the route block runs. This patch makes that reset safe:
+    # when SWMS has been selected, the normal Dashboard route renders the SWMS
+    # page instead of the operational dashboard.
+    module = sys.modules.get("__main__") or sys.modules.get("pb_jobhub_app")
+    if module is None:
+        return False
+    original = getattr(module, "render_operational_dashboard", None)
+    if original is None or getattr(original, DASHBOARD_PATCH_KEY, False):
+        return False
+
+    def dashboard_or_swms(*args: Any, **kwargs: Any):
+        if bool(st.session_state.get(ADMIN_SWMS_STATE_KEY)):
+            _show_admin_swms(st)
+        return original(*args, **kwargs)
+
+    setattr(dashboard_or_swms, DASHBOARD_PATCH_KEY, True)
+    setattr(dashboard_or_swms, "_pb_original_dashboard", original)
+    setattr(module, "render_operational_dashboard", dashboard_or_swms)
+    return True
 
 
 def _patch_widget(owner: Any, attr: str, st: Any) -> bool:
@@ -78,18 +121,29 @@ def _patch_widget(owner: Any, attr: str, st: Any) -> bool:
         return False
 
     def wrapper(*args: Any, **kwargs: Any):
-        # Supports both st.selectbox(label, options, ...) and
-        # DeltaGenerator.selectbox(self, label, options, ...).
+        # Supports both st.radio(label, options, ...) and
+        # DeltaGenerator.radio(self, label, options, ...).
         arg_list = list(args)
+        menu_widget = False
         if len(arg_list) >= 2 and _looks_like_main_menu(arg_list[1]):
+            menu_widget = True
             arg_list[1] = _with_admin_swms(arg_list[1])
         elif len(arg_list) >= 3 and _looks_like_main_menu(arg_list[2]):
+            menu_widget = True
             arg_list[2] = _with_admin_swms(arg_list[2])
         elif "options" in kwargs and _looks_like_main_menu(kwargs.get("options")):
+            menu_widget = True
             kwargs["options"] = _with_admin_swms(kwargs["options"])
+
+        if menu_widget:
+            _install_dashboard_route(st)
+
         result = original(*tuple(arg_list), **kwargs)
-        if str(result) == ADMIN_SWMS_LABEL:
-            _show_admin_swms(st)
+        if menu_widget and str(result) == ADMIN_SWMS_LABEL:
+            st.session_state[ADMIN_SWMS_STATE_KEY] = True
+            # Rerun so the Dashboard fallback route can render the SWMS page in
+            # the main app area instead of inside the sidebar widget call.
+            _safe_rerun(st)
         return result
 
     wrapper._pb_swms_admin_nav_guard = True
