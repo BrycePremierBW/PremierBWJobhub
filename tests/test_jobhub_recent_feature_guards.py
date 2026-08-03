@@ -68,20 +68,27 @@ class RecentFeatureGuardSmokeTests(unittest.TestCase):
             positions.append(source.index(call))
         self.assertEqual(positions, sorted(positions), "Guard install order changed unexpectedly")
 
-    def test_mobile_phone_navigation_has_sidebar_independent_quick_menu(self):
+    def test_mobile_sidebar_does_not_hijack_desktop_routing(self):
         source = read("jobhub/mobile_sidebar_guard.py")
         required = [
-            "PB_JOBHUB_MOBILE_PHONE_NAVIGATION_FIX_V4",
-            "Mobile Quick Menu",
-            "_install_mobile_quick_menu_guard",
-            "_patch_radio",
-            "_render_quick_menu",
+            "PB_JOBHUB_MOBILE_PHONE_NAVIGATION_FIX_V5",
+            "Do not patch or override Streamlit radio return values",
+            "pb-mobile-sidebar-autoclose-v5",
+            "body.pb-mobile-sidebar-closing",
             "section[data-testid=\"stSidebar\"]",
-            "display: none !important",
-            "pb-mobile-sidebar-neutralise-v4",
+            "install_mobile_sidebar_guard",
+        ]
+        forbidden = [
+            "_install_mobile_quick_menu_guard",
+            "_render_quick_menu",
+            "_patch_radio",
+            "pb_mobile_quick_radio",
+            "return quick_choice",
         ]
         for marker in required:
             self.assertIn(marker, source)
+        for marker in forbidden:
+            self.assertNotIn(marker, source)
 
     def test_progress_tracker_has_external_options(self):
         source = read("jobhub/progress_external_options_guard.py")
