@@ -77,6 +77,21 @@ class RecentFeatureGuardSmokeTests(unittest.TestCase):
             positions.append(source.index(call))
         self.assertEqual(positions, sorted(positions), "Guard install order changed unexpectedly")
 
+    def test_jobhub_core_keeps_required_app_imports(self):
+        source = read("jobhub_core.py")
+        required = [
+            "def calculate_shift_hours",
+            "def next_scoped_number",
+            "def hash_password",
+            "def verify_password",
+            "def password_strength_errors",
+            "def validate_public_http_url",
+            "def calculate_estimate_pricing",
+            "return round(net_minutes / 60, 2)",
+        ]
+        for marker in required:
+            self.assertIn(marker, source)
+
     def test_password_policy_is_six_characters_without_symbol_or_number(self):
         source = read("jobhub_core.py")
         self.assertIn("MIN_PASSWORD_LENGTH = 6", source)
