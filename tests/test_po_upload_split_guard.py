@@ -48,3 +48,19 @@ def test_split_po_uses_same_po_file_for_both_lines():
     assert source.count("_record_po_line(") >= 3
     assert "scope_label=\"Internal\"" in source
     assert "scope_label=\"External\"" in source
+
+
+def test_split_po_allows_same_po_number_for_internal_and_external_scope_lines():
+    source = read("jobhub/po_upload_split_guard.py")
+    required = [
+        "PO_NUMBER_UNIQUE_CONSTRAINT",
+        "job_purchase_orders_job_id_po_number_key",
+        "_relax_po_number_uniqueness",
+        "ALTER TABLE job_purchase_orders DROP CONSTRAINT IF EXISTS",
+        "DROP INDEX IF EXISTS",
+        "one Internal row and one External row",
+    ]
+    for marker in required:
+        assert marker in source
+    assert "-INT" not in source
+    assert "-EXT" not in source
