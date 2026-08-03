@@ -4,6 +4,7 @@ from .ai_menu_guard import install_ai_menu_guard
 from .bulk_delete_guard import install_bulk_delete_guard
 from .job_folder_uploaded_documents_guard import install_job_folder_uploaded_documents_guard
 from .mobile_sidebar_guard import install_mobile_sidebar_guard
+from .mobile_top_navigation_guard import install_mobile_top_navigation_guard
 from .navigation_state_guard import install_navigation_state_guard
 from .notification_wording_guard import install_notification_wording_guard
 from .po_upload_guard import install_po_upload_guard
@@ -34,6 +35,7 @@ from .timesheet_area_guard import install_timesheet_area_guard
 install_push_configuration_guard()
 install_notification_wording_guard()
 install_mobile_sidebar_guard()
+install_mobile_top_navigation_guard()
 install_sidebar_readability_guard()
 install_navigation_state_guard()
 install_setup_defaults_route_guard()
