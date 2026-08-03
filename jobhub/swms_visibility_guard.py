@@ -186,7 +186,7 @@ def _clear_swms_state(st: Any) -> None:
         st.session_state.pop(ADMIN_SWMS_STATE_KEY, None)
         st.session_state["main_menu"] = "Employee Portal" if _employee_mode() else "Dashboard"
         for key in ("management_menu", "site_operations_menu", "estimating_menu", "ai_menu", "employee_menu", "employee_portal_menu"):
-            if str(st.session_state.get(key, "")) == ADMIN_SWMS_LABEL:
+            if str(_session_value(st, key, "")) == ADMIN_SWMS_LABEL:
                 st.session_state.pop(key, None)
     except Exception:
         pass
