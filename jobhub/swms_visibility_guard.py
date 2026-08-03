@@ -1,9 +1,9 @@
 """Make SWMS controls visible in employee, manager, and admin JobHub views.
 
 The main JobHub app validates its hard-coded menu list on every rerun, so this
-module does not rely on storing a fake route in session state. It injects
-"SWMS / Safety Sign-off" into the real Streamlit radio options as they render
-and opens the SWMS page immediately when selected.
+module injects "SWMS / Safety Sign-off" into the real Streamlit radio options
+and protects that selection from the app's reset checks before rendering the
+SWMS page.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ from . import swms_guard
 
 ADMIN_SWMS_LABEL = "SWMS / Safety Sign-off"
 ADMIN_SWMS_STATE_KEY = "_pb_show_admin_swms_page"
+SESSION_GET_PATCH_KEY = "_pb_swms_session_get_guard"
 
 
 MAIN_MENU_LABELS = {
@@ -38,6 +39,16 @@ EMPLOYEE_TAB_LABELS = {
     "Generate Forms", "Upload Photos", "Change Password",
 }
 
+RESET_SAFE_VALUES = {
+    "main_menu": "Dashboard",
+    "management_menu": "Builders & Clients",
+    "site_operations_menu": "Staff Scheduler",
+    "estimating_menu": "Import / Create Job Pack",
+    "ai_menu": "JobHub AI Assistant",
+    "employee_menu": "Generate Forms",
+    "employee_portal_menu": "Generate Forms",
+}
+
 
 def _safe_rerun(st: Any) -> None:
     rerun = swms_guard._app("pb_rerun") or swms_guard._app("refresh") or getattr(st, "rerun", None)
@@ -57,6 +68,48 @@ def _current_role() -> str:
 
 def _employee_mode() -> bool:
     return _current_role() == "employee"
+
+
+def _session_value(st: Any, key: str, default: Any = None) -> Any:
+    try:
+        return st.session_state[key]
+    except Exception:
+        try:
+            return st.session_state.get(key, default)
+        except Exception:
+            return default
+
+
+def _install_session_state_reset_guard(st: Any) -> bool:
+    """Stop JobHub's hard-coded menu validation from erasing SWMS selection.
+
+    JobHub checks st.session_state.get("main_menu") against its original menu
+    list before the radio widget is rendered. When SWMS is selected, that check
+    would normally reset the key to Dashboard. This patch only changes .get()
+    for those reset checks; the underlying session value remains SWMS so the
+    radio wrapper can render the SWMS page.
+    """
+    try:
+        state_cls = type(st.session_state)
+        original_get = getattr(state_cls, "get", None)
+    except Exception:
+        return False
+    if original_get is None or getattr(original_get, SESSION_GET_PATCH_KEY, False):
+        return False
+
+    def guarded_get(self: Any, key: Any, default: Any = None) -> Any:
+        value = original_get(self, key, default)
+        key_text = str(key or "")
+        if key_text in RESET_SAFE_VALUES and str(value) == ADMIN_SWMS_LABEL:
+            if key_text == "main_menu" and _employee_mode():
+                return "Employee Portal"
+            return RESET_SAFE_VALUES[key_text]
+        return value
+
+    guarded_get._pb_original_get = original_get
+    setattr(guarded_get, SESSION_GET_PATCH_KEY, True)
+    setattr(state_cls, "get", guarded_get)
+    return True
 
 
 def _install_employee_tab_visibility() -> bool:
@@ -132,6 +185,9 @@ def _clear_swms_state(st: Any) -> None:
     try:
         st.session_state.pop(ADMIN_SWMS_STATE_KEY, None)
         st.session_state["main_menu"] = "Employee Portal" if _employee_mode() else "Dashboard"
+        for key in ("management_menu", "site_operations_menu", "estimating_menu", "ai_menu", "employee_menu", "employee_portal_menu"):
+            if str(st.session_state.get(key, "")) == ADMIN_SWMS_LABEL:
+                st.session_state.pop(key, None)
     except Exception:
         pass
 
@@ -178,12 +234,21 @@ def _patch_radio(owner: Any, st: Any) -> bool:
             label = arg_list[0] if arg_list else kwargs.get("label")
 
         options = arg_list[options_index] if options_index is not None else kwargs.get("options")
-        should_inject = _should_inject_swms(label, kwargs.get("key"), options)
+        key_text = str(kwargs.get("key") or "")
+        should_inject = _should_inject_swms(label, key_text, options)
         if should_inject:
             if options_index is not None:
                 arg_list[options_index] = _with_swms_option(options)
             else:
                 kwargs["options"] = _with_swms_option(options)
+
+            # If the front end has already placed SWMS into session_state, render
+            # now before the original radio falls back to the app's default.
+            if key_text and str(_session_value(st, key_text)) == ADMIN_SWMS_LABEL:
+                st.session_state[ADMIN_SWMS_STATE_KEY] = True
+                _show_swms_page(st)
+            if bool(_session_value(st, ADMIN_SWMS_STATE_KEY, False)):
+                _show_swms_page(st)
 
         result = original(*tuple(arg_list), **kwargs)
         if should_inject and str(result) == ADMIN_SWMS_LABEL:
@@ -202,7 +267,8 @@ def _install_menu_option() -> bool:
     if st is None:
         return False
 
-    installed = _patch_radio(st, st)
+    installed = _install_session_state_reset_guard(st)
+    installed = _patch_radio(st, st) or installed
 
     delta_module = sys.modules.get("streamlit.delta_generator")
     delta_cls = getattr(delta_module, "DeltaGenerator", None) if delta_module is not None else None
