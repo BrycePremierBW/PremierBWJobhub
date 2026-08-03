@@ -112,6 +112,26 @@ class RecentFeatureGuardSmokeTests(unittest.TestCase):
         for marker in forbidden:
             self.assertNotIn(marker, source)
 
+    def test_upload_po_calculates_amount_and_percentage(self):
+        source = read("jobhub/po_upload_guard.py")
+        required = [
+            "Enter PO amount → calculate %",
+            "Enter % → calculate PO amount",
+            "Whole job value",
+            "Manual area / stage value",
+            "_calculate_po_values",
+            "po_scope_label",
+            "po_scope_base_ex_gst",
+            "po_scope_percent",
+            "po_percent_of_job",
+            "po_calculation_mode",
+            "Area / stage value ex GST",
+            "% of selected area / scope",
+            "% of whole job",
+        ]
+        for marker in required:
+            self.assertIn(marker, source)
+
     def test_progress_tracker_has_external_options(self):
         source = read("jobhub/progress_external_options_guard.py")
         required = [
