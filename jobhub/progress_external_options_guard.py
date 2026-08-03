@@ -1,13 +1,14 @@
 """External progress option presets for the JobHub progress tracker.
 
 The existing tracker already records external substrate progress, but it only
-used coating-step columns.  This guard adds Premier Brushworks external progress
+used coating-step columns. This guard adds Premier Brushworks external progress
 options without rewriting the live tracker: simple External 100%, upper/lower
 external split, and the original coating-step workflow.
 """
 
 from __future__ import annotations
 
+import importlib
 import sys
 from typing import Any, Iterable, Sequence
 
@@ -24,14 +25,33 @@ EXTERNAL_SECTION_STAGES = (
     ("lower_external", "lower", 45.0),
     ("touchups", "touch ups", 10.0),
 )
+FALLBACK_COATING_STAGES = (
+    ("prep", "Preparation", 15.0),
+    ("primer", "Primer / Sealer", 20.0),
+    ("first_coat", "First Coat", 25.0),
+    ("final_coat", "Final Coat", 30.0),
+    ("touchups", "Touch-ups", 10.0),
+)
 
 
 def _tracker_module() -> Any:
-    return sys.modules.get("jobhub_progress_tracker")
+    module = sys.modules.get("jobhub_progress_tracker")
+    if module is not None:
+        return module
+    try:
+        return importlib.import_module("jobhub_progress_tracker")
+    except Exception:
+        return None
 
 
 def _rules_module() -> Any:
-    return sys.modules.get("jobhub_progress_rules")
+    module = sys.modules.get("jobhub_progress_rules")
+    if module is not None:
+        return module
+    try:
+        return importlib.import_module("jobhub_progress_rules")
+    except Exception:
+        return None
 
 
 def _streamlit() -> Any:
@@ -41,15 +61,7 @@ def _streamlit() -> Any:
 def _default_coating_stages() -> tuple[tuple[str, str, float], ...]:
     tracker = _tracker_module()
     original = getattr(tracker, "_pb_original_external_stages", None) if tracker else None
-    if original:
-        return tuple(original)
-    return (
-        ("prep", "Preparation", 15.0),
-        ("primer", "Primer / Sealer", 20.0),
-        ("first_coat", "First Coat", 25.0),
-        ("final_coat", "Final Coat", 30.0),
-        ("touchups", "Touch-ups", 10.0),
-    )
+    return tuple(original) if original else FALLBACK_COATING_STAGES
 
 
 def _current_mode() -> str:
@@ -99,22 +111,23 @@ def _install_external_schema_guard(tracker: Any) -> bool:
         if callable(ensure_column):
             for column in ("external_overall", "upper_scaff_work", "lower_external"):
                 ensure_column(context, "job_external_progress", column, "TEXT DEFAULT 'Not started'")
-        else:
-            for column in ("external_overall", "upper_scaff_work", "lower_external"):
-                try:
-                    if context.get("USE_POSTGRES"):
+            return
+
+        for column in ("external_overall", "upper_scaff_work", "lower_external"):
+            try:
+                if context.get("USE_POSTGRES"):
+                    context["execute"](
+                        f"ALTER TABLE job_external_progress ADD COLUMN IF NOT EXISTS {column} TEXT DEFAULT 'Not started'"
+                    )
+                else:
+                    cols = context["df_query"]("PRAGMA table_info(job_external_progress)")
+                    names = set(cols.get("name", []).astype(str).tolist()) if hasattr(cols, "get") else set()
+                    if column not in names:
                         context["execute"](
-                            f"ALTER TABLE job_external_progress ADD COLUMN IF NOT EXISTS {column} TEXT DEFAULT 'Not started'"
+                            f"ALTER TABLE job_external_progress ADD COLUMN {column} TEXT DEFAULT 'Not started'"
                         )
-                    else:
-                        cols = context["df_query"]("PRAGMA table_info(job_external_progress)")
-                        names = set(cols.get("name", []).astype(str).tolist()) if hasattr(cols, "get") else set()
-                        if column not in names:
-                            context["execute"](
-                                f"ALTER TABLE job_external_progress ADD COLUMN {column} TEXT DEFAULT 'Not started'"
-                            )
-                except Exception:
-                    pass
+            except Exception:
+                pass
 
     ensure_progress_schema_with_external_options._pb_external_options_schema_guard = True
     ensure_progress_schema_with_external_options._pb_original_ensure_progress_schema = original
@@ -169,7 +182,7 @@ def install_progress_external_options_guard() -> bool:
         return False
 
     if not hasattr(tracker, "_pb_original_external_stages"):
-        tracker._pb_original_external_stages = tuple(getattr(tracker, "EXTERNAL_STAGES", ()) or ())
+        tracker._pb_original_external_stages = tuple(getattr(tracker, "EXTERNAL_STAGES", ()) or FALLBACK_COATING_STAGES)
 
     dynamic = DynamicExternalStages()
     tracker.EXTERNAL_STAGES = dynamic
