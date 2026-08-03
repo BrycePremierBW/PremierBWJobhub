@@ -1,7 +1,7 @@
 """Dedicated Purchase Order upload page for JobHub.
 
 JobHub had PO data tables and job-document storage, but the upload path was too
-hard to find from the live menus.  This guard adds an explicit "Upload PO" route
+hard to find from the live menus. This guard adds an explicit "Upload PO" route
 without changing the main app router file, and protects that route from the main
 app's hard-coded dashboard reset checks.
 """
@@ -18,7 +18,6 @@ from typing import Any
 PO_UPLOAD_LABEL = "Upload PO"
 PO_UPLOAD_STATE_KEY = "_pb_show_po_upload_page"
 SESSION_GET_PATCH_KEY = "_pb_po_upload_session_get_guard"
-PO_UPLOAD_DOC_TYPES = ("Purchase Order", "PO", "Builder Purchase Order")
 
 RESET_SAFE_VALUES = {
     "main_menu": "Dashboard",
@@ -26,6 +25,12 @@ RESET_SAFE_VALUES = {
     "site_operations_menu": "Staff Scheduler",
     "estimating_menu": "Import / Create Job Pack",
     "ai_menu": "JobHub AI Assistant",
+}
+
+MENU_MARKERS = {
+    "Dashboard", "Jobs", "Job Folders", "Estimating", "Site Operations",
+    "Management", "Reports", "Staff Scheduler", "Job Progress Tracker",
+    "Import / Create Job Pack", "Estimate Working Sheet",
 }
 
 
@@ -345,18 +350,13 @@ def _should_inject(label: Any, key: Any, options: Any) -> bool:
     labels = set(_labels(options))
     label_text = str(label or "")
     key_text = str(key or "")
-    menu_markers = {
-        "Dashboard", "Jobs", "Job Folders", "Estimating", "Site Operations",
-        "Management", "Reports", "Staff Scheduler", "Job Progress Tracker",
-        "Import / Create Job Pack", "Estimate Working Sheet",
-    }
     if PO_UPLOAD_LABEL in labels:
         return True
     if label_text == "Menu" or key_text == "main_menu":
-        return bool(labels.intersection(menu_markers))
+        return bool(labels.intersection(MENU_MARKERS))
     if label_text in {"Management Section", "Site Section"} or key_text in {"management_menu", "site_operations_menu", "estimating_menu"}:
-        return bool(labels.intersection(menu_markers))
-    return len(labels.intersection(menu_markers)) >= 2
+        return bool(labels.intersection(MENU_MARKERS))
+    return len(labels.intersection(MENU_MARKERS)) >= 2
 
 
 def _patch_radio(owner: Any, st: Any) -> bool:
