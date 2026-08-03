@@ -2,12 +2,15 @@
 
 from .ai_menu_guard import install_ai_menu_guard
 from .bulk_delete_guard import install_bulk_delete_guard
+from .job_folder_uploaded_documents_guard import install_job_folder_uploaded_documents_guard
 from .mobile_sidebar_guard import install_mobile_sidebar_guard
 from .navigation_state_guard import install_navigation_state_guard
 from .notification_wording_guard import install_notification_wording_guard
 from .po_upload_guard import install_po_upload_guard
+from .po_upload_scope_return_guard import install_po_upload_scope_return_guard
 from .progress_external_options_guard import install_progress_external_options_guard
 from .push_configuration_guard import install_push_configuration_guard
+from .sidebar_readability_guard import install_sidebar_readability_guard
 from .stage_preset_guard import install_stage_preset_guard
 from .stage_preset_selector_fix_guard import install_stage_preset_selector_fix_guard
 from .stage_selection_guard import install_stage_selection_guard
@@ -23,8 +26,11 @@ from .timesheet_area_guard import install_timesheet_area_guard
 install_push_configuration_guard()
 install_notification_wording_guard()
 install_mobile_sidebar_guard()
+install_sidebar_readability_guard()
 install_navigation_state_guard()
 install_po_upload_guard()
+install_po_upload_scope_return_guard()
+install_job_folder_uploaded_documents_guard()
 install_progress_external_options_guard()
 install_stage_selection_guard()
 install_stage_preset_selector_fix_guard()
