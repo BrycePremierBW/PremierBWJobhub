@@ -24,6 +24,7 @@ GUARD_FILES = [
     "jobhub/stage_preset_guard.py",
     "jobhub/stage_preset_selector_fix_guard.py",
     "jobhub/stage_selection_guard.py",
+    "jobhub/swms_attach_fallback_guard.py",
     "jobhub/swms_guard.py",
     "jobhub/swms_signature_index_guard.py",
     "jobhub/swms_visibility_guard.py",
@@ -54,6 +55,7 @@ class RecentFeatureGuardSmokeTests(unittest.TestCase):
             "install_timesheet_area_guard()",
             "install_bulk_delete_guard()",
             "install_swms_guard()",
+            "install_swms_attach_fallback_guard()",
             "install_swms_signature_index_guard()",
             "install_swms_visibility_guard()",
             "install_ai_menu_guard()",
@@ -88,6 +90,18 @@ class RecentFeatureGuardSmokeTests(unittest.TestCase):
             "Download selected SWMS PDF",
             "Sign / acknowledge this SWMS",
             "SWMS signature register for this job",
+        ]
+        for marker in required:
+            self.assertIn(marker, source)
+
+    def test_swms_attach_fallback_is_installed(self):
+        source = read("jobhub/swms_attach_fallback_guard.py")
+        required = [
+            "install_swms_attach_fallback_guard",
+            "attach_with_fallback",
+            "except TypeError",
+            "INSERT INTO job_documents",
+            "Generic SWMS generated in JobHub.",
         ]
         for marker in required:
             self.assertIn(marker, source)
