@@ -2,7 +2,8 @@
 
 JobHub had PO data tables and job-document storage, but the upload path was too
 hard to find from the live menus.  This guard adds an explicit "Upload PO" route
-without changing the main app router file.
+without changing the main app router file, and protects that route from the main
+app's hard-coded dashboard reset checks.
 """
 
 from __future__ import annotations
@@ -16,7 +17,16 @@ from typing import Any
 
 PO_UPLOAD_LABEL = "Upload PO"
 PO_UPLOAD_STATE_KEY = "_pb_show_po_upload_page"
+SESSION_GET_PATCH_KEY = "_pb_po_upload_session_get_guard"
 PO_UPLOAD_DOC_TYPES = ("Purchase Order", "PO", "Builder Purchase Order")
+
+RESET_SAFE_VALUES = {
+    "main_menu": "Dashboard",
+    "management_menu": "Builders & Clients",
+    "site_operations_menu": "Staff Scheduler",
+    "estimating_menu": "Import / Create Job Pack",
+    "ai_menu": "JobHub AI Assistant",
+}
 
 
 def _st() -> Any:
@@ -35,6 +45,42 @@ def _safe_rerun(st: Any) -> None:
     rerun = _app_attr("pb_rerun") or _app_attr("refresh") or getattr(st, "rerun", None)
     if callable(rerun):
         rerun()
+
+
+def _session_value(st: Any, key: str, default: Any = None) -> Any:
+    try:
+        return st.session_state[key]
+    except Exception:
+        try:
+            get_fn = getattr(st.session_state, "get", None)
+            if callable(get_fn):
+                return get_fn(key, default)
+        except Exception:
+            pass
+    return default
+
+
+def _install_session_state_reset_guard(st: Any) -> bool:
+    """Stop JobHub's menu validation from wiping Upload PO to Dashboard."""
+    try:
+        state_cls = type(st.session_state)
+        original_get = getattr(state_cls, "get", None)
+    except Exception:
+        return False
+    if original_get is None or getattr(original_get, SESSION_GET_PATCH_KEY, False):
+        return False
+
+    def guarded_get(self: Any, key: Any, default: Any = None) -> Any:
+        value = original_get(self, key, default)
+        key_text = str(key or "")
+        if key_text in RESET_SAFE_VALUES and str(value) == PO_UPLOAD_LABEL:
+            return RESET_SAFE_VALUES[key_text]
+        return value
+
+    guarded_get._pb_original_get = original_get
+    setattr(guarded_get, SESSION_GET_PATCH_KEY, True)
+    setattr(state_cls, "get", guarded_get)
+    return True
 
 
 def _execute(sql: str, params: tuple[Any, ...] = ()) -> None:
@@ -277,8 +323,34 @@ def render_po_upload_page() -> None:
 
 
 def _show_page(st: Any) -> None:
+    st.session_state[PO_UPLOAD_STATE_KEY] = True
     render_po_upload_page()
     st.stop()
+
+
+def _labels(options: Any) -> list[str]:
+    try:
+        return [str(item) for item in list(options)]
+    except Exception:
+        return []
+
+
+def _should_inject(label: Any, key: Any, options: Any) -> bool:
+    labels = set(_labels(options))
+    label_text = str(label or "")
+    key_text = str(key or "")
+    menu_markers = {
+        "Dashboard", "Jobs", "Job Folders", "Estimating", "Site Operations",
+        "Management", "Reports", "Staff Scheduler", "Job Progress Tracker",
+        "Import / Create Job Pack", "Estimate Working Sheet",
+    }
+    if PO_UPLOAD_LABEL in labels:
+        return True
+    if label_text == "Menu" or key_text == "main_menu":
+        return bool(labels.intersection(menu_markers))
+    if label_text in {"Management Section", "Site Section"} or key_text in {"management_menu", "site_operations_menu", "estimating_menu"}:
+        return bool(labels.intersection(menu_markers))
+    return len(labels.intersection(menu_markers)) >= 2
 
 
 def _patch_radio(owner: Any, st: Any) -> bool:
@@ -299,28 +371,32 @@ def _patch_radio(owner: Any, st: Any) -> bool:
         elif "options" in kwargs and args:
             label = args[0]
         options = arg_list[options_index] if options_index is not None else kwargs.get("options")
-        should_inject = False
-        try:
-            labels = [str(item) for item in list(options)]
-            menu_like = str(label or "") in {"Menu", "Management Section", "Site Section"} or len(set(labels).intersection({"Jobs", "Job Folders", "Estimating", "Site Operations", "Management", "Reports", "Staff Scheduler", "Job Progress Tracker"})) >= 2
-            should_inject = menu_like
-            if should_inject and PO_UPLOAD_LABEL not in labels:
-                values = list(options)
-                values.append(PO_UPLOAD_LABEL)
-                if options_index is not None:
-                    arg_list[options_index] = values
-                else:
-                    kwargs["options"] = values
-        except Exception:
-            pass
         key = str(kwargs.get("key") or "")
-        try:
-            if key and str(st.session_state.get(key, "")) == PO_UPLOAD_LABEL:
-                _show_page(st)
-        except Exception:
-            pass
+        should_inject = _should_inject(label, key, options)
+
+        if should_inject:
+            try:
+                labels = _labels(options)
+                if PO_UPLOAD_LABEL not in labels:
+                    values = list(options)
+                    values.append(PO_UPLOAD_LABEL)
+                    if options_index is not None:
+                        arg_list[options_index] = values
+                    else:
+                        kwargs["options"] = values
+            except Exception:
+                pass
+            try:
+                if key and str(_session_value(st, key, "")) == PO_UPLOAD_LABEL:
+                    _show_page(st)
+                if bool(_session_value(st, PO_UPLOAD_STATE_KEY, False)):
+                    _show_page(st)
+            except Exception:
+                pass
+
         result = original(*tuple(arg_list), **kwargs)
         if should_inject and str(result) == PO_UPLOAD_LABEL:
+            st.session_state[PO_UPLOAD_STATE_KEY] = True
             _show_page(st)
         return result
 
@@ -334,7 +410,8 @@ def install_po_upload_guard() -> bool:
     st = _st()
     if st is None:
         return False
-    installed = _patch_radio(st, st)
+    installed = _install_session_state_reset_guard(st)
+    installed = _patch_radio(st, st) or installed
     delta_module = sys.modules.get("streamlit.delta_generator")
     delta_cls = getattr(delta_module, "DeltaGenerator", None) if delta_module is not None else None
     if delta_cls is not None:
