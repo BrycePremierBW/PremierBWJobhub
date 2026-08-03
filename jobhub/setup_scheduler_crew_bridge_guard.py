@@ -42,6 +42,37 @@ def _empty_crews_df() -> Any:
     )
 
 
+def _table_columns(scheduler: Any, table: str) -> set[str]:
+    query_df = getattr(scheduler, "query_df", None)
+    table_exists = getattr(scheduler, "table_exists", None)
+    use_postgres = bool(getattr(scheduler, "USE_POSTGRES", False))
+    if not callable(query_df) or not callable(table_exists):
+        return set()
+    try:
+        if not table_exists(table):
+            return set()
+        if use_postgres:
+            df = query_df(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema='public' AND table_name=?
+                """,
+                (table,),
+            )
+            return set(df["column_name"].astype(str)) if df is not None and not df.empty else set()
+        df = query_df(f"PRAGMA table_info({table})")
+        if df is None or getattr(df, "empty", True):
+            return set()
+        if "name" in df.columns:
+            return set(df["name"].astype(str))
+        if 1 in df.columns:
+            return set(df[1].astype(str))
+    except Exception:
+        return set()
+    return set()
+
+
 def _setup_crews_df(scheduler: Any, active_only: bool = True) -> Any:
     if pd is None:
         return None
@@ -55,12 +86,14 @@ def _setup_crews_df(scheduler: Any, active_only: bool = True) -> Any:
     except Exception:
         return _empty_crews_df()
 
+    columns = _table_columns(scheduler, "jobhub_crews")
+    leader_expr = "COALESCE(c.lead_employee_id,0)" if "lead_employee_id" in columns else "0"
     where = "WHERE COALESCE(c.active,1)=1" if active_only else ""
     try:
         crews = query_df(
             f"""
-            SELECT c.id, c.crew_name, COALESCE(c.active,1) AS active,
-                   COALESCE(c.notes,'') AS notes
+            SELECT c.id, c.crew_name, {leader_expr} AS lead_employee_id,
+                   COALESCE(c.active,1) AS active, COALESCE(c.notes,'') AS notes
             FROM jobhub_crews c
             {where}
             ORDER BY c.crew_name
@@ -72,17 +105,20 @@ def _setup_crews_df(scheduler: Any, active_only: bool = True) -> Any:
         return _empty_crews_df()
 
     rows: list[dict[str, Any]] = []
+    member_columns = _table_columns(scheduler, "jobhub_crew_members")
+    role_order = "CASE WHEN COALESCE(cm.crew_role,'')='Leader' THEN 0 ELSE 1 END," if "crew_role" in member_columns else ""
     for _, crew in crews.iterrows():
+        configured_leader_id = int(crew.get("lead_employee_id") or 0)
         try:
             members = query_df(
-                """
+                f"""
                 SELECT e.id, e.name
                 FROM jobhub_crew_members cm
                 JOIN employees e ON e.id=cm.employee_id
                 WHERE cm.crew_id=? AND COALESCE(cm.active,1)=1
-                ORDER BY e.name
+                ORDER BY CASE WHEN e.id=? THEN 0 ELSE 1 END, {role_order} e.name
                 """,
-                (int(crew["id"]),),
+                (int(crew["id"]), configured_leader_id),
             )
         except Exception:
             members = None
@@ -90,14 +126,19 @@ def _setup_crews_df(scheduler: Any, active_only: bool = True) -> Any:
             continue
         member_ids = [int(value) for value in members["id"].tolist()]
         member_names = [str(value) for value in members["name"].tolist()]
+        if configured_leader_id in member_ids:
+            leader_id = configured_leader_id
+        else:
+            leader_id = int(member_ids[0])
+        leader_name = str(member_names[member_ids.index(leader_id)]) if leader_id in member_ids else str(member_names[0])
         rows.append(
             {
                 # Negative ids prevent clashes with scheduler_crews ids. These
                 # rows are read-only inside scheduling and are used for selection.
                 "id": -int(crew["id"]),
                 "crew_name": str(crew["crew_name"]),
-                "lead_employee_id": int(member_ids[0]),
-                "lead_name": str(member_names[0]),
+                "lead_employee_id": int(leader_id),
+                "lead_name": leader_name,
                 "active": int(crew["active"] or 1),
                 "notes": str(crew["notes"] or ""),
                 "member_names": ", ".join(member_names),
