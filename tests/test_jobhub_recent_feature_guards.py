@@ -17,12 +17,15 @@ ROOT = Path(__file__).resolve().parents[1]
 GUARD_FILES = [
     "jobhub/__init__.py",
     "jobhub/bulk_delete_guard.py",
+    "jobhub/job_folder_uploaded_documents_guard.py",
     "jobhub/mobile_sidebar_guard.py",
     "jobhub/navigation_state_guard.py",
     "jobhub/notification_wording_guard.py",
     "jobhub/po_upload_guard.py",
+    "jobhub/po_upload_scope_return_guard.py",
     "jobhub/progress_external_options_guard.py",
     "jobhub/push_configuration_guard.py",
+    "jobhub/sidebar_readability_guard.py",
     "jobhub/stage_preset_guard.py",
     "jobhub/stage_preset_selector_fix_guard.py",
     "jobhub/stage_selection_guard.py",
@@ -31,6 +34,7 @@ GUARD_FILES = [
     "jobhub/swms_signature_index_guard.py",
     "jobhub/swms_visibility_guard.py",
     "jobhub/timesheet_area_guard.py",
+    "jobhub_core.py",
 ]
 
 
@@ -50,8 +54,11 @@ class RecentFeatureGuardSmokeTests(unittest.TestCase):
             "install_push_configuration_guard()",
             "install_notification_wording_guard()",
             "install_mobile_sidebar_guard()",
+            "install_sidebar_readability_guard()",
             "install_navigation_state_guard()",
             "install_po_upload_guard()",
+            "install_po_upload_scope_return_guard()",
+            "install_job_folder_uploaded_documents_guard()",
             "install_progress_external_options_guard()",
             "install_stage_selection_guard()",
             "install_stage_preset_selector_fix_guard()",
@@ -69,6 +76,26 @@ class RecentFeatureGuardSmokeTests(unittest.TestCase):
             self.assertIn(call, source)
             positions.append(source.index(call))
         self.assertEqual(positions, sorted(positions), "Guard install order changed unexpectedly")
+
+    def test_password_policy_is_six_characters_without_symbol_or_number(self):
+        source = read("jobhub_core.py")
+        self.assertIn("MIN_PASSWORD_LENGTH = 6", source)
+        self.assertNotIn('"Include a number."', source)
+        self.assertNotIn('"Include a symbol."', source)
+        self.assertNotIn('re.search(r"\\d"', source)
+        self.assertNotIn('re.search(r"[^A-Za-z0-9]"', source)
+
+    def test_sidebar_readability_and_lower_toggle_are_installed(self):
+        source = read("jobhub/sidebar_readability_guard.py")
+        required = [
+            "PB_JOBHUB_SIDEBAR_READABILITY_V1",
+            "font-weight: 700",
+            "[data-testid=\"collapsedControl\"]",
+            "top: calc(4.25rem",
+            "install_sidebar_readability_guard",
+        ]
+        for marker in required:
+            self.assertIn(marker, source)
 
     def test_mobile_sidebar_does_not_hijack_desktop_routing(self):
         source = read("jobhub/mobile_sidebar_guard.py")
@@ -112,6 +139,21 @@ class RecentFeatureGuardSmokeTests(unittest.TestCase):
         for marker in forbidden:
             self.assertNotIn(marker, source)
 
+    def test_upload_po_scope_return_guard_adds_return_and_internal_external_lines(self):
+        source = read("jobhub/po_upload_scope_return_guard.py")
+        required = [
+            "Return to start / Dashboard",
+            "DISPLAY_INTERNAL",
+            "DISPLAY_EXTERNAL",
+            "Calculate % from",
+            "Area / scope name",
+            "Area / stage value ex GST",
+            "_clear_po_route",
+            "install_po_upload_scope_return_guard",
+        ]
+        for marker in required:
+            self.assertIn(marker, source)
+
     def test_upload_po_handles_live_schema_differences(self):
         source = read("jobhub/po_upload_guard.py")
         required = [
@@ -145,6 +187,19 @@ class RecentFeatureGuardSmokeTests(unittest.TestCase):
             "Area / stage value ex GST",
             "% of selected area / scope",
             "% of whole job",
+        ]
+        for marker in required:
+            self.assertIn(marker, source)
+
+    def test_job_folders_have_uploaded_documents_section(self):
+        source = read("jobhub/job_folder_uploaded_documents_guard.py")
+        required = [
+            "Uploaded Documents",
+            "job_documents",
+            "job_purchase_orders",
+            "render_uploaded_documents_panel",
+            "Download",
+            "install_job_folder_uploaded_documents_guard",
         ]
         for marker in required:
             self.assertIn(marker, source)
