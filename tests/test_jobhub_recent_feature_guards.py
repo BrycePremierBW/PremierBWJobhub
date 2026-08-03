@@ -66,6 +66,20 @@ class RecentFeatureGuardSmokeTests(unittest.TestCase):
             positions.append(source.index(call))
         self.assertEqual(positions, sorted(positions), "Guard install order changed unexpectedly")
 
+    def test_mobile_sidebar_phone_layout_is_hardened(self):
+        source = read("jobhub/mobile_sidebar_guard.py")
+        required = [
+            "PB_JOBHUB_MOBILE_SIDEBAR_FINAL_FIX_V3",
+            "--pb-mobile-sidebar-width: min(78vw, 300px)",
+            "--pb-mobile-sidebar-width: min(74vw, 280px)",
+            "100dvh",
+            "overflow-wrap: anywhere",
+            "pb-mobile-sidebar-auto-close-v3",
+            "touchend",
+            "initial_sidebar_state"]
+        for marker in required:
+            self.assertIn(marker, source)
+
     def test_swms_menu_route_is_guarded_against_dashboard_reset(self):
         source = read("jobhub/swms_visibility_guard.py")
         required = [
