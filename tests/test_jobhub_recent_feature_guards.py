@@ -20,6 +20,7 @@ GUARD_FILES = [
     "jobhub/mobile_sidebar_guard.py",
     "jobhub/navigation_state_guard.py",
     "jobhub/notification_wording_guard.py",
+    "jobhub/po_upload_guard.py",
     "jobhub/progress_external_options_guard.py",
     "jobhub/push_configuration_guard.py",
     "jobhub/stage_preset_guard.py",
@@ -50,6 +51,7 @@ class RecentFeatureGuardSmokeTests(unittest.TestCase):
             "install_notification_wording_guard()",
             "install_mobile_sidebar_guard()",
             "install_navigation_state_guard()",
+            "install_po_upload_guard()",
             "install_progress_external_options_guard()",
             "install_stage_selection_guard()",
             "install_stage_preset_selector_fix_guard()",
@@ -89,6 +91,22 @@ class RecentFeatureGuardSmokeTests(unittest.TestCase):
             self.assertIn(marker, source)
         for marker in forbidden:
             self.assertNotIn(marker, source)
+
+    def test_upload_po_route_is_guarded_against_dashboard_reset(self):
+        source = read("jobhub/po_upload_guard.py")
+        required = [
+            'PO_UPLOAD_LABEL = "Upload PO"',
+            "_install_session_state_reset_guard",
+            "RESET_SAFE_VALUES",
+            "_session_value",
+            "_show_page(st)",
+            "st.stop()",
+            "SERIAL PRIMARY KEY",
+            "INTEGER PRIMARY KEY AUTOINCREMENT",
+            "install_po_upload_guard",
+        ]
+        for marker in required:
+            self.assertIn(marker, source)
 
     def test_progress_tracker_has_external_options(self):
         source = read("jobhub/progress_external_options_guard.py")
