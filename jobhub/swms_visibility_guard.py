@@ -1,4 +1,10 @@
-"""Make SWMS controls visible in employee and admin JobHub views."""
+"""Make SWMS controls visible in employee and admin JobHub views.
+
+This version avoids adding a fake dynamic item to the app's hard-coded
+navigation list. Instead, it renders a dedicated sidebar button after the app
+has configured the page. Selecting it opens the SWMS page immediately and stops
+the normal Dashboard fallback from rendering.
+"""
 
 from __future__ import annotations
 
@@ -9,7 +15,6 @@ from . import swms_guard
 
 ADMIN_SWMS_LABEL = "SWMS / Safety Sign-off"
 ADMIN_SWMS_STATE_KEY = "_pb_show_admin_swms_page"
-DASHBOARD_PATCH_KEY = "_pb_swms_dashboard_route_guard"
 
 
 def _safe_rerun(st: Any) -> None:
@@ -46,31 +51,16 @@ def _install_employee_tab_visibility() -> bool:
     return True
 
 
-def _looks_like_main_menu(options: Any) -> bool:
+def _is_main_menu_options(options: Any) -> bool:
     try:
         labels = [str(option) for option in list(options)]
     except Exception:
         return False
-    if ADMIN_SWMS_LABEL in labels:
-        return True
-    markers = {
-        "Dashboard", "Jobs", "Job Folders", "Estimating", "Site Operations",
-        "Operations Hub", "Management", "Employee Portal", "Reports",
-        "Settings", "User Access", "Job Photos", "Timesheets",
-    }
-    return len(markers.intersection(labels)) >= 3
-
-
-def _with_admin_swms(options: Any) -> list[Any]:
-    values = list(options)
-    labels = [str(option) for option in values]
-    if ADMIN_SWMS_LABEL not in labels:
-        insert_at = len(values)
-        for idx, label in enumerate(labels):
-            if label in {"Management", "Operations Hub", "Site Operations", "Job Folders"}:
-                insert_at = idx + 1
-        values.insert(insert_at, ADMIN_SWMS_LABEL)
-    return values
+    return (
+        "Dashboard" in labels
+        and "Employee Portal" in labels
+        and ("Jobs" in labels or "Control Centre" in labels)
+    )
 
 
 def _clear_admin_swms_state(st: Any) -> None:
@@ -83,7 +73,10 @@ def _clear_admin_swms_state(st: Any) -> None:
 
 def _show_admin_swms(st: Any) -> None:
     st.header("SWMS / Safety Sign-off")
-    st.caption("Admin view: create job SWMS documents, download them, and review employee electronic acknowledgements.")
+    st.caption(
+        "Admin view: create job SWMS documents, download them, and review "
+        "employee electronic acknowledgements."
+    )
     if st.button("← Back to Dashboard", key="admin_swms_back_to_dashboard"):
         _clear_admin_swms_state(st)
         _safe_rerun(st)
@@ -91,84 +84,75 @@ def _show_admin_swms(st: Any) -> None:
     st.stop()
 
 
-def _install_dashboard_route(st: Any) -> bool:
-    # The app validates the main menu against its original option list on every
-    # rerun. A dynamically added SWMS menu item can therefore reset back to
-    # Dashboard before the route block runs. This patch makes that reset safe:
-    # when SWMS has been selected, the normal Dashboard route renders the SWMS
-    # page instead of the operational dashboard.
-    module = sys.modules.get("__main__") or sys.modules.get("pb_jobhub_app")
-    if module is None:
-        return False
-    original = getattr(module, "render_operational_dashboard", None)
-    if original is None or getattr(original, DASHBOARD_PATCH_KEY, False):
-        return False
+def _render_admin_swms_launcher(st: Any) -> None:
+    # This runs during the real sidebar menu render, not during package import,
+    # so it does not violate Streamlit's set_page_config ordering.
+    if bool(st.session_state.get(ADMIN_SWMS_STATE_KEY)):
+        _show_admin_swms(st)
 
-    def dashboard_or_swms(*args: Any, **kwargs: Any):
-        if bool(st.session_state.get(ADMIN_SWMS_STATE_KEY)):
-            _show_admin_swms(st)
-        return original(*args, **kwargs)
+    try:
+        st.sidebar.markdown("### Safety")
+        clicked = st.sidebar.button(
+            ADMIN_SWMS_LABEL,
+            key="admin_swms_sidebar_launcher",
+            width="stretch",
+        )
+    except TypeError:
+        clicked = st.sidebar.button(
+            ADMIN_SWMS_LABEL,
+            key="admin_swms_sidebar_launcher",
+        )
 
-    setattr(dashboard_or_swms, DASHBOARD_PATCH_KEY, True)
-    setattr(dashboard_or_swms, "_pb_original_dashboard", original)
-    setattr(module, "render_operational_dashboard", dashboard_or_swms)
-    return True
+    if clicked:
+        st.session_state[ADMIN_SWMS_STATE_KEY] = True
+        _show_admin_swms(st)
 
 
-def _patch_widget(owner: Any, attr: str, st: Any) -> bool:
-    original = getattr(owner, attr, None)
-    if original is None or getattr(original, "_pb_swms_admin_nav_guard", False):
+def _patch_radio(owner: Any, st: Any) -> bool:
+    original = getattr(owner, "radio", None)
+    if original is None or getattr(original, "_pb_swms_admin_launcher_guard", False):
         return False
 
     def wrapper(*args: Any, **kwargs: Any):
-        # Supports both st.radio(label, options, ...) and
-        # DeltaGenerator.radio(self, label, options, ...).
         arg_list = list(args)
-        menu_widget = False
-        if len(arg_list) >= 2 and _looks_like_main_menu(arg_list[1]):
-            menu_widget = True
-            arg_list[1] = _with_admin_swms(arg_list[1])
-        elif len(arg_list) >= 3 and _looks_like_main_menu(arg_list[2]):
-            menu_widget = True
-            arg_list[2] = _with_admin_swms(arg_list[2])
-        elif "options" in kwargs and _looks_like_main_menu(kwargs.get("options")):
-            menu_widget = True
-            kwargs["options"] = _with_admin_swms(kwargs["options"])
+        options = None
+        if len(arg_list) >= 2 and _is_main_menu_options(arg_list[1]):
+            options = arg_list[1]
+        elif len(arg_list) >= 3 and _is_main_menu_options(arg_list[2]):
+            options = arg_list[2]
+        elif "options" in kwargs and _is_main_menu_options(kwargs.get("options")):
+            options = kwargs.get("options")
 
-        if menu_widget:
-            _install_dashboard_route(st)
+        if options is not None:
+            _render_admin_swms_launcher(st)
 
         result = original(*tuple(arg_list), **kwargs)
-        if menu_widget and str(result) == ADMIN_SWMS_LABEL:
+        if str(result) == ADMIN_SWMS_LABEL:
             st.session_state[ADMIN_SWMS_STATE_KEY] = True
-            # Rerun so the Dashboard fallback route can render the SWMS page in
-            # the main app area instead of inside the sidebar widget call.
-            _safe_rerun(st)
+            _show_admin_swms(st)
         return result
 
-    wrapper._pb_swms_admin_nav_guard = True
+    wrapper._pb_swms_admin_launcher_guard = True
     wrapper._pb_original = original
-    setattr(owner, attr, wrapper)
+    setattr(owner, "radio", wrapper)
     return True
 
 
-def _install_admin_menu_visibility() -> bool:
+def _install_admin_sidebar_launcher() -> bool:
     st = sys.modules.get("streamlit")
     if st is None:
         return False
-    installed = False
-    for attr in ("radio", "selectbox"):
-        installed = _patch_widget(st, attr, st) or installed
+
+    installed = _patch_radio(st, st)
 
     delta_module = sys.modules.get("streamlit.delta_generator")
     delta_cls = getattr(delta_module, "DeltaGenerator", None) if delta_module is not None else None
     if delta_cls is not None:
-        for attr in ("radio", "selectbox"):
-            installed = _patch_widget(delta_cls, attr, st) or installed
+        installed = _patch_radio(delta_cls, st) or installed
     return installed
 
 
 def install_swms_visibility_guard() -> bool:
     employee_installed = _install_employee_tab_visibility()
-    admin_installed = _install_admin_menu_visibility()
+    admin_installed = _install_admin_sidebar_launcher()
     return bool(employee_installed or admin_installed)
