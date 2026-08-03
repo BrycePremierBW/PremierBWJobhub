@@ -10,6 +10,7 @@ from .stage_preset_guard import install_stage_preset_guard
 from .stage_selection_guard import install_stage_selection_guard
 from .swms_guard import install_swms_guard
 from .swms_signature_index_guard import install_swms_signature_index_guard
+from .swms_visibility_guard import install_swms_visibility_guard
 from .timesheet_area_guard import install_timesheet_area_guard
 
 # Install before the main app calls st.set_page_config/apply_pb_branding.  These
@@ -25,4 +26,5 @@ install_timesheet_area_guard()
 install_bulk_delete_guard()
 install_swms_guard()
 install_swms_signature_index_guard()
+install_swms_visibility_guard()
 install_ai_menu_guard()
