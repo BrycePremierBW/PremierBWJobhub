@@ -7,6 +7,7 @@ from .navigation_state_guard import install_navigation_state_guard
 from .notification_wording_guard import install_notification_wording_guard
 from .push_configuration_guard import install_push_configuration_guard
 from .stage_preset_guard import install_stage_preset_guard
+from .stage_preset_selector_fix_guard import install_stage_preset_selector_fix_guard
 from .stage_selection_guard import install_stage_selection_guard
 from .swms_guard import install_swms_guard
 from .swms_signature_index_guard import install_swms_signature_index_guard
@@ -21,6 +22,7 @@ install_notification_wording_guard()
 install_mobile_sidebar_guard()
 install_navigation_state_guard()
 install_stage_selection_guard()
+install_stage_preset_selector_fix_guard()
 install_stage_preset_guard()
 install_timesheet_area_guard()
 install_bulk_delete_guard()
