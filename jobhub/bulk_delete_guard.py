@@ -7,6 +7,7 @@ not delete calculated KPI tiles or arbitrary tables.
 
 from __future__ import annotations
 
+import importlib
 import sys
 from typing import Any, Iterable
 
@@ -47,7 +48,15 @@ def _target_for_key(key: str) -> DeleteTarget | None:
 
 
 def _extract_frame(args: tuple[Any, ...], kwargs: dict[str, Any]) -> pd.DataFrame | None:
-    data = args[0] if args else kwargs.get("data")
+    # st.dataframe(data, ...) and DeltaGenerator.dataframe(self, data, ...)
+    data = None
+    if args:
+        if isinstance(args[0], pd.DataFrame):
+            data = args[0]
+        elif len(args) > 1 and isinstance(args[1], pd.DataFrame):
+            data = args[1]
+    if data is None:
+        data = kwargs.get("data")
     if isinstance(data, pd.DataFrame):
         return data.copy()
     return None
@@ -61,16 +70,27 @@ def _id_column(frame: pd.DataFrame) -> str | None:
     return None
 
 
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        if value is None or (isinstance(value, float) and pd.isna(value)):
+            return default
+        text = str(value).replace(",", "").strip()
+        if not text:
+            return default
+        return int(float(text))
+    except Exception:
+        return default
+
+
 def _selected_ids(frame: pd.DataFrame, id_col: str, labels: Iterable[str]) -> list[int]:
-    selected = []
+    selected: list[int] = []
     label_set = set(labels)
     for _, row in frame.iterrows():
         label = _row_label(row, id_col)
         if label in label_set:
-            try:
-                selected.append(int(row[id_col]))
-            except Exception:
-                continue
+            row_id = _safe_int(row.get(id_col), default=-1)
+            if row_id >= 0:
+                selected.append(row_id)
     return selected
 
 
@@ -91,13 +111,13 @@ def _eligible_frame(frame: pd.DataFrame, id_col: str) -> pd.DataFrame:
 
 def _guard_allows(row: pd.Series, target: DeleteTarget) -> tuple[bool, str]:
     if target.guard == "po_unused":
-        linked_stages = int(row.get("Linked Stages", 0) or 0)
-        linked_claims = int(row.get("Linked Claims", 0) or 0)
+        linked_stages = _safe_int(row.get("Linked Stages", 0))
+        linked_claims = _safe_int(row.get("Linked Claims", 0))
         if linked_stages + linked_claims > 0:
             return False, "purchase order is linked to stages or claims"
     if target.guard == "stage_unused":
         usage_columns = ["Schedule Entries", "Timesheets", "Progress Updates", "Baseline Lines", "Claim Lines"]
-        usage = sum(int(row.get(column, 0) or 0) for column in usage_columns)
+        usage = sum(_safe_int(row.get(column, 0)) for column in usage_columns)
         if usage > 0:
             return False, "stage has linked schedule, timesheet, progress, baseline or claim records"
     return True, ""
@@ -108,11 +128,15 @@ def _delete_rows(target: DeleteTarget, ids: list[int], source_rows: pd.DataFrame
     record_audit_event = _app_attr("record_audit_event", lambda *a, **k: None)
     if execute is None:
         return 0, ["Delete helper is not available in this app context."]
+    id_col = _id_column(source_rows)
+    if id_col is None:
+        return 0, ["This table does not expose a safe database ID column."]
 
     deleted = 0
-    skipped = []
+    skipped: list[str] = []
     for row_id in ids:
-        row_match = source_rows[source_rows[_id_column(source_rows)].astype(int) == int(row_id)]
+        source_id_values = source_rows[id_col].map(lambda value: _safe_int(value, default=-1))
+        row_match = source_rows[source_id_values == int(row_id)]
         row = row_match.iloc[0] if not row_match.empty else pd.Series(dtype=object)
         allowed, reason = _guard_allows(row, target)
         if not allowed:
@@ -153,7 +177,8 @@ def _render_bulk_delete_controls(st: Any, frame: pd.DataFrame, key: str, target:
         if not ids:
             st.info("Select one or more records to delete.")
             return
-        review = eligible[eligible[id_col].astype(int).isin(ids)].copy()
+        review_ids = eligible[id_col].map(lambda value: _safe_int(value, default=-1))
+        review = eligible[review_ids.isin(ids)].copy()
         st.dataframe(review.drop(columns=[id_col], errors="ignore"), width="stretch", hide_index=True, key=f"bulk_delete_review_{key}")
         confirm = st.checkbox(
             f"I understand this will permanently delete {len(ids)} selected record(s).",
@@ -177,12 +202,8 @@ def _render_bulk_delete_controls(st: Any, frame: pd.DataFrame, key: str, target:
                 refresh()
 
 
-def install_bulk_delete_guard() -> bool:
-    st = sys.modules.get("streamlit")
-    if st is None:
-        return False
-
-    original_dataframe = getattr(st, "dataframe", None)
+def _patch_dataframe(owner: Any, st: Any) -> bool:
+    original_dataframe = getattr(owner, "dataframe", None)
     if original_dataframe is None or getattr(original_dataframe, "_pb_bulk_delete_guard", False):
         return False
 
@@ -200,5 +221,21 @@ def install_bulk_delete_guard() -> bool:
 
     pb_bulk_delete_dataframe._pb_bulk_delete_guard = True
     pb_bulk_delete_dataframe._pb_original_dataframe = original_dataframe
-    st.dataframe = pb_bulk_delete_dataframe
+    setattr(owner, "dataframe", pb_bulk_delete_dataframe)
     return True
+
+
+def install_bulk_delete_guard() -> bool:
+    st = sys.modules.get("streamlit")
+    if st is None:
+        return False
+
+    installed = _patch_dataframe(st, st)
+    try:
+        delta_module = sys.modules.get("streamlit.delta_generator") or importlib.import_module("streamlit.delta_generator")
+        delta_cls = getattr(delta_module, "DeltaGenerator", None)
+    except Exception:
+        delta_cls = None
+    if delta_cls is not None:
+        installed = _patch_dataframe(delta_cls, st) or installed
+    return installed
