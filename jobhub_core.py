@@ -19,7 +19,7 @@ from urllib.parse import urlparse
 
 PASSWORD_SCHEME = "pbkdf2_sha256"
 PBKDF2_ITERATIONS = 600_000
-MIN_PASSWORD_LENGTH = 12
+MIN_PASSWORD_LENGTH = 6
 MONEY_PLACES = Decimal("0.01")
 
 _KNOWN_DEFAULT_PASSWORDS = ("admin123", "manager123", "changeme123")
@@ -89,14 +89,6 @@ def password_strength_errors(password: str, username: str = "") -> list[str]:
     errors: list[str] = []
     if len(password) < MIN_PASSWORD_LENGTH:
         errors.append(f"Use at least {MIN_PASSWORD_LENGTH} characters.")
-    if not re.search(r"[a-z]", password):
-        errors.append("Include a lowercase letter.")
-    if not re.search(r"[A-Z]", password):
-        errors.append("Include an uppercase letter.")
-    if not re.search(r"\d", password):
-        errors.append("Include a number.")
-    if not re.search(r"[^A-Za-z0-9]", password):
-        errors.append("Include a symbol.")
     if username and username in password.casefold():
         errors.append("Do not include the username.")
     if password.casefold() in {item.casefold() for item in _KNOWN_DEFAULT_PASSWORDS}:
@@ -217,51 +209,3 @@ def validate_public_http_url(url: str) -> tuple[bool, str]:
     if not resolved or any(not is_public_ip_address(address) for address in resolved):
         return False, "The URL resolves to a private, local, reserved or otherwise unsafe address."
     return True, ""
-
-
-def next_scoped_number(existing_values: list[object], prefix: str) -> str:
-    """Generate the next stable scoped number without reusing a deleted count."""
-    prefix = str(prefix or "").upper().strip("-")
-    highest = 0
-    pattern = re.compile(rf"^{re.escape(prefix)}-(\d+)$", flags=re.IGNORECASE)
-    for value in existing_values:
-        match = pattern.match(str(value or "").strip())
-        if match:
-            highest = max(highest, int(match.group(1)))
-    return f"{prefix}-{highest + 1:03d}"
-
-
-def calculate_shift_hours(
-    start_time: object,
-    finish_time: object,
-    break_minutes: object = 0,
-) -> float:
-    """Calculate net shift hours, including overnight shifts."""
-
-    def minutes(value: object) -> int:
-        if isinstance(value, time):
-            return int(value.hour) * 60 + int(value.minute)
-        match = re.match(r"^\s*(\d{1,2}):(\d{2})", str(value or ""))
-        if not match:
-            raise ValueError("Time must be in HH:MM format.")
-        hour = int(match.group(1))
-        minute = int(match.group(2))
-        if hour > 23 or minute > 59:
-            raise ValueError("Time is outside the valid 24-hour range.")
-        return hour * 60 + minute
-
-    start_minutes = minutes(start_time)
-    finish_minutes = minutes(finish_time)
-    if finish_minutes < start_minutes:
-        finish_minutes += 24 * 60
-    gross_minutes = finish_minutes - start_minutes
-    try:
-        break_value = float(break_minutes or 0)
-    except (TypeError, ValueError):
-        raise ValueError("Break minutes must be a number.") from None
-    if break_value < 0:
-        raise ValueError("Break minutes cannot be negative.")
-    net_minutes = gross_minutes - break_value
-    if net_minutes < 0:
-        raise ValueError("Break minutes cannot exceed the shift duration.")
-    return round(net_minutes / 60, 2)
