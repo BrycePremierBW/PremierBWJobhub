@@ -10,6 +10,7 @@ from typing import Any
 SPLIT_TOGGLE_KEY = "po_upload_split_internal_external"
 SPLIT_BY_AMOUNTS = "Split by amounts"
 SPLIT_BY_PERCENTAGES = "Split by percentages"
+PO_NUMBER_UNIQUE_CONSTRAINT = "job_purchase_orders_job_id_po_number_key"
 
 
 def _st() -> Any:
@@ -29,6 +30,30 @@ def _safe_float(value: Any) -> float:
 
 def _amount_percent(amount: float, base: float) -> float:
     return round((float(amount or 0) / float(base or 0) * 100.0), 4) if _safe_float(base) else 0.0
+
+
+def _relax_po_number_uniqueness(po: Any) -> None:
+    """Allow one builder PO number to be split into multiple scope lines.
+
+    Older JobHub databases created a unique rule on ``(job_id, po_number)``.
+    A split PO legitimately needs two rows with the same job and PO number:
+    one Internal row and one External row.  The scope columns now carry the
+    difference, so the old uniqueness rule has to be removed.
+    """
+    try:
+        if callable(getattr(po, "_use_postgres", None)) and po._use_postgres():
+            try:
+                po._execute(
+                    f"ALTER TABLE job_purchase_orders DROP CONSTRAINT IF EXISTS {PO_NUMBER_UNIQUE_CONSTRAINT}"
+                )
+            except Exception:
+                pass
+            try:
+                po._execute(f"DROP INDEX IF EXISTS {PO_NUMBER_UNIQUE_CONSTRAINT}")
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 
 def _app_user(po: Any) -> str:
@@ -81,6 +106,7 @@ def _record_po_line(
     calculation_mode: str,
     notes: str,
 ) -> None:
+    _relax_po_number_uniqueness(po)
     now = po._now() if hasattr(po, "_now") else ""
     values = {
         "job_id": int(job_id),
@@ -120,6 +146,7 @@ def _stage_id_for_label(stages: dict[str, int | None], label: str) -> int | None
 
 def _render_split_upload_page(po: Any, st: Any) -> None:
     po._ensure_schema()
+    _relax_po_number_uniqueness(po)
     st.header("Upload PO")
     st.caption("Upload one PO file and split it into separate Internal and External PO lines.")
 
@@ -242,6 +269,7 @@ def _render_split_upload_page(po: Any, st: Any) -> None:
             po._error("Internal + External must equal the total PO value before saving.")
             return
         try:
+            _relax_po_number_uniqueness(po)
             uploaded_by = _app_user(po)
             file_name, file_path = po._save_uploaded_file(job_id, po_number, uploaded)
             _record_document_once(po, job_id, po_number, file_name, file_path, uploaded_by, notes.strip())
@@ -300,6 +328,7 @@ def install_po_upload_split_guard() -> bool:
     if st is None:
         return False
     po = _po_module()
+    _relax_po_number_uniqueness(po)
     original = getattr(po, "render_po_upload_page", None)
     if original is None or getattr(original, "_pb_po_upload_split_guard", False):
         return False
