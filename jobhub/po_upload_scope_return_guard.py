@@ -1,8 +1,8 @@
 """PO upload usability guard.
 
 Adds a reliable return-to-dashboard button for the injected Upload PO route and
-adds Internal/External quick scope lines to the PO calculation controls without
-rewriting the main app router.
+adds clear Whole job/Internal/External stage-area choices with an in-form help
+popup for the PO calculation workflow.
 """
 
 from __future__ import annotations
@@ -13,10 +13,35 @@ from typing import Any
 
 
 AREA_LINE_KEY = "pb_po_upload_area_line"
+DISPLAY_WHOLE_JOB = "Whole job"
 DISPLAY_INTERNAL = "Internal"
 DISPLAY_EXTERNAL = "External"
-DISPLAY_WHOLE_JOB = "Whole job value"
-DISPLAY_MANUAL_SCOPE = "Manual area / stage value"
+DISPLAY_UPPER_SCAFF = "External - Upper scaff work"
+DISPLAY_LOWER_EXTERNAL = "External - Lower external"
+DISPLAY_EXTERNAL_TOUCHUPS = "External - Touch ups"
+DISPLAY_CUSTOM = "Custom / not listed"
+DISPLAY_WHOLE_JOB_BASIS = "Whole job value"
+DISPLAY_SELECTED_SCOPE_BASIS = "Selected area / stage value"
+
+QUICK_STAGE_OPTIONS: tuple[str, ...] = (
+    DISPLAY_WHOLE_JOB,
+    DISPLAY_INTERNAL,
+    DISPLAY_EXTERNAL,
+    DISPLAY_UPPER_SCAFF,
+    DISPLAY_LOWER_EXTERNAL,
+    DISPLAY_EXTERNAL_TOUCHUPS,
+    DISPLAY_CUSTOM,
+)
+
+STAGE_AREA_GUIDE: tuple[tuple[str, str], ...] = (
+    (DISPLAY_WHOLE_JOB, "Use when the PO covers the full contract value."),
+    (DISPLAY_INTERNAL, "Use for internal painting works only. Enter the internal works value."),
+    (DISPLAY_EXTERNAL, "Use for external painting works only. Enter the external works value."),
+    (DISPLAY_UPPER_SCAFF, "Use for the upper scaffold external claim. Common split is 45% of external."),
+    (DISPLAY_LOWER_EXTERNAL, "Use for lower external works. Common split is 45% of external."),
+    (DISPLAY_EXTERNAL_TOUCHUPS, "Use for external touch-ups. Common split is 10% of external."),
+    (DISPLAY_CUSTOM, "Use when the PO does not fit one of the standard options."),
+)
 
 
 def _st() -> Any:
@@ -64,24 +89,22 @@ def _install_return_button(po: Any, st: Any) -> bool:
 
     def show_page_with_return(streamlit_module: Any) -> None:
         try:
-            if streamlit_module.button(
+            clicked = streamlit_module.button(
                 "← Return to start / Dashboard",
                 key="po_upload_return_to_start_dashboard",
                 type="secondary",
                 width="stretch",
-            ):
-                _clear_po_route(streamlit_module)
-                _safe_rerun(streamlit_module)
-                return
+            )
         except TypeError:
-            if streamlit_module.button(
+            clicked = streamlit_module.button(
                 "← Return to start / Dashboard",
                 key="po_upload_return_to_start_dashboard",
                 type="secondary",
-            ):
-                _clear_po_route(streamlit_module)
-                _safe_rerun(streamlit_module)
-                return
+            )
+        if clicked:
+            _clear_po_route(streamlit_module)
+            _safe_rerun(streamlit_module)
+            return
         return original(streamlit_module)
 
     show_page_with_return._pb_po_scope_return_guard = True
@@ -90,7 +113,35 @@ def _install_return_button(po: Any, st: Any) -> bool:
     return True
 
 
-def _radio_signature(args: tuple[Any, ...], kwargs: dict[str, Any]) -> tuple[str, int | None]:
+def _install_stage_options_guard(po: Any) -> bool:
+    original = getattr(po, "_stage_options", None)
+    if original is None or getattr(original, "_pb_po_stage_options_guard", False):
+        return False
+
+    def stage_options_with_standard_areas(job_id: int) -> dict[str, int | None]:
+        try:
+            existing = dict(original(job_id) or {})
+        except Exception:
+            existing = {}
+        combined: dict[str, int | None] = {}
+        whole_key = "Whole job / not stage-specific"
+        if whole_key in existing:
+            combined[whole_key] = existing.pop(whole_key)
+        for option in QUICK_STAGE_OPTIONS:
+            if option not in combined:
+                combined[option] = None
+        for key, value in existing.items():
+            if str(key) not in combined:
+                combined[str(key)] = value
+        return combined
+
+    stage_options_with_standard_areas._pb_po_stage_options_guard = True
+    stage_options_with_standard_areas._pb_original_stage_options = original
+    po._stage_options = stage_options_with_standard_areas
+    return True
+
+
+def _widget_signature(args: tuple[Any, ...], kwargs: dict[str, Any]) -> tuple[str, int | None]:
     label = str(kwargs.get("label", "") or "")
     options_index: int | None = None
     if len(args) >= 2 and isinstance(args[0], str):
@@ -104,6 +155,40 @@ def _radio_signature(args: tuple[Any, ...], kwargs: dict[str, Any]) -> tuple[str
     return label, options_index
 
 
+def _set_arg_label(arg_list: list[Any], kwargs: dict[str, Any], label_index: int | None, label: str) -> None:
+    if label_index is not None and label_index < len(arg_list):
+        arg_list[label_index] = label
+    else:
+        kwargs["label"] = label
+
+
+def _render_stage_area_popup(st: Any) -> None:
+    lines = "\n".join(f"- **{name}:** {description}" for name, description in STAGE_AREA_GUIDE)
+    try:
+        popover = getattr(st, "popover", None)
+        if callable(popover):
+            with popover("Stage / area options guide"):
+                st.markdown(lines)
+            return
+    except Exception:
+        pass
+    try:
+        with st.expander("Stage / area options guide", expanded=False):
+            st.markdown(lines)
+    except Exception:
+        try:
+            st.caption("Stage / area options: Whole job, Internal, External, Upper scaff, Lower external, Touch ups, or Custom.")
+        except Exception:
+            pass
+
+
+def _area_line_from_result(result: Any) -> str:
+    text = str(result or "").strip()
+    if text == "Whole job / not stage-specific":
+        return DISPLAY_WHOLE_JOB
+    return text or DISPLAY_CUSTOM
+
+
 def _patch_selectbox(owner: Any, st: Any, po: Any) -> bool:
     original = getattr(owner, "selectbox", None)
     if original is None or getattr(original, "_pb_po_scope_selectbox_guard", False):
@@ -111,25 +196,44 @@ def _patch_selectbox(owner: Any, st: Any, po: Any) -> bool:
 
     def selectbox_with_po_scope_lines(*args: Any, **kwargs: Any):
         arg_list = list(args)
-        label, options_index = _radio_signature(tuple(arg_list), kwargs)
+        label, options_index = _widget_signature(tuple(arg_list), kwargs)
+        label_index = 0 if arg_list and isinstance(arg_list[0], str) else (1 if len(arg_list) >= 2 else None)
+
+        if label == "Stage / area":
+            _render_stage_area_popup(st)
+            kwargs.setdefault(
+                "help",
+                "Choose Whole job, Internal, External, an external split line, or Custom / not listed.",
+            )
+            result = original(*tuple(arg_list), **kwargs)
+            try:
+                st.session_state[AREA_LINE_KEY] = _area_line_from_result(result)
+            except Exception:
+                pass
+            return result
+
         if label == "Calculate % from":
-            options = [DISPLAY_WHOLE_JOB, DISPLAY_INTERNAL, DISPLAY_EXTERNAL, DISPLAY_MANUAL_SCOPE]
+            _set_arg_label(arg_list, kwargs, label_index, "Calculation basis")
+            options = [DISPLAY_WHOLE_JOB_BASIS, DISPLAY_SELECTED_SCOPE_BASIS]
             if options_index is not None:
                 arg_list[options_index] = options
             else:
                 kwargs["options"] = options
-            result = original(*tuple(arg_list), **kwargs)
+            kwargs.setdefault(
+                "help",
+                "Use Whole job value for full-job POs. Use selected area/stage value for Internal, External, upper scaffold, lower external or touch-ups.",
+            )
             try:
-                if str(result) in {DISPLAY_INTERNAL, DISPLAY_EXTERNAL}:
-                    st.session_state[AREA_LINE_KEY] = str(result)
-                    return getattr(po, "BASIS_MANUAL_SCOPE", DISPLAY_MANUAL_SCOPE)
-                if str(result) == DISPLAY_WHOLE_JOB:
-                    st.session_state[AREA_LINE_KEY] = "Whole job"
-                    return getattr(po, "BASIS_TOTAL_JOB", DISPLAY_WHOLE_JOB)
-                st.session_state[AREA_LINE_KEY] = "Custom scope"
+                line = str(st.session_state.get(AREA_LINE_KEY, "") or "")
+                if line and line != DISPLAY_WHOLE_JOB and "index" not in kwargs:
+                    kwargs["index"] = 1
             except Exception:
                 pass
-            return getattr(po, "BASIS_MANUAL_SCOPE", DISPLAY_MANUAL_SCOPE)
+            result = original(*tuple(arg_list), **kwargs)
+            if str(result) == DISPLAY_WHOLE_JOB_BASIS:
+                return getattr(po, "BASIS_TOTAL_JOB", DISPLAY_WHOLE_JOB_BASIS)
+            return getattr(po, "BASIS_MANUAL_SCOPE", "Manual area / stage value")
+
         return original(*args, **kwargs)
 
     selectbox_with_po_scope_lines._pb_po_scope_selectbox_guard = True
@@ -153,9 +257,11 @@ def _patch_text_input(owner: Any, st: Any) -> bool:
         if label == "Area / scope name":
             try:
                 line = str(st.session_state.get(AREA_LINE_KEY, "") or "")
-                if line in {DISPLAY_INTERNAL, DISPLAY_EXTERNAL}:
+                if line and line != DISPLAY_CUSTOM:
                     kwargs["value"] = line
                     kwargs["placeholder"] = f"{line} works"
+                elif line == DISPLAY_CUSTOM:
+                    kwargs["placeholder"] = "e.g. Block A external, Stage 2 internal, defects, variation"
             except Exception:
                 pass
         return original(*tuple(arg_list), **kwargs)
@@ -184,13 +290,13 @@ def _patch_number_input(owner: Any, st: Any) -> bool:
         if label == "Area / stage value ex GST":
             try:
                 line = str(st.session_state.get(AREA_LINE_KEY, "") or "")
-                if line in {DISPLAY_INTERNAL, DISPLAY_EXTERNAL}:
+                if line and line != DISPLAY_CUSTOM:
                     new_label = f"{line} value ex GST"
                     if label_index is not None:
                         arg_list[label_index] = new_label
                     else:
                         kwargs["label"] = new_label
-                    kwargs["help"] = f"Enter the {line.lower()} works value. JobHub will calculate the PO percentage from this line."
+                    kwargs["help"] = f"Enter the {line.lower()} value. JobHub will calculate the PO percentage from this line."
             except Exception:
                 pass
         return original(*tuple(arg_list), **kwargs)
@@ -207,6 +313,7 @@ def install_po_upload_scope_return_guard() -> bool:
         return False
     po = _po_module()
     installed = _install_return_button(po, st)
+    installed = _install_stage_options_guard(po) or installed
     for owner in (st,):
         installed = _patch_selectbox(owner, st, po) or installed
         installed = _patch_text_input(owner, st) or installed
