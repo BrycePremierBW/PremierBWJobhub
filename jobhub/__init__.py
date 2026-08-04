@@ -2,6 +2,7 @@
 
 from .ai_menu_guard import install_ai_menu_guard
 from .bulk_delete_guard import install_bulk_delete_guard
+from .database_timeout_guard import install_database_timeout_guard
 from .integration_health_guard import install_integration_health_guard
 from .job_folder_uploaded_documents_guard import install_job_folder_uploaded_documents_guard
 from .mobile_sidebar_guard import install_mobile_sidebar_guard
@@ -9,6 +10,7 @@ from .mobile_top_navigation_guard import install_mobile_top_navigation_guard
 from .navigation_state_guard import install_navigation_state_guard
 from .notification_freeze_guard import install_notification_freeze_guard
 from .notification_wording_guard import install_notification_wording_guard
+from .page_render_freeze_guard import install_page_render_freeze_guard
 from .permission_policy_guard import install_permission_policy_guard
 from .po_job_switch_guard import install_po_job_switch_guard
 from .po_stage_state_guard import install_po_stage_state_guard
@@ -42,8 +44,10 @@ from .timesheet_area_guard import install_timesheet_area_guard
 # Streamlit's page configuration still remains the first UI command.
 install_push_configuration_guard()
 install_session_keepalive_guard()
+install_database_timeout_guard()
 install_runtime_performance_guard()
 install_notification_freeze_guard()
+install_page_render_freeze_guard()
 install_notification_wording_guard()
 install_mobile_sidebar_guard()
 install_sidebar_readability_guard()
