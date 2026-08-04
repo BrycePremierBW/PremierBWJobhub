@@ -7,10 +7,11 @@ import zipfile
 from datetime import date, datetime
 from pathlib import Path
 
+import pandas as pd
 import streamlit as st
 
 from .auth import can_manage
-from .common import AppContext, _clean, _int, job_options
+from .common import AppContext, _clean, _float, _int, job_options
 from .ui import header, rerun_success, selected_row
 
 
@@ -21,22 +22,7 @@ def _safe_job_segment(value: str) -> str:
     return segment[:100]
 
 
-def job_files_page(ctx: AppContext) -> None:
-    header("Job Files", "Simple persistent file storage linked to each job.")
-    jobs = job_options(ctx, include_archived=True)
-    if not jobs:
-        st.info("Add a job first.")
-        return
-    job_label = st.selectbox("Job", list(jobs), key="job_files_job")
-    job_id = jobs[job_label]
-    job_row = ctx.db.query("SELECT job_no FROM jobs WHERE id=?", (job_id,))
-    job_no = _clean(job_row.iloc[0].get("job_no")) if not job_row.empty else str(job_id)
-    root = ctx.job_files_dir.resolve()
-    folder = (root / _safe_job_segment(job_no)).resolve()
-    if root not in folder.parents:
-        raise ValueError("Unsafe job folder path.")
-    folder.mkdir(parents=True, exist_ok=True)
-
+def _documents_tab(ctx: AppContext, job_id: int, folder: Path) -> None:
     with st.expander("Upload document", expanded=False):
         upload = st.file_uploader("Document", key=f"job_document_upload_{job_id}")
         document_type = st.text_input("Document type", value="General", key=f"job_document_type_{job_id}")
@@ -86,6 +72,122 @@ def job_files_page(ctx: AppContext) -> None:
                         ctx.db.execute("DELETE FROM job_documents WHERE id=? AND job_id=?", (_int(row.get("id")), job_id))
                     ctx.audit("delete", "job_documents", _int(row.get("id")), path.name)
                     rerun_success("Document deleted.")
+
+
+def _schedule_tab(ctx: AppContext, job_id: int) -> None:
+    try:
+        from pb_jobhub_visual_scheduler import render_job_folder_schedule_editor
+        render_job_folder_schedule_editor(job_id, ctx.user)
+    except Exception as exc:
+        st.error("The linked job schedule could not be opened.")
+        st.caption(str(exc))
+
+
+def _status_fraction(value: object) -> float:
+    text = _clean(value).lower()
+    if text == "complete":
+        return 1.0
+    if text in {"in progress", "started"}:
+        return 0.5
+    return 0.0
+
+
+def _progress_tab(ctx: AppContext, job_id: int) -> None:
+    if not ctx.db.table_exists("job_dwelling_progress"):
+        st.info("Open Job Progress once to initialise progress tracking for this database.")
+        return
+    dwellings = ctx.db.query(
+        """
+        SELECT dwelling_no,COALESCE(dwelling_name,'') AS dwelling_name,COALESCE(floor_m2,0) AS floor_m2,
+               COALESCE(prepped_sealed,'Not started') AS prepped_sealed,
+               COALESCE(prep_spray_finished,'Not started') AS prep_spray_finished,
+               COALESCE(cut_rolled,'Not started') AS cut_rolled,
+               COALESCE(defects,'Not started') AS defects,
+               COALESCE(is_custom,0) AS is_custom,COALESCE(scope_percent,0) AS scope_percent
+        FROM job_dwelling_progress WHERE job_id=? ORDER BY COALESCE(is_custom,0),dwelling_no
+        """,
+        (job_id,),
+    )
+    if not dwellings.empty:
+        weights = {"prepped_sealed": 30.0, "prep_spray_finished": 30.0, "cut_rolled": 30.0, "defects": 10.0}
+        dwellings["Progress %"] = dwellings.apply(
+            lambda row: round(sum(_status_fraction(row[field]) * weight for field, weight in weights.items()), 1),
+            axis=1,
+        )
+        floor_total = float(dwellings["floor_m2"].fillna(0).sum())
+        if floor_total > 0:
+            overall_internal = float((dwellings["floor_m2"] * dwellings["Progress %"]).sum() / floor_total)
+        else:
+            overall_internal = float(dwellings["Progress %"].mean())
+    else:
+        overall_internal = 0.0
+
+    external = pd.DataFrame()
+    overall_external = 0.0
+    if ctx.db.table_exists("job_external_progress"):
+        external = ctx.db.query(
+            """
+            SELECT area_name,substrate,COALESCE(measured_m2,0) AS measured_m2,
+                   COALESCE(prep,'Not started') AS prep,COALESCE(primer,'Not started') AS primer,
+                   COALESCE(first_coat,'Not started') AS first_coat,
+                   COALESCE(final_coat,'Not started') AS final_coat,
+                   COALESCE(touchups,'Not started') AS touchups
+            FROM job_external_progress WHERE job_id=? ORDER BY dwelling_no,substrate,area_name
+            """,
+            (job_id,),
+        )
+        if not external.empty:
+            fields = ["prep", "primer", "first_coat", "final_coat", "touchups"]
+            external["Progress %"] = external.apply(
+                lambda row: round(sum(_status_fraction(row[field]) for field in fields) / len(fields) * 100, 1),
+                axis=1,
+            )
+            area_total = float(external["measured_m2"].fillna(0).sum())
+            overall_external = float((external["measured_m2"] * external["Progress %"]).sum() / area_total) if area_total else float(external["Progress %"].mean())
+
+    settings = ctx.db.query("SELECT * FROM job_progress_settings WHERE job_id=?", (job_id,)) if ctx.db.table_exists("job_progress_settings") else pd.DataFrame()
+    iw = _float(settings.iloc[0].get("internal_weight_percent")) if not settings.empty else 65.0
+    ew = _float(settings.iloc[0].get("external_weight_percent")) if not settings.empty else 35.0
+    has_internal = not dwellings.empty
+    has_external = not external.empty
+    active_weight = (iw if has_internal else 0) + (ew if has_external else 0)
+    overall = ((overall_internal * iw) + (overall_external * ew)) / active_weight if active_weight else 0.0
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Internal progress", f"{overall_internal:.1f}%")
+    m2.metric("External progress", f"{overall_external:.1f}%")
+    m3.metric("Weighted overall", f"{overall:.1f}%")
+    st.progress(min(1.0, max(0.0, overall / 100)))
+    if not dwellings.empty:
+        st.subheader("Internal dwellings / areas")
+        st.dataframe(dwellings, hide_index=True, use_container_width=True)
+    if not external.empty:
+        st.subheader("External areas")
+        st.dataframe(external, hide_index=True, use_container_width=True)
+
+
+def job_files_page(ctx: AppContext) -> None:
+    header("Job Folders", "Documents, editable schedule and weighted progress linked to each job.")
+    jobs = job_options(ctx, include_archived=True)
+    if not jobs:
+        st.info("Add a job first.")
+        return
+    job_label = st.selectbox("Job", list(jobs), key="job_files_job")
+    job_id = jobs[job_label]
+    job_row = ctx.db.query("SELECT job_no FROM jobs WHERE id=?", (job_id,))
+    job_no = _clean(job_row.iloc[0].get("job_no")) if not job_row.empty else str(job_id)
+    root = ctx.job_files_dir.resolve()
+    folder = (root / _safe_job_segment(job_no)).resolve()
+    if root not in folder.parents:
+        raise ValueError("Unsafe job folder path.")
+    folder.mkdir(parents=True, exist_ok=True)
+
+    documents_tab, schedule_tab, progress_tab = st.tabs(["Documents", "Schedule", "Progress"])
+    with documents_tab:
+        _documents_tab(ctx, job_id, folder)
+    with schedule_tab:
+        _schedule_tab(ctx, job_id)
+    with progress_tab:
+        _progress_tab(ctx, job_id)
 
 
 def reports_page(ctx: AppContext) -> None:
