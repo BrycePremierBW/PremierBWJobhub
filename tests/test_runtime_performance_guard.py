@@ -35,38 +35,104 @@ class FakeStreamlit(types.SimpleNamespace):
         super().__init__(dataframe=dataframe, session_state=self.session_state)
 
 
+def legacy_selectable_wrapper(function):
+    def wrapper(*args, **kwargs):
+        if "on_select" not in kwargs:
+            kwargs["on_select"] = "rerun"
+            kwargs["selection_mode"] = "single-row"
+        return function(*args, **kwargs)
+
+    wrapper._pb_selectable_wrapper = True
+    wrapper._pb_original_dataframe = function
+    return wrapper
+
+
 class RuntimePerformanceGuardTests(unittest.TestCase):
     def test_unkeyed_legacy_dataframe_becomes_display_only(self):
         st = FakeStreamlit()
         MODULE._install_dataframe_guard(st)
         guarded = st.dataframe
-
-        def legacy_selectable_wrapper(*args, **kwargs):
-            if "on_select" not in kwargs:
-                kwargs["on_select"] = "rerun"
-                kwargs["selection_mode"] = "single-row"
-            return guarded(*args, **kwargs)
-
-        st.dataframe = legacy_selectable_wrapper
+        st.dataframe = legacy_selectable_wrapper(guarded)
         st.dataframe([])
         self.assertEqual(st.calls[-1].get("on_select"), "ignore")
         self.assertNotIn("selection_mode", st.calls[-1])
 
-    def test_keyed_editable_dataframe_keeps_selection(self):
-        st = FakeStreamlit()
+    def test_protected_wrapper_makes_keyed_report_display_only(self):
+        calls = []
+
+        def base_dataframe(*args, **kwargs):
+            calls.append(kwargs.copy())
+            return kwargs
+
+        protected = MODULE._protect_legacy_dataframe_wrapper(
+            legacy_selectable_wrapper(base_dataframe)
+        )
+        protected([], key="job_dashboard_timesheet_details")
+        self.assertEqual(calls[-1].get("on_select"), "ignore")
+        self.assertNotIn("selection_mode", calls[-1])
+
+    def test_explicit_keyed_selection_remains_interactive(self):
+        calls = []
+
+        def base_dataframe(*args, **kwargs):
+            calls.append(kwargs.copy())
+            return kwargs
+
+        protected = MODULE._protect_legacy_dataframe_wrapper(
+            legacy_selectable_wrapper(base_dataframe)
+        )
+        protected(
+            [],
+            key="employee_requests_table_14",
+            on_select="rerun",
+            selection_mode="single-row",
+        )
+        self.assertEqual(calls[-1].get("on_select"), "rerun")
+        self.assertEqual(calls[-1].get("selection_mode"), "single-row")
+
+    def test_streamlit_assignment_is_intercepted_before_legacy_wrapper_runs(self):
+        st = types.ModuleType("fake_streamlit_for_freeze_test")
+        st.calls = []
+        st.session_state = FakeState()
+
+        def base_dataframe(*args, **kwargs):
+            st.calls.append(kwargs.copy())
+            return kwargs
+
+        st.dataframe = base_dataframe
         MODULE._install_dataframe_guard(st)
-        guarded = st.dataframe
+        legacy = legacy_selectable_wrapper(st.dataframe)
+        st.dataframe = legacy
 
-        def legacy_selectable_wrapper(*args, **kwargs):
-            if "on_select" not in kwargs:
-                kwargs["on_select"] = "rerun"
-                kwargs["selection_mode"] = "single-row"
-            return guarded(*args, **kwargs)
+        self.assertTrue(getattr(st.dataframe, MODULE.DISPLAY_ONLY_MARKER, False))
+        self.assertTrue(getattr(st.dataframe, "_pb_selectable_wrapper", False))
 
-        st.dataframe = legacy_selectable_wrapper
-        st.dataframe([], key="jobs_table")
+        st.dataframe([], key="keyed_report_only")
+        self.assertEqual(st.calls[-1].get("on_select"), "ignore")
+        self.assertNotIn("selection_mode", st.calls[-1])
+
+        st.dataframe(
+            [],
+            key="keyed_edit_table",
+            on_select="rerun",
+            selection_mode="single-row",
+        )
         self.assertEqual(st.calls[-1].get("on_select"), "rerun")
         self.assertEqual(st.calls[-1].get("selection_mode"), "single-row")
+
+    def test_protected_wrapper_does_not_stack_on_rerun(self):
+        calls = []
+
+        def base_dataframe(*args, **kwargs):
+            calls.append(kwargs.copy())
+            return kwargs
+
+        first = MODULE._protect_legacy_dataframe_wrapper(
+            legacy_selectable_wrapper(base_dataframe)
+        )
+        second = MODULE._protect_legacy_dataframe_wrapper(first)
+        self.assertIs(first, second)
+        self.assertTrue(getattr(first, "_pb_selectable_wrapper", False))
 
     def test_scheduler_sync_runs_only_when_links_are_dirty(self):
         calls = []
