@@ -124,7 +124,6 @@ PAINT_ORDER_TEMPLATE_PDF = first_existing_app_file(
     TEMPLATE_DIR,
     "PB Paint and Materials Order Form fillable.pdf",
 )
-
 DAY_LABOUR_TEMPLATE_PDF = first_existing_app_file(
     TEMPLATE_DIR,
     "Day_Labour_Sheet_FILLABLE.pdf",
