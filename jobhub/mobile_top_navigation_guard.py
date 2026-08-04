@@ -1,9 +1,8 @@
 """Native phone navigation for Premier Brushworks JobHub.
 
-This guard adds a real Streamlit selectbox immediately before JobHub renders its
-``main_menu`` sidebar radio. CSS shows the selectbox on phones and hides it on
-desktop. The sidebar radio remains the source of truth, so desktop routing is not
-patched or replaced.
+A real Streamlit selectbox is rendered immediately before the app's main sidebar
+radio. It lives in a keyed container so mobile CSS can target it reliably. The
+normal sidebar radio remains unchanged on desktop.
 """
 
 from __future__ import annotations
@@ -13,46 +12,41 @@ from typing import Any
 
 
 _MOBILE_TOP_NAV_CSS = """
-<style id="pb-native-mobile-top-navigation-v3">
-/* Hidden by default so desktop keeps the established sidebar-only layout. */
-div[data-testid="stElementContainer"]:has(.pb-mobile-top-nav-marker) {
+<style id="pb-native-mobile-top-navigation-v4">
+.st-key-pb_mobile_top_navigation {
     display: none !important;
 }
 
 @media (max-width: 768px) {
-    div[data-testid="stElementContainer"]:has(.pb-mobile-top-nav-marker) {
+    .st-key-pb_mobile_top_navigation {
         display: block !important;
         position: sticky !important;
-        top: calc(0.3rem + env(safe-area-inset-top)) !important;
+        top: calc(0.35rem + env(safe-area-inset-top)) !important;
         z-index: 2147483640 !important;
-        margin: 0 0 0.7rem 0 !important;
-        padding: 0.42rem !important;
+        margin: 0 0 0.75rem 0 !important;
+        padding: 0.45rem !important;
         border: 1px solid rgba(122,104,86,0.22) !important;
         border-radius: 13px !important;
-        background: rgba(255,255,255,0.97) !important;
+        background: rgba(255,255,255,0.98) !important;
         box-shadow: 0 4px 16px rgba(0,0,0,0.16) !important;
-        backdrop-filter: blur(10px) !important;
-        -webkit-backdrop-filter: blur(10px) !important;
     }
 
-    div[data-testid="stElementContainer"]:has(.pb-mobile-top-nav-marker)
-    div[data-baseweb="select"] {
-        width: 100% !important;
+    .st-key-pb_mobile_top_navigation [data-testid="stSelectbox"] {
+        margin: 0 !important;
     }
 
-    div[data-testid="stElementContainer"]:has(.pb-mobile-top-nav-marker)
-    [data-testid="stSelectbox"] label {
+    .st-key-pb_mobile_top_navigation [data-testid="stSelectbox"] label {
         display: none !important;
     }
 
-    div[data-testid="stElementContainer"]:has(.pb-mobile-top-nav-marker)
-    [data-baseweb="select"] > div {
+    .st-key-pb_mobile_top_navigation [data-baseweb="select"],
+    .st-key-pb_mobile_top_navigation [data-baseweb="select"] > div {
+        width: 100% !important;
         min-height: 44px !important;
         border-radius: 10px !important;
         font-weight: 700 !important;
     }
 
-    /* The phone uses the top menu. Keep Streamlit's drawer off the canvas. */
     section[data-testid="stSidebar"] {
         display: none !important;
         visibility: hidden !important;
@@ -82,18 +76,29 @@ div[data-testid="stElementContainer"]:has(.pb-mobile-top-nav-marker) {
 """
 
 
-def _install_main_menu_radio_guard(streamlit_module: Any) -> bool:
-    sidebar = getattr(streamlit_module, "sidebar", None)
-    original_radio = getattr(sidebar, "radio", None)
-    if original_radio is None or getattr(original_radio, "_pb_native_mobile_top_nav", False):
+def install_mobile_top_navigation_guard() -> bool:
+    st = sys.modules.get("streamlit")
+    if st is None:
         return False
 
+    sidebar = getattr(st, "sidebar", None)
+    original_radio = getattr(sidebar, "radio", None)
+    if original_radio is None or getattr(original_radio, "_pb_native_mobile_top_nav_v4", False):
+        return False
+
+    css_rendered = False
+
     def pb_radio(label: Any, options: Any, *args: Any, **kwargs: Any):
-        key = kwargs.get("key")
+        nonlocal css_rendered
         option_list = list(options) if options is not None else []
+        key = kwargs.get("key")
 
         if key == "main_menu" and option_list:
-            state = streamlit_module.session_state
+            if not css_rendered:
+                css_rendered = True
+                st.markdown(_MOBILE_TOP_NAV_CSS, unsafe_allow_html=True)
+
+            state = st.session_state
             current = state.get("main_menu")
             if current not in option_list:
                 current = option_list[0]
@@ -103,7 +108,6 @@ def _install_main_menu_radio_guard(streamlit_module: Any) -> bool:
             if state.get(mobile_key) not in option_list:
                 state[mobile_key] = current
             elif state.get(mobile_key) != current:
-                # Keep external route changes reflected in the phone control.
                 state[mobile_key] = current
 
             def sync_mobile_choice() -> None:
@@ -111,51 +115,23 @@ def _install_main_menu_radio_guard(streamlit_module: Any) -> bool:
                 if selected in option_list:
                     state["main_menu"] = selected
 
-            streamlit_module.markdown(
-                '<span class="pb-mobile-top-nav-marker"></span>',
-                unsafe_allow_html=True,
-            )
-            streamlit_module.selectbox(
-                "JobHub menu",
-                option_list,
-                key=mobile_key,
-                on_change=sync_mobile_choice,
-                label_visibility="collapsed",
-            )
+            try:
+                mobile_container = st.container(key="pb_mobile_top_navigation")
+            except TypeError:
+                mobile_container = st.container()
+
+            with mobile_container:
+                st.selectbox(
+                    "JobHub menu",
+                    option_list,
+                    key=mobile_key,
+                    on_change=sync_mobile_choice,
+                    label_visibility="collapsed",
+                )
 
         return original_radio(label, option_list, *args, **kwargs)
 
-    pb_radio._pb_native_mobile_top_nav = True
+    pb_radio._pb_native_mobile_top_nav_v4 = True
     pb_radio._pb_original_radio = original_radio
     sidebar.radio = pb_radio
     return True
-
-
-def _install_css_guard(streamlit_module: Any) -> bool:
-    original_markdown = getattr(streamlit_module, "markdown", None)
-    if original_markdown is None or getattr(original_markdown, "_pb_mobile_top_css_guard", False):
-        return False
-
-    css_done = False
-
-    def pb_markdown(body: Any, *args: Any, **kwargs: Any):
-        nonlocal css_done
-        result = original_markdown(body, *args, **kwargs)
-        if not css_done and isinstance(body, str) and "PB_JOBHUB_SIDEBAR_SCROLL_GUARD" in body:
-            css_done = True
-            original_markdown(_MOBILE_TOP_NAV_CSS, unsafe_allow_html=True)
-        return result
-
-    pb_markdown._pb_mobile_top_css_guard = True
-    pb_markdown._pb_original_markdown = original_markdown
-    streamlit_module.markdown = pb_markdown
-    return True
-
-
-def install_mobile_top_navigation_guard() -> bool:
-    streamlit_module = sys.modules.get("streamlit")
-    if streamlit_module is None:
-        return False
-    radio_installed = _install_main_menu_radio_guard(streamlit_module)
-    css_installed = _install_css_guard(streamlit_module)
-    return bool(radio_installed or css_installed)
