@@ -14,8 +14,11 @@ from .ui import header, rerun_success
 def _show_frame(frame: pd.DataFrame, empty_message: str, *, height: int | None = None) -> None:
     if frame is None or frame.empty:
         st.caption(empty_message)
-    else:
-        st.dataframe(frame, hide_index=True, use_container_width=True, height=height)
+        return
+    kwargs = {"hide_index": True, "width": "stretch"}
+    if height is not None:
+        kwargs["height"] = height
+    st.dataframe(frame, **kwargs)
 
 
 def dashboard_page(ctx: AppContext) -> None:
@@ -274,7 +277,7 @@ def products_page(ctx: AppContext) -> None:
                     for target, candidates in expected.items():
                         source = next((aliases[c] for c in candidates if c in aliases), None)
                         prepared[target] = frame[source] if source else ""
-                    st.dataframe(prepared.head(50), hide_index=True, use_container_width=True)
+                    st.dataframe(prepared.head(50), hide_index=True, width="stretch")
                     if st.button("Import products", type="primary"):
                         rows = []
                         for _, row in prepared.iterrows():
