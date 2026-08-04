@@ -53,7 +53,11 @@ class NativePoUploadTests(unittest.TestCase):
     def test_startup_uses_final_direct_route_after_mobile_navigation(self):
         source = (ROOT / "jobhub" / "__init__.py").read_text(encoding="utf-8")
         self.assertIn("install_po_upload_direct_route_guard()", source)
-        self.assertIn("def install_po_upload_guard() -> bool:", source)
+        self.assertIn("def _retired_po_upload_route_guard() -> bool:", source)
+        self.assertIn(
+            "install_po_upload_guard = _retired_po_upload_route_guard",
+            source,
+        )
         self.assertIn("install_po_upload_native_guard()", source)
         self.assertNotIn("from .po_upload_guard import install_po_upload_guard", source)
         self.assertNotIn("install_po_upload_scope_return_guard()", source)
