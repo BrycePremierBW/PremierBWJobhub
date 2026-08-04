@@ -21,6 +21,7 @@ from .pages import (
     job_pack_import_page,
     jobs_page,
     materials_page,
+    po_upload_page,
     products_page,
     reports_page,
     setup_page,
@@ -32,7 +33,7 @@ from .schema import ensure_schema
 from .ui import install_style, show_notice
 
 
-BUILD = "2026.08.05-lean-rewrite-v5"
+BUILD = "2026.08.05-lean-rewrite-v6"
 
 
 def _storage_root() -> Path:
@@ -59,9 +60,9 @@ def _menu_options() -> list[str]:
     role = str(current_user().get("role") or "employee").lower()
     employee = ["Dashboard", "Field Mode", "Timesheets", "Job Files"]
     manager = [
-        "Dashboard", "Jobs", "Job Pack Import", "Builders & Clients", "Employees",
-        "Products", "Staff Scheduler", "Timesheets", "Materials", "Equipment",
-        "Estimating", "Job Progress", "Job Files", "Operations Hub",
+        "Dashboard", "Jobs", "Upload PO", "Job Pack Import", "Builders & Clients",
+        "Employees", "Products", "Staff Scheduler", "Timesheets", "Materials",
+        "Equipment", "Estimating", "Job Progress", "Job Files", "Operations Hub",
         "Painting Intelligence", "Reports",
     ]
     admin = manager + ["Setup & Defaults", "User Access", "System"]
@@ -72,6 +73,7 @@ def _dispatch(ctx: AppContext, page: str) -> None:
     local_pages: dict[str, Callable[[AppContext], None]] = {
         "Dashboard": dashboard_page,
         "Jobs": jobs_page,
+        "Upload PO": po_upload_page,
         "Job Pack Import": job_pack_import_page,
         "Builders & Clients": builders_page,
         "Employees": employees_page,
