@@ -7,6 +7,7 @@ from .job_folder_uploaded_documents_guard import install_job_folder_uploaded_doc
 from .mobile_sidebar_guard import install_mobile_sidebar_guard
 from .mobile_top_navigation_guard import install_mobile_top_navigation_guard
 from .navigation_state_guard import install_navigation_state_guard
+from .notification_freeze_guard import install_notification_freeze_guard
 from .notification_wording_guard import install_notification_wording_guard
 from .permission_policy_guard import install_permission_policy_guard
 from .po_job_switch_guard import install_po_job_switch_guard
@@ -37,11 +38,12 @@ from .system_health_guard import install_system_health_guard
 from .timesheet_area_guard import install_timesheet_area_guard
 
 # Install before the main app calls st.set_page_config/apply_pb_branding. These
-# guards only wrap Streamlit/os functions and render nothing during import, so
+# guards only wrap Streamlit/os/functions and render nothing during import, so
 # Streamlit's page configuration still remains the first UI command.
 install_push_configuration_guard()
 install_session_keepalive_guard()
 install_runtime_performance_guard()
+install_notification_freeze_guard()
 install_notification_wording_guard()
 install_mobile_sidebar_guard()
 install_sidebar_readability_guard()
