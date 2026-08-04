@@ -22,6 +22,7 @@ GUARD_FILES = [
     "jobhub/navigation_state_guard.py",
     "jobhub/notification_wording_guard.py",
     "jobhub/po_upload_guard.py",
+    "jobhub/po_upload_native_guard.py",
     "jobhub/po_upload_scope_return_guard.py",
     "jobhub/progress_external_options_guard.py",
     "jobhub/push_configuration_guard.py",
@@ -57,7 +58,8 @@ class RecentFeatureGuardSmokeTests(unittest.TestCase):
             "install_sidebar_readability_guard()",
             "install_navigation_state_guard()",
             "install_po_upload_guard()",
-            "install_po_upload_scope_return_guard()",
+            "install_po_upload_performance_guard()",
+            "install_po_upload_native_guard()",
             "install_job_folder_uploaded_documents_guard()",
             "install_progress_external_options_guard()",
             "install_stage_selection_guard()",
@@ -76,6 +78,8 @@ class RecentFeatureGuardSmokeTests(unittest.TestCase):
             self.assertIn(call, source)
             positions.append(source.index(call))
         self.assertEqual(positions, sorted(positions), "Guard install order changed unexpectedly")
+        self.assertNotIn("install_po_upload_scope_return_guard()", source)
+        self.assertNotIn("install_po_upload_split_guard()", source)
 
     def test_jobhub_core_keeps_required_app_imports(self):
         source = read("jobhub_core.py")
