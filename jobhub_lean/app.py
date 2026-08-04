@@ -8,6 +8,7 @@ import streamlit as st
 
 from .auth import current_user, login, logout_button
 from .db import Database
+from .migrations import ensure_compatibility_schema
 from .mobile import install_mobile_shell, render_phone_push_opt_in
 from .pages import (
     AppContext,
@@ -33,7 +34,7 @@ from .schema import ensure_schema
 from .ui import install_style, show_notice
 
 
-BUILD = "2026.08.05-lean-rewrite-v6"
+BUILD = "2026.08.05-lean-rewrite-v7"
 
 
 def _storage_root() -> Path:
@@ -46,13 +47,14 @@ def _storage_root() -> Path:
 
 @st.cache_resource(show_spinner=False)
 def _runtime(database_url: str, data_dir_text: str) -> AppContext:
-    """Initialise only the small core. Large retained modules load on demand."""
+    """Initialise the lean core and additive legacy-database migrations once."""
     data_dir = Path(data_dir_text)
     data_dir.mkdir(parents=True, exist_ok=True)
     job_files = data_dir / "job_files"
     job_files.mkdir(parents=True, exist_ok=True)
     db = Database(database_url, str(data_dir / "jobhub.db"))
     ensure_schema(db)
+    ensure_compatibility_schema(db)
     return AppContext(db=db, data_dir=data_dir, job_files_dir=job_files)
 
 
