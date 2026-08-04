@@ -131,7 +131,8 @@ class PoUploadPerformanceGuardTests(unittest.TestCase):
         )
         MODULE._patch_split_constraint(split, po)
 
-        # These represent install-time and page-render calls in the split guard.
+        # These represent legacy install-time and page-render calls. They remain
+        # no-ops even though the new native renderer no longer installs them.
         split._relax_po_number_uniqueness(po)
         split._relax_po_number_uniqueness(po)
         self.assertEqual(relax_calls, [])
@@ -141,16 +142,21 @@ class PoUploadPerformanceGuardTests(unittest.TestCase):
         self.assertEqual(len(relax_calls), 1)
         self.assertEqual(len(record_calls), 2)
 
-    def test_performance_guard_installs_before_split_guard(self):
+    def test_performance_guard_installs_before_native_renderer(self):
         init_source = (ROOT / "jobhub" / "__init__.py").read_text(encoding="utf-8")
         self.assertIn(
             "from .po_upload_performance_guard import install_po_upload_performance_guard",
             init_source,
         )
+        self.assertIn(
+            "from .po_upload_native_guard import install_po_upload_native_guard",
+            init_source,
+        )
         self.assertLess(
             init_source.index("install_po_upload_performance_guard()"),
-            init_source.index("install_po_upload_split_guard()"),
+            init_source.index("install_po_upload_native_guard()"),
         )
+        self.assertNotIn("install_po_upload_split_guard()", init_source)
 
 
 if __name__ == "__main__":
