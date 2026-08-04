@@ -29,7 +29,7 @@ _MENU_ICONS = {
 
 
 _MOBILE_APP_NAV_CSS = """
-<style id="pb-native-mobile-app-navigation-v5">
+<style id="pb-native-mobile-app-navigation-v6">
 /* Desktop keeps the established sidebar navigation. */
 .st-key-pb_mobile_app_navigation {
     display: none !important;
@@ -167,20 +167,18 @@ def install_mobile_top_navigation_guard() -> bool:
 
     sidebar = getattr(st, "sidebar", None)
     original_radio = getattr(sidebar, "radio", None)
-    if original_radio is None or getattr(original_radio, "_pb_native_mobile_app_nav_v5", False):
+    if original_radio is None or getattr(original_radio, "_pb_native_mobile_app_nav_v6", False):
         return False
 
-    css_rendered = False
-
     def pb_sidebar_radio(label: Any, options: Any, *args: Any, **kwargs: Any):
-        nonlocal css_rendered
         option_list = list(options) if options is not None else []
         key = kwargs.get("key")
 
         if key == "main_menu" and option_list:
-            if not css_rendered:
-                css_rendered = True
-                st.markdown(_MOBILE_APP_NAV_CSS, unsafe_allow_html=True)
+            # Streamlit clears rendered elements on every rerun. Re-render the CSS
+            # every time the main menu is created so the drawer stays hidden after
+            # a mobile navigation selection triggers a rerun.
+            st.markdown(_MOBILE_APP_NAV_CSS, unsafe_allow_html=True)
 
             state = st.session_state
             current = state.get("main_menu")
@@ -221,7 +219,7 @@ def install_mobile_top_navigation_guard() -> bool:
 
         return original_radio(label, option_list, *args, **kwargs)
 
-    pb_sidebar_radio._pb_native_mobile_app_nav_v5 = True
+    pb_sidebar_radio._pb_native_mobile_app_nav_v6 = True
     pb_sidebar_radio._pb_original_radio = original_radio
     sidebar.radio = pb_sidebar_radio
     return True
