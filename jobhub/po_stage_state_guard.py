@@ -1,18 +1,20 @@
 """Prevent Upload PO from freezing when switching between jobs.
 
-Streamlit retains selectbox values by widget key. The Upload PO stage selector uses
-one key across every job, so changing to a job with different stages can leave a
-saved value that is not present in the new option list. Reset only that stale
-value before Streamlit validates the widget.
+The Upload PO page reuses the same stage widget key for every job. Streamlit keeps
+widget state by key, so switching jobs can leave the stage selector bound to a
+value from the previous job. Give the stage selector a stable job-specific key
+before Streamlit creates it, and discard any invalid value for that job.
 """
 
 from __future__ import annotations
 
+import hashlib
 import sys
 from typing import Any
 
 
 PO_STAGE_KEY = "po_upload_stage"
+PO_JOB_KEY = "po_upload_job"
 
 
 def _option_values(options: Any) -> list[Any]:
@@ -22,9 +24,18 @@ def _option_values(options: Any) -> list[Any]:
         return []
 
 
+def _job_specific_key(st: Any) -> str:
+    try:
+        selected_job = str(st.session_state.get(PO_JOB_KEY) or "default")
+    except Exception:
+        selected_job = "default"
+    token = hashlib.sha1(selected_job.encode("utf-8")).hexdigest()[:12]
+    return f"{PO_STAGE_KEY}_{token}"
+
+
 def _patch_selectbox(owner: Any, st: Any) -> bool:
     original = getattr(owner, "selectbox", None)
-    if original is None or getattr(original, "_pb_po_stage_state_guard", False):
+    if original is None or getattr(original, "_pb_po_stage_state_guard_v2", False):
         return False
 
     def wrapper(*args: Any, **kwargs: Any):
@@ -38,15 +49,17 @@ def _patch_selectbox(owner: Any, st: Any) -> bool:
                 elif len(arg_list) >= 3:
                     options = arg_list[2]
             values = _option_values(options)
+            dynamic_key = _job_specific_key(st)
+            kwargs["key"] = dynamic_key
             try:
-                current = st.session_state.get(PO_STAGE_KEY)
+                current = st.session_state.get(dynamic_key)
                 if current is not None and current not in values:
-                    del st.session_state[PO_STAGE_KEY]
+                    del st.session_state[dynamic_key]
             except Exception:
                 pass
         return original(*args, **kwargs)
 
-    wrapper._pb_po_stage_state_guard = True
+    wrapper._pb_po_stage_state_guard_v2 = True
     wrapper._pb_original_selectbox = original
     setattr(owner, "selectbox", wrapper)
     return True
