@@ -35,12 +35,12 @@ def _job_specific_key(st: Any) -> str:
 
 def _patch_selectbox(owner: Any, st: Any) -> bool:
     original = getattr(owner, "selectbox", None)
-    if original is None or getattr(original, "_pb_po_stage_state_guard_v2", False):
+    if original is None or getattr(original, "_pb_po_stage_state_guard_v3", False):
         return False
 
     def wrapper(*args: Any, **kwargs: Any):
         key = str(kwargs.get("key") or "")
-        if key == PO_STAGE_KEY:
+        if key in {PO_STAGE_KEY, "po_split_stage"}:
             arg_list = list(args)
             options = kwargs.get("options")
             if options is None:
@@ -49,17 +49,15 @@ def _patch_selectbox(owner: Any, st: Any) -> bool:
                 elif len(arg_list) >= 3:
                     options = arg_list[2]
             values = _option_values(options)
-            dynamic_key = _job_specific_key(st)
-            kwargs["key"] = dynamic_key
             try:
-                current = st.session_state.get(dynamic_key)
+                current = st.session_state.get(key)
                 if current is not None and current not in values:
-                    del st.session_state[dynamic_key]
+                    del st.session_state[key]
             except Exception:
                 pass
         return original(*args, **kwargs)
 
-    wrapper._pb_po_stage_state_guard_v2 = True
+    wrapper._pb_po_stage_state_guard_v3 = True
     wrapper._pb_original_selectbox = original
     setattr(owner, "selectbox", wrapper)
     return True

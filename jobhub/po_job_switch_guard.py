@@ -14,13 +14,21 @@ FILE_KEY = "po_upload_file"
 SCHEMA_READY_KEY = "_pb_po_schema_ready"
 
 
-def _selected_job_token(st: Any) -> str:
+def _handle_job_switch(st: Any, current_job: str) -> None:
     try:
-        value = str(st.session_state.get(JOB_KEY, "default") or "default")
+        current_job = str(current_job or "")
+        last_job = str(st.session_state.get("_pb_last_po_job", "") or "")
+        if current_job and last_job and current_job != last_job:
+            for key in [STAGE_KEY, "po_split_stage", FILE_KEY, "po_split_upload_file"]:
+                if key in st.session_state:
+                    try:
+                        del st.session_state[key]
+                    except Exception:
+                        pass
+        if current_job:
+            st.session_state["_pb_last_po_job"] = current_job
     except Exception:
-        value = "default"
-    # Stable, widget-safe token without depending on the database id lookup.
-    return str(abs(hash(value)))
+        pass
 
 
 def _patch_selectbox(owner: Any, st: Any) -> bool:
@@ -29,9 +37,11 @@ def _patch_selectbox(owner: Any, st: Any) -> bool:
         return False
 
     def wrapper(*args: Any, **kwargs: Any):
-        if str(kwargs.get("key") or "") == STAGE_KEY:
-            kwargs["key"] = f"{STAGE_KEY}_{_selected_job_token(st)}"
-        return original(*args, **kwargs)
+        key = str(kwargs.get("key") or "")
+        result = original(*args, **kwargs)
+        if key in {JOB_KEY, "po_split_job"}:
+            _handle_job_switch(st, str(result or ""))
+        return result
 
     setattr(wrapper, PATCH_MARKER, True)
     wrapper._pb_original_selectbox = original
@@ -40,34 +50,10 @@ def _patch_selectbox(owner: Any, st: Any) -> bool:
 
 
 def _patch_file_uploader(owner: Any, st: Any) -> bool:
-    original = getattr(owner, "file_uploader", None)
-    if original is None or getattr(original, PATCH_MARKER, False):
-        return False
-
-    def wrapper(*args: Any, **kwargs: Any):
-        if str(kwargs.get("key") or "") == FILE_KEY:
-            kwargs["key"] = f"{FILE_KEY}_{_selected_job_token(st)}"
-        return original(*args, **kwargs)
-
-    setattr(wrapper, PATCH_MARKER, True)
-    wrapper._pb_original_file_uploader = original
-    setattr(owner, "file_uploader", wrapper)
     return True
 
 
 def _patch_form(owner: Any, st: Any) -> bool:
-    original = getattr(owner, "form", None)
-    if original is None or getattr(original, PATCH_MARKER, False):
-        return False
-
-    def wrapper(key: str, *args: Any, **kwargs: Any):
-        if str(key) == FORM_KEY:
-            key = f"{FORM_KEY}_{_selected_job_token(st)}"
-        return original(key, *args, **kwargs)
-
-    setattr(wrapper, PATCH_MARKER, True)
-    wrapper._pb_original_form = original
-    setattr(owner, "form", wrapper)
     return True
 
 

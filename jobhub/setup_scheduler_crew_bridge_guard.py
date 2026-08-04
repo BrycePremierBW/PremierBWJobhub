@@ -171,6 +171,7 @@ def _setup_crews_df(scheduler: Any, active_only: bool = True) -> Any:
         member_names = [str(value) for value in members["name"].tolist()]
         leader_id = configured_leader_id if configured_leader_id in member_ids else int(member_ids[0])
         leader_name = str(member_names[member_ids.index(leader_id)])
+        # Negative ids prevent clashes with scheduler_crews ids
         rows.append(
             {
                 "id": -int(crew["id"]),

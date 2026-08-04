@@ -55,7 +55,7 @@ def _restore_tabs_script(labels: list[str]) -> str:
   const trackedLabels = {labels_json};
   const labelSet = new Set(trackedLabels.map((value) => String(value).trim()));
   const storageKey = 'pb-jobhub-active-tab::' + trackedLabels.join('|');
-  const normalise = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+  const normalise = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
 
   function getRootDocument() {{
     try {{

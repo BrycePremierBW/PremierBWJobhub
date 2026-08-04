@@ -462,7 +462,8 @@ class _TabProxy:
             if exc_type is None:
                 render_swms_panel(employee_mode=True, key_prefix="employee_swms")
         finally:
-            return self._tab.__exit__(exc_type, exc, tb)
+            res = self._tab.__exit__(exc_type, exc, tb)
+        return res
 
 
 def install_swms_guard() -> bool:

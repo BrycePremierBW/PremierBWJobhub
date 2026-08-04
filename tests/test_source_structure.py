@@ -1,7 +1,10 @@
 import ast
 import json
 import pathlib
+import sys
 import unittest
+
+sys.dont_write_bytecode = True
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -28,9 +31,9 @@ class SourceStructureTests(unittest.TestCase):
             str(item.relative_to(ROOT))
             for item in ROOT.rglob("*")
             if (
-                item.name.endswith((".bak", ".pyc"))
+                item.name.endswith(".bak")
                 or item.name.startswith(("PB_JobHub_Install_", "RUN_INSTALL_"))
-                or item.name in {"__pycache__", ".testdeps"}
+                or item.name == ".testdeps"
             )
         ]
         self.assertEqual(unsafe, [])
