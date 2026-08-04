@@ -17,7 +17,7 @@ class NavigationVisibilityRegressionTests(unittest.TestCase):
     def test_sidebar_has_independent_vertical_scroll(self):
         self.assertRegex(
             self.mobile_source,
-            r'\[data-testid=\\?"stSidebarContent\\?"\]\s*\{[^}]*overflow-y:\s*auto\s*!important',
+            r'\[data-testid="stSidebarContent"\]\s*\{[^}]*overflow-y:\s*auto\s*!important',
         )
         self.assertIn("height: 100dvh !important", self.mobile_source)
         self.assertIn("-webkit-overflow-scrolling: touch !important", self.mobile_source)
@@ -29,8 +29,8 @@ class NavigationVisibilityRegressionTests(unittest.TestCase):
         self.assertIn("st.html(", self.mobile_source)
         self.assertIn("unsafe_allow_javascript=True", self.mobile_source)
         self.assertNotIn("st.iframe(", self.mobile_source)
-        self.assertIn('stSidebarCollapseButton', self.mobile_source)
-        self.assertIn('button[aria-label=\\"Close sidebar\\"]', self.mobile_source)
+        self.assertIn("stSidebarCollapseButton", self.mobile_source)
+        self.assertIn('button[aria-label="Close sidebar"]', self.mobile_source)
         self.assertIn("window.matchMedia('(max-width: 768px)')", self.mobile_source)
 
     def test_navigation_is_one_visible_radio_list(self):
@@ -41,7 +41,7 @@ class NavigationVisibilityRegressionTests(unittest.TestCase):
     def test_radio_labels_can_wrap_without_clipping(self):
         self.assertRegex(
             self.mobile_source,
-            r'\[role=\\?"radiogroup\\?"\]\s+label\s+p\s*\{[^}]*overflow-wrap:\s*anywhere',
+            r'\[role="radiogroup"\]\s+label\s+p\s*\{[^}]*overflow-wrap:\s*anywhere',
         )
 
     def test_mobile_sidebar_width_is_viewport_bounded(self):
