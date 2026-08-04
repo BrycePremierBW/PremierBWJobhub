@@ -50,30 +50,30 @@ class NativePoUploadTests(unittest.TestCase):
 
         self.assertGreater(MODULE._uploaded_size(Upload()), MODULE.MAX_UPLOAD_BYTES)
 
-    def test_startup_uses_final_direct_route_after_mobile_navigation(self):
-        source = (ROOT / "jobhub" / "__init__.py").read_text(encoding="utf-8")
-        self.assertIn("install_po_upload_direct_route_guard()", source)
-        self.assertIn("def _retired_po_upload_route_guard() -> bool:", source)
+    def test_upload_po_is_a_first_class_main_app_route(self):
+        # Regression: the hard-coded menu must own Upload PO before session-state
+        # validation runs, otherwise Streamlit replaces it with Dashboard.
+        source = (ROOT / "pb_jobhub_app.py").read_text(encoding="utf-8")
+        menu_anchor = '        "Job Folders",\n        "Upload PO",\n        "Estimating",'
+        self.assertEqual(source.count(menu_anchor), 2)
+        self.assertIn('elif menu == "Upload PO":', source)
         self.assertIn(
-            "install_po_upload_guard = _retired_po_upload_route_guard",
+            "from jobhub.po_upload_native_guard import render_native_po_upload_page",
             source,
         )
-        self.assertIn("install_po_upload_native_guard()", source)
-        self.assertNotIn("from .po_upload_guard import install_po_upload_guard", source)
-        self.assertNotIn("install_po_upload_scope_return_guard()", source)
-        self.assertNotIn("install_po_upload_split_guard()", source)
+        self.assertIn("render_native_po_upload_page()", source)
         self.assertLess(
-            source.index("install_mobile_top_navigation_guard()"),
-            source.index("install_po_upload_direct_route_guard()"),
+            source.index(menu_anchor),
+            source.index('if st.session_state.get("main_menu") not in main_menu_options:'),
         )
 
-    def test_direct_route_owns_desktop_and_mobile_main_navigation(self):
-        source = (ROOT / "jobhub" / "po_upload_direct_route_guard.py").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn('MAIN_NAV_KEYS = {"main_menu", "pb_mobile_app_main_menu"}', source)
-        self.assertIn("render_native_po_upload_page()", source)
-        self.assertIn("direct PO route", source)
+    def test_startup_does_not_install_po_radio_or_session_wrapper(self):
+        source = (ROOT / "jobhub" / "__init__.py").read_text(encoding="utf-8")
+        self.assertIn("install_po_upload_native_guard()", source)
+        self.assertIn("install_mobile_top_navigation_guard()", source)
+        self.assertNotIn("install_po_upload_direct_route_guard", source)
+        self.assertNotIn("install_po_upload_scope_return_guard()", source)
+        self.assertNotIn("install_po_upload_split_guard()", source)
 
     def test_native_page_does_not_call_schema_migration(self):
         source = (ROOT / "jobhub" / "po_upload_native_guard.py").read_text(

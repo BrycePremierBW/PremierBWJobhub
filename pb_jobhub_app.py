@@ -19182,6 +19182,7 @@ elif role == "manager":
         "Operations Hub",
         "Jobs",
         "Job Folders",
+        "Upload PO",
         "Estimating",
         "Site Operations",
         "Reports",
@@ -19221,6 +19222,7 @@ else:
         "Operations Hub",
         "Jobs",
         "Job Folders",
+        "Upload PO",
         "Estimating",
         "Site Operations",
         "Reports",
@@ -19609,6 +19611,12 @@ elif menu == "Job Lookup / Links":
 
 elif menu == "Job Folders":
     job_folders_page()
+
+
+elif menu == "Upload PO":
+    from jobhub.po_upload_native_guard import render_native_po_upload_page
+
+    render_native_po_upload_page()
 
 
 elif menu == "Dashboard":
