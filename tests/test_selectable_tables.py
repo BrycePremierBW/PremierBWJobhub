@@ -6,13 +6,13 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class SelectableTableSourceTests(unittest.TestCase):
-    def test_material_cost_rows_open_edit_and_delete_controls(self):
-        source = (ROOT / "pb_jobhub_app.py").read_text(encoding="utf-8")
-        self.assertIn('selection_mode="single-row"', source)
-        self.assertIn('key="selectable_material_cost_entries"', source)
-        self.assertIn('st.tabs(["Edit selected line", "Delete selected line"])', source)
+    def test_material_rows_open_edit_and_delete_controls(self):
+        ui = (ROOT / "jobhub_lean" / "ui.py").read_text(encoding="utf-8")
+        source = (ROOT / "jobhub_lean" / "resources.py").read_text(encoding="utf-8")
+        self.assertIn('selection_mode="single-row"', ui)
+        self.assertIn('key=f"materials_table_{job_id}"', source)
         self.assertIn("UPDATE material_entries", source)
-        self.assertIn("DELETE FROM material_entries WHERE id = ?", source)
+        self.assertIn("DELETE FROM material_entries WHERE id=?", source)
 
     def test_schedule_day_tiles_are_primary_and_selectable(self):
         source = (ROOT / "pb_jobhub_visual_scheduler.py").read_text(encoding="utf-8")
@@ -27,62 +27,61 @@ class SelectableTableSourceTests(unittest.TestCase):
         timeline_position = source.index('with st.expander("View coloured schedule timeline")')
         self.assertLess(board_position, timeline_position)
 
-    def test_all_standard_dataframes_are_row_selectable(self):
-        source = (ROOT / "pb_jobhub_app.py").read_text(encoding="utf-8")
-        self.assertIn("def pb_selectable_dataframe", source)
-        self.assertIn('kwargs["on_select"] = "rerun"', source)
-        self.assertIn('kwargs["selection_mode"] = "single-row"', source)
-        self.assertIn("st.dataframe = pb_selectable_dataframe", source)
+    def test_standard_dataframes_use_explicit_row_selection(self):
+        source = (ROOT / "jobhub_lean" / "ui.py").read_text(encoding="utf-8")
+        self.assertIn("def selected_row", source)
+        self.assertIn('on_select="rerun"', source)
+        self.assertIn('selection_mode="single-row"', source)
+        self.assertNotIn("st.dataframe =", source)
 
     def test_estimate_working_sheet_dataframes_have_unique_keys(self):
-        source = (ROOT / "pb_jobhub_app.py").read_text(encoding="utf-8")
+        source = (ROOT / "jobhub_lean" / "estimating.py").read_text(encoding="utf-8")
         expected_keys = (
-            'key=f"estimate_line_items_{selected_estimate_id}"',
-            'key=f"estimate_summary_{selected_estimate_id}"',
-            'key=f"estimate_export_lines_{selected_estimate_id}"',
+            'key=f"estimates_table_{job_id}"',
+            'key=f"estimate_lines_{estimate_id}"',
+            'key=f"estimate_csv_{estimate_id}"',
         )
         for expected_key in expected_keys:
             self.assertEqual(source.count(expected_key), 1)
 
     def test_selected_job_row_can_change_status(self):
-        source = (ROOT / "pb_jobhub_app.py").read_text(encoding="utf-8")
-        modular_source = (ROOT / "jobhub" / "job_views.py").read_text(encoding="utf-8")
-        for candidate in (source, modular_source):
-            self.assertIn("def render_selectable_job_details", candidate)
-            self.assertIn('key=f"selectable_job_details_{int(job_id)}"', candidate)
-            self.assertIn('new_status = c3.selectbox(', candidate)
-            self.assertIn('"Save job details"', candidate)
-            self.assertIn("UPDATE jobs", candidate)
-            self.assertIn("status = ?", candidate)
+        source = (ROOT / "jobhub_lean" / "jobs.py").read_text(encoding="utf-8")
+        self.assertIn('row = selected_row(', source)
+        self.assertIn('status = c3.selectbox("Status"', source)
+        self.assertIn("UPDATE jobs SET job_no=?,job_name=?", source)
+        self.assertIn("status=?", source)
 
     def test_selected_job_row_can_edit_all_job_details(self):
-        source = (ROOT / "pb_jobhub_app.py").read_text(encoding="utf-8")
-        modular_source = (ROOT / "jobhub" / "job_views.py").read_text(encoding="utf-8")
-        for candidate in (source, modular_source):
-            self.assertIn('"Save job details"', candidate)
-            self.assertIn('"Job Number"', candidate)
-            self.assertIn('"Builder / Client"', candidate)
-            self.assertIn('"Contract Value Ex GST"', candidate)
-            self.assertIn("UPDATE builders_clients", candidate)
-            self.assertIn('date_input("Start Date"', candidate)
-            self.assertIn('date_input("End Date"', candidate)
-            self.assertIn('format="DD/MM/YYYY"', candidate)
+        source = (ROOT / "jobhub_lean" / "jobs.py").read_text(encoding="utf-8")
+        for label in (
+            '"Job number"',
+            '"Job name"',
+            '"Builder / client"',
+            '"Site address"',
+            '"Contract value ex GST"',
+            '"Start date"',
+            '"Finish date"',
+        ):
+            self.assertIn(label, source)
+        self.assertIn('st.form_submit_button("Update job"', source)
+        self.assertIn("UPDATE jobs SET", source)
 
     def test_edit_job_dates_use_calendar_inputs(self):
-        source = (ROOT / "pb_jobhub_app.py").read_text(encoding="utf-8")
-        jobs_page = (ROOT / "jobhub" / "pages" / "jobs.py").read_text(encoding="utf-8")
-        for candidate in (source, jobs_page):
-            self.assertNotIn('text_input("Start Date"', candidate)
-            self.assertNotIn('text_input("End Date"', candidate)
+        source = (ROOT / "jobhub_lean" / "jobs.py").read_text(encoding="utf-8")
+        self.assertIn('date_input("Start date"', source)
+        self.assertIn('date_input("Finish date"', source)
+        self.assertNotIn('text_input("Start date"', source)
+        self.assertNotIn('text_input("Finish date"', source)
 
     def test_no_live_daily_default_is_below_eight_hours(self):
         scheduler = (ROOT / "pb_jobhub_visual_scheduler.py").read_text(encoding="utf-8")
-        app = (ROOT / "pb_jobhub_app.py").read_text(encoding="utf-8")
-        estimating = (ROOT / "jobhub" / "estimating.py").read_text(encoding="utf-8")
+        timesheets = (ROOT / "jobhub_lean" / "timesheets.py").read_text(encoding="utf-8")
+        job_packs = (ROOT / "jobhub_lean" / "job_packs.py").read_text(encoding="utf-8")
         self.assertNotIn("value=7.6", scheduler)
         self.assertNotIn("DEFAULT 7.6", scheduler)
-        self.assertNotIn("value=7.5", app)
-        self.assertNotIn("value=7.5", estimating)
+        self.assertIn("time(7, 0)", timesheets)
+        self.assertIn("time(15, 0)", timesheets)
+        self.assertIn('"painter_day_hours": 8', job_packs)
 
 
 if __name__ == "__main__":
