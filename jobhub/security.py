@@ -193,9 +193,60 @@ def is_admin():
 def is_manager_or_admin():
     return current_role() in ["admin", "manager"]
 
+def _ensure_auth_token_schema():
+    try:
+        ensure_column("app_users", "auth_token", "TEXT")
+    except Exception:
+        pass
+
+
+def _get_user_by_auth_token(token: str) -> dict | None:
+    if not token or not isinstance(token, str):
+        return None
+    try:
+        _ensure_auth_token_schema()
+        user_df = df_query("""
+            SELECT u.id, u.username, u.role, u.employee_id, u.active,
+                   e.name AS employee_name
+            FROM app_users u
+            LEFT JOIN employees e ON e.id = u.employee_id
+            WHERE u.auth_token = ? AND COALESCE(u.active, 1) = 1
+            LIMIT 1
+        """, (token.strip(),))
+        if user_df is not None and not user_df.empty:
+            row = user_df.iloc[0]
+            return {
+                "id": int(row["id"]),
+                "username": str(row["username"]),
+                "role": str(row["role"]),
+                "employee_id": int(row["employee_id"]) if not pd.isna(row["employee_id"]) else None,
+                "employee_name": "" if pd.isna(row["employee_name"]) else str(row["employee_name"]),
+            }
+    except Exception:
+        pass
+    return None
+
+
 def require_login():
+    _ensure_auth_token_schema()
     if "user" not in st.session_state:
         st.session_state["user"] = None
+
+    if not st.session_state["user"]:
+        token = None
+        try:
+            token = st.query_params.get("auth") or st.session_state.get("_pb_auth_token")
+        except Exception:
+            pass
+        if token:
+            restored_user = _get_user_by_auth_token(token)
+            if restored_user:
+                st.session_state["user"] = restored_user
+                st.session_state["_pb_auth_token"] = token
+                try:
+                    st.query_params["auth"] = token
+                except Exception:
+                    pass
 
     if st.session_state["user"]:
         return True
@@ -226,6 +277,12 @@ def require_login():
                 elif not check_password(password, row["password_hash"]):
                     st.error("Invalid username or password.")
                 else:
+                    import secrets
+                    auth_token = secrets.token_hex(24)
+                    try:
+                        execute("UPDATE app_users SET auth_token = ? WHERE id = ?", (auth_token, int(row["id"])))
+                    except Exception:
+                        pass
                     st.session_state["user"] = {
                         "id": int(row["id"]),
                         "username": str(row["username"]),
@@ -233,11 +290,17 @@ def require_login():
                         "employee_id": int(row["employee_id"]) if not pd.isna(row["employee_id"]) else None,
                         "employee_name": "" if pd.isna(row["employee_name"]) else str(row["employee_name"]),
                     }
+                    st.session_state["_pb_auth_token"] = auth_token
+                    try:
+                        st.query_params["auth"] = auth_token
+                    except Exception:
+                        pass
                     st.success("Logged in.")
                     st.rerun()
 
     st.info("Default admin login: admin / admin123. Change this immediately in User Access.")
     st.stop()
+
 
 def logout_button():
     user = get_current_user()
@@ -245,7 +308,19 @@ def logout_button():
         st.sidebar.write(f"Logged in as **{user['username']}**")
         st.sidebar.caption(f"Role: {user['role']}")
         if st.sidebar.button("Logout"):
+            try:
+                if user.get("id"):
+                    execute("UPDATE app_users SET auth_token = NULL WHERE id = ?", (int(user["id"]),))
+            except Exception:
+                pass
             st.session_state["user"] = None
+            if "_pb_auth_token" in st.session_state:
+                del st.session_state["_pb_auth_token"]
+            try:
+                if "auth" in st.query_params:
+                    del st.query_params["auth"]
+            except Exception:
+                pass
             st.rerun()
 
 def employee_portal():

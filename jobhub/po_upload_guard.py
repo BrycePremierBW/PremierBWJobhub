@@ -655,18 +655,18 @@ def _patch_radio(owner: Any, st: Any) -> bool:
                         kwargs["options"] = values
             except Exception:
                 pass
+
+        result = original(*tuple(arg_list), **kwargs)
+
+        if should_inject:
             try:
-                if key and str(_session_value(st, key, "")) == PO_UPLOAD_LABEL:
+                if str(result) == PO_UPLOAD_LABEL or (key and str(_session_value(st, key, "")) == PO_UPLOAD_LABEL):
+                    st.session_state[PO_UPLOAD_STATE_KEY] = True
                     _show_page(st)
-                if bool(_session_value(st, PO_UPLOAD_STATE_KEY, False)):
+                elif bool(_session_value(st, PO_UPLOAD_STATE_KEY, False)):
                     _show_page(st)
             except Exception:
                 pass
-
-        result = original(*tuple(arg_list), **kwargs)
-        if should_inject and str(result) == PO_UPLOAD_LABEL:
-            st.session_state[PO_UPLOAD_STATE_KEY] = True
-            _show_page(st)
         return result
 
     wrapper._pb_po_upload_guard = True
