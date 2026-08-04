@@ -160,7 +160,7 @@ def ensure_schema(db: Database) -> None:
         f"""
         CREATE TABLE IF NOT EXISTS audit_events (
             id {pk}, user_id INTEGER, username TEXT, action TEXT,
-            entity_type TEXT, entity_id INTEGER, details TEXT, created_at TEXT
+            entity_type TEXT, entity_id TEXT, details TEXT, created_at TEXT
         )
         """,
     ]
@@ -196,6 +196,20 @@ def ensure_schema(db: Database) -> None:
             "status": "TEXT DEFAULT 'Submitted'",
             "approved_by": "TEXT",
             "approved_at": "TEXT",
+        },
+        "wage_entries": {
+            "hourly_rate": "REAL DEFAULT 0",
+            "hourly_rate_snapshot": "REAL DEFAULT 0",
+            "timesheet_id": "INTEGER",
+            "source": "TEXT",
+        },
+        "job_documents": {
+            "mime_type": "TEXT",
+            "storage_key": "TEXT",
+        },
+        "job_photos": {
+            "job_stage_id": "INTEGER",
+            "stage_progress_update_id": "INTEGER",
         },
         "material_entries": {
             "custom_product_code": "TEXT",
