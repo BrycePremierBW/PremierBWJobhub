@@ -34,7 +34,7 @@ def dashboard_page(ctx: AppContext) -> None:
     cols[2].metric("Active staff", staff)
     cols[3].metric("Open contract value", f"${contract:,.0f}")
 
-    st.subheader("Crucial Jobs")
+    st.markdown("### Crucial Jobs")
     crucial = ctx.db.query(
         """
         SELECT j.job_no AS "Job",j.job_name AS "Name",COALESCE(b.name,'') AS "Builder",
@@ -159,7 +159,7 @@ def dashboard_page(ctx: AppContext) -> None:
 
     f1, f2 = st.columns(2)
     with f1:
-        st.subheader("Overhead & Profit")
+        st.markdown("### Overhead & Profit")
         wages = _float(ctx.db.scalar(
             "SELECT COALESCE(SUM(COALESCE(hours,0)*COALESCE(NULLIF(hourly_rate_snapshot,0),hourly_rate,0)),0) FROM wage_entries",
             default=0,
