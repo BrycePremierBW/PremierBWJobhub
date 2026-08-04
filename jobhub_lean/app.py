@@ -14,6 +14,7 @@ from .pages import (
     AppContext,
     builders_page,
     dashboard_page,
+    employee_portal_page,
     employees_page,
     equipment_page,
     estimating_page,
@@ -26,6 +27,7 @@ from .pages import (
     products_page,
     reports_page,
     setup_page,
+    staff_requests_page,
     system_page,
     timesheets_page,
     users_page,
@@ -34,7 +36,15 @@ from .schema import ensure_schema
 from .ui import install_style, show_notice
 
 
-BUILD = "2026.08.05-lean-rewrite-v7"
+BUILD = "2026.08.05-lean-rewrite-v8"
+
+LEGACY_ROUTE_ALIASES = {
+    "Job Folders": "Job Files",
+    "Estimate Working Sheet": "Estimating",
+    "Job Progress Tracker": "Job Progress",
+    "Employee Portal": "Employee Portal",
+    "Staff Requests": "Staff Requests",
+}
 
 
 def _storage_root() -> Path:
@@ -60,25 +70,36 @@ def _runtime(database_url: str, data_dir_text: str) -> AppContext:
 
 def _menu_options() -> list[str]:
     role = str(current_user().get("role") or "employee").lower()
-    employee = ["Dashboard", "Field Mode", "Timesheets", "Job Files"]
+    employee = ["Employee Portal", "Dashboard", "Field Mode", "Timesheets", "Job Files"]
     manager = [
         "Dashboard", "Jobs", "Upload PO", "Job Pack Import", "Builders & Clients",
-        "Employees", "Products", "Staff Scheduler", "Timesheets", "Materials",
-        "Equipment", "Estimating", "Job Progress", "Job Files", "Operations Hub",
-        "Painting Intelligence", "Reports",
+        "Employees", "Staff Requests", "Products", "Staff Scheduler", "Timesheets",
+        "Materials", "Equipment", "Estimating", "Job Progress", "Job Files",
+        "Operations Hub", "Painting Intelligence", "Reports",
     ]
     admin = manager + ["Setup & Defaults", "User Access", "System"]
     return admin if role == "admin" else manager if role == "manager" else employee
 
 
+def _apply_requested_route(options: list[str]) -> None:
+    requested = st.session_state.pop("go_to_menu", None)
+    if not requested:
+        return
+    target = LEGACY_ROUTE_ALIASES.get(str(requested), str(requested))
+    if target in options:
+        st.session_state["lean_menu"] = target
+
+
 def _dispatch(ctx: AppContext, page: str) -> None:
     local_pages: dict[str, Callable[[AppContext], None]] = {
         "Dashboard": dashboard_page,
+        "Employee Portal": employee_portal_page,
         "Jobs": jobs_page,
         "Upload PO": po_upload_page,
         "Job Pack Import": job_pack_import_page,
         "Builders & Clients": builders_page,
         "Employees": employees_page,
+        "Staff Requests": staff_requests_page,
         "Products": products_page,
         "Timesheets": timesheets_page,
         "Materials": materials_page,
@@ -117,9 +138,11 @@ def run() -> None:
     st.sidebar.write(f"**{user.get('employee_name') or user.get('username')}**")
     st.sidebar.caption(str(user.get("role") or "employee").title())
     options = _menu_options()
+    _apply_requested_route(options)
     current = st.session_state.get("lean_menu")
     if current not in options:
         current = options[0]
+        st.session_state["lean_menu"] = current
     page = st.sidebar.radio("Navigation", options, index=options.index(current), key="lean_menu")
     render_phone_push_opt_in()
     logout_button()
