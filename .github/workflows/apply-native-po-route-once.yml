@@ -1,0 +1,38 @@
+name: Apply native PO route once
+
+on:
+  push:
+    branches:
+      - fix/po-dashboard-reset
+    paths:
+      - .github/workflows/apply-native-po-route-once.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: fix/po-dashboard-reset
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: Patch the real JobHub menu and router
+        run: python scripts/apply_native_po_route_once.py
+
+      - name: Commit the direct app change and remove one-time helpers
+        run: |
+          rm scripts/apply_native_po_route_once.py
+          rm .github/workflows/apply-native-po-route-once.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add pb_jobhub_app.py jobhub/__init__.py tests/test_po_upload_native_guard.py scripts/apply_native_po_route_once.py .github/workflows/apply-native-po-route-once.yml
+          git commit -m "Add Upload PO directly to the main JobHub router"
+          git push origin HEAD:fix/po-dashboard-reset
