@@ -83,7 +83,8 @@ def _install_sync_guards(st: Any) -> bool:
     # into that module and can be replaced without editing the large app file.
     candidates = [sys.modules.get("__main__")]
     for module in tuple(sys.modules.values()):
-        if module is not None and getattr(module, "__file__", "").endswith("pb_jobhub_app.py"):
+        module_file = str(getattr(module, "__file__", "") or "") if module is not None else ""
+        if module_file.endswith("pb_jobhub_app.py"):
             candidates.append(module)
 
     seen: set[int] = set()
