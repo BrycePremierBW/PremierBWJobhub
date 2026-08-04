@@ -18,7 +18,10 @@ from io import BytesIO
 import pandas as pd
 from PIL import Image, ImageOps
 import requests
-from psycopg2.pool import ThreadedConnectionPool
+try:
+    from psycopg2.pool import ThreadedConnectionPool
+except Exception:
+    ThreadedConnectionPool = None
 from pypdf import PdfReader, PdfWriter
 import streamlit as st
 from jobhub_feedback import error as pb_error, replay_pending as pb_replay_pending, rerun as pb_rerun, success as pb_success
@@ -5469,9 +5472,14 @@ def force_password_change():
             pb_rerun()
 
 
-def _ensure_auth_token_schema():
+def _save_user_auth_token(token: str, user_dict: dict) -> None:
+    if not token or not user_dict:
+        return
     try:
-        ensure_column("app_users", "auth_token", "TEXT")
+        data_json = json.dumps(user_dict)
+        key = f"auth_token:{token}"
+        execute("DELETE FROM app_settings WHERE setting_key = ?", (key,))
+        execute("INSERT INTO app_settings (setting_key, setting_value) VALUES (?, ?)", (key, data_json))
     except Exception:
         pass
 
@@ -5480,33 +5488,26 @@ def _get_user_by_auth_token(token: str) -> dict | None:
     if not token or not isinstance(token, str):
         return None
     try:
-        _ensure_auth_token_schema()
-        user_df = df_query("""
-            SELECT u.id, u.username, u.password_hash, u.role, u.employee_id, u.active,
-                   COALESCE(u.must_change_password, 0) AS must_change_password,
-                   e.name AS employee_name
-            FROM app_users u
-            LEFT JOIN employees e ON e.id = u.employee_id
-            WHERE u.auth_token = ? AND COALESCE(u.active, 1) = 1
-            LIMIT 1
-        """, (token.strip(),))
-        if user_df is not None and not user_df.empty:
-            row = user_df.iloc[0]
-            return {
-                "id": int(row["id"]),
-                "username": str(row["username"]),
-                "role": str(row["role"]),
-                "employee_id": int(row["employee_id"]) if not pd.isna(row["employee_id"]) else None,
-                "employee_name": "" if pd.isna(row["employee_name"]) else str(row["employee_name"]),
-                "must_change_password": bool(int(row["must_change_password"] or 0)),
-            }
+        df = df_query("SELECT setting_value FROM app_settings WHERE setting_key = ?", (f"auth_token:{token}",))
+        if df is not None and not df.empty:
+            raw = str(df.iloc[0]["setting_value"] or "")
+            if raw:
+                return json.loads(raw)
     except Exception:
         pass
     return None
 
 
+def _delete_user_auth_token(token: str) -> None:
+    if not token:
+        return
+    try:
+        execute("DELETE FROM app_settings WHERE setting_key = ?", (f"auth_token:{token}",))
+    except Exception:
+        pass
+
+
 def require_login():
-    _ensure_auth_token_schema()
     if "user" not in st.session_state:
         st.session_state["user"] = None
 
@@ -5517,12 +5518,12 @@ def require_login():
         except Exception:
             pass
         if token:
-            restored_user = _get_user_by_auth_token(token)
+            restored_user = _get_user_by_auth_token(str(token))
             if restored_user:
                 st.session_state["user"] = restored_user
-                st.session_state["_pb_auth_token"] = token
+                st.session_state["_pb_auth_token"] = str(token)
                 try:
-                    st.query_params["auth"] = token
+                    st.query_params["auth"] = str(token)
                 except Exception:
                     pass
 
@@ -5596,15 +5597,14 @@ def require_login():
                     execute("""
                         UPDATE app_users
                         SET password_hash = ?, failed_login_count = 0,
-                            locked_until = '', last_login_at = ?, auth_token = ?
+                            locked_until = '', last_login_at = ?
                         WHERE id = ?
                     """, (
                         upgraded_hash,
                         datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        auth_token,
                         int(row["id"]),
                     ))
-                    st.session_state["user"] = {
+                    user_dict = {
                         "id": int(row["id"]),
                         "username": str(row["username"]),
                         "role": str(row["role"]),
@@ -5612,7 +5612,9 @@ def require_login():
                         "employee_name": "" if pd.isna(row["employee_name"]) else str(row["employee_name"]),
                         "must_change_password": bool(int(row["must_change_password"] or 0)),
                     }
+                    st.session_state["user"] = user_dict
                     st.session_state["_pb_auth_token"] = auth_token
+                    _save_user_auth_token(auth_token, user_dict)
                     try:
                         st.query_params["auth"] = auth_token
                     except Exception:
@@ -5639,11 +5641,9 @@ def logout_button():
         st.sidebar.write(f"Logged in as **{user['username']}**")
         st.sidebar.caption(f"Role: {user['role']}")
         if st.sidebar.button("Logout"):
-            try:
-                if user.get("id"):
-                    execute("UPDATE app_users SET auth_token = NULL WHERE id = ?", (int(user["id"]),))
-            except Exception:
-                pass
+            token = st.session_state.get("_pb_auth_token") or st.query_params.get("auth")
+            if token:
+                _delete_user_auth_token(str(token))
             st.session_state["user"] = None
             if "_pb_auth_token" in st.session_state:
                 del st.session_state["_pb_auth_token"]
