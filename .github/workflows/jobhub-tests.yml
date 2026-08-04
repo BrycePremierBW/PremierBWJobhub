@@ -37,4 +37,4 @@ jobs:
       - name: Render every JobHub route
         run: python tests/smoke_test.py
       - name: Run populated staged-job workflow
-        run: python tests/stage_control_runtime_check.py
+        run: python tests/run_stage_control_ci.py
