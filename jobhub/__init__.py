@@ -14,8 +14,7 @@ from .page_render_freeze_guard import install_page_render_freeze_guard
 from .permission_policy_guard import install_permission_policy_guard
 from .po_job_switch_guard import install_po_job_switch_guard
 from .po_stage_state_guard import install_po_stage_state_guard
-from .po_upload_guard import install_po_upload_guard
-from .po_upload_native_guard import install_po_upload_native_guard
+from .po_upload_direct_route_guard import install_po_upload_direct_route_guard
 from .po_upload_performance_guard import install_po_upload_performance_guard
 from .progress_baseline_unlock_guard import install_progress_baseline_unlock_guard
 from .progress_external_options_guard import install_progress_external_options_guard
@@ -56,8 +55,7 @@ install_po_stage_state_guard()
 install_po_job_switch_guard()
 
 # Menu-injection guards must be installed before the mobile navigation wrapper.
-# The mobile wrapper captures the current sidebar radio function; installing it
-# first caused desktop to bypass later PO/setup options while mobile still saw them.
+# The mobile wrapper captures the current sidebar radio function.
 install_setup_defaults_route_guard()
 install_permission_policy_guard()
 install_system_health_guard()
@@ -65,12 +63,13 @@ install_integration_health_guard()
 install_setup_defaults_guard()
 install_setup_crew_leader_guard()
 install_setup_scheduler_crew_bridge_guard()
-install_po_upload_guard()
+
+# Keep the PO storage helpers fast, then install the mobile navigation. The
+# deterministic PO route must be installed last so it owns both the desktop
+# sidebar radio and the mobile top-navigation radio.
 install_po_upload_performance_guard()
-# The old scope and split installers globally wrapped Streamlit input widgets.
-# The native page includes those features directly without global interception.
-install_po_upload_native_guard()
 install_mobile_top_navigation_guard()
+install_po_upload_direct_route_guard()
 
 install_progress_baseline_unlock_guard()
 install_job_folder_uploaded_documents_guard()
