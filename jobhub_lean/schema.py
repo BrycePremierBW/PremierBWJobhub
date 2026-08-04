@@ -122,13 +122,7 @@ def ensure_schema(db: Database) -> None:
         f"""
         CREATE TABLE IF NOT EXISTS job_photos (
             id {pk}, job_id INTEGER, photo_name TEXT, photo_type TEXT,
-            photo_data BYTEA, category TEXT, caption TEXT,
-            uploaded_by TEXT, uploaded_at TEXT, notes TEXT
-        )
-        """ if db.postgres else f"""
-        CREATE TABLE IF NOT EXISTS job_photos (
-            id {pk}, job_id INTEGER, photo_name TEXT, photo_type TEXT,
-            photo_data BLOB, category TEXT, caption TEXT,
+            photo_data TEXT, category TEXT, caption TEXT,
             uploaded_by TEXT, uploaded_at TEXT, notes TEXT
         )
         """,
