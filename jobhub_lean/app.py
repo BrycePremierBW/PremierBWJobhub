@@ -8,6 +8,7 @@ import streamlit as st
 
 from .auth import current_user, login, logout_button
 from .db import Database
+from .mobile import install_mobile_shell, render_phone_push_opt_in
 from .pages import (
     AppContext,
     builders_page,
@@ -17,6 +18,7 @@ from .pages import (
     estimating_page,
     external_page,
     job_files_page,
+    job_pack_import_page,
     jobs_page,
     materials_page,
     products_page,
@@ -29,7 +31,7 @@ from .schema import ensure_schema
 from .ui import install_style, show_notice
 
 
-BUILD = "2026.08.05-lean-rewrite-v3"
+BUILD = "2026.08.05-lean-rewrite-v4"
 
 
 def _storage_root() -> Path:
@@ -58,6 +60,7 @@ def _menu_options() -> list[str]:
     manager = [
         "Dashboard",
         "Jobs",
+        "Job Pack Import",
         "Builders & Clients",
         "Employees",
         "Products",
@@ -80,6 +83,7 @@ def _dispatch(ctx: AppContext, page: str) -> None:
     local_pages: dict[str, Callable[[AppContext], None]] = {
         "Dashboard": dashboard_page,
         "Jobs": jobs_page,
+        "Job Pack Import": job_pack_import_page,
         "Builders & Clients": builders_page,
         "Employees": employees_page,
         "Products": products_page,
@@ -107,6 +111,7 @@ def run() -> None:
         initial_sidebar_state="auto",
     )
     install_style()
+    install_mobile_shell()
     data_dir = _storage_root()
     ctx = _runtime(os.getenv("DATABASE_URL", "").strip(), str(data_dir))
     login(ctx.db)
@@ -122,6 +127,7 @@ def run() -> None:
     if current not in options:
         current = options[0]
     page = st.sidebar.radio("Navigation", options, index=options.index(current), key="lean_menu")
+    render_phone_push_opt_in()
     logout_button()
 
     try:
