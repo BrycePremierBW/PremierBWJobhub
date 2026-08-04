@@ -40,7 +40,7 @@ from .system_health_guard import install_system_health_guard
 from .timesheet_area_guard import install_timesheet_area_guard
 
 
-def install_po_upload_guard() -> bool:
+def _retired_po_upload_route_guard() -> bool:
     """Retained as a no-op startup compatibility marker.
 
     The old guard patched every matching radio menu. The final direct route now
@@ -48,6 +48,9 @@ def install_po_upload_guard() -> bool:
     would recreate the ambiguous route chain that caused the production issue.
     """
     return False
+
+
+install_po_upload_guard = _retired_po_upload_route_guard
 
 
 # Install before the main app calls st.set_page_config/apply_pb_branding. These
