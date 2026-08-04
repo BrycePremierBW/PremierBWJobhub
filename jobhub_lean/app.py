@@ -51,7 +51,7 @@ from .schema import ensure_schema
 from .ui import install_style, show_notice
 
 
-BUILD = "2026.08.05-lean-rewrite-v9"
+BUILD = "2026.08.05-lean-rewrite-v10"
 
 LEGACY_ROUTE_ALIASES = {
     "Job Folders": "Job Files",
@@ -105,6 +105,28 @@ def _apply_requested_route(options: list[str]) -> None:
         st.session_state["lean_menu"] = target
 
 
+def _render_employee_request_summary(ctx: AppContext) -> None:
+    employee_id = int(ctx.user.get("employee_id") or 0)
+    if not employee_id:
+        return
+    requests = ctx.db.query(
+        """
+        SELECT title
+        FROM staff_requests
+        WHERE employee_id=?
+          AND LOWER(COALESCE(status,'Requested')) NOT IN ('completed','cancelled')
+        ORDER BY due_at,id DESC
+        LIMIT 8
+        """,
+        (employee_id,),
+    )
+    if requests.empty:
+        return
+    titles = [str(value).strip() for value in requests["title"].tolist() if str(value).strip()]
+    if titles:
+        st.info("Open requests: " + " | ".join(titles))
+
+
 def _dispatch(ctx: AppContext, page: str) -> None:
     local_pages: dict[str, Callable[[AppContext], None]] = {
         "Dashboard": dashboard_page,
@@ -129,6 +151,8 @@ def _dispatch(ctx: AppContext, page: str) -> None:
     handler = local_pages.get(page)
     if handler is not None:
         handler(ctx)
+        if page == "Employee Portal":
+            _render_employee_request_summary(ctx)
         return
     external_page(ctx, page)
 
