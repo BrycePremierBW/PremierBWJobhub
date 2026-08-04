@@ -7,7 +7,6 @@ from .mobile_sidebar_guard import install_mobile_sidebar_guard
 from .mobile_top_navigation_guard import install_mobile_top_navigation_guard
 from .navigation_state_guard import install_navigation_state_guard
 from .notification_wording_guard import install_notification_wording_guard
-from .performance_guard import install_performance_guard
 from .po_job_switch_guard import install_po_job_switch_guard
 from .po_stage_state_guard import install_po_stage_state_guard
 from .po_upload_guard import install_po_upload_guard
@@ -38,7 +37,6 @@ from .timesheet_area_guard import install_timesheet_area_guard
 # Streamlit's page configuration still remains the first UI command.
 install_push_configuration_guard()
 install_session_keepalive_guard()
-install_performance_guard()
 install_notification_wording_guard()
 install_mobile_sidebar_guard()
 install_sidebar_readability_guard()
