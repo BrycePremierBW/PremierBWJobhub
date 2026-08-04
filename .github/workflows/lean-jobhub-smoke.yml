@@ -26,4 +26,4 @@ jobs:
       - name: Compile lean application
         run: python -m py_compile pb_jobhub_app.py jobhub_lean/*.py tests/lean_schema_smoke.py
       - name: Run additive schema smoke test
-        run: python tests/lean_schema_smoke.py
+        run: PYTHONPATH=. python tests/lean_schema_smoke.py
