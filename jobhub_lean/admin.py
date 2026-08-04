@@ -6,6 +6,7 @@ import streamlit as st
 
 from .auth import hash_password, is_admin
 from .common import AppContext, _clean, _int, employee_options
+from .compat import build_enterprise_context
 from .ui import header, rerun_success, selected_row
 
 
@@ -92,7 +93,7 @@ def _run_linked_sync(ctx: AppContext) -> tuple[int, int]:
         moved = 0
     try:
         from jobhub_progress_tracker import sync_all_linked_progress
-        progress = int(sync_all_linked_progress(ctx.enterprise_context()) or 0)
+        progress = int(sync_all_linked_progress(build_enterprise_context(ctx)) or 0)
     except Exception:
         progress = 0
     return moved, progress
@@ -107,10 +108,6 @@ def system_page(ctx: AppContext) -> None:
     c1.metric("Database", "PostgreSQL" if ctx.db.postgres else "SQLite")
     c2.metric("Data folder", str(ctx.data_dir))
     c3.metric("Job files", str(ctx.job_files_dir))
-    if ctx.startup_warnings:
-        with st.expander("Startup compatibility warnings", expanded=True):
-            for warning in ctx.startup_warnings:
-                st.warning(warning)
     if st.button("Synchronise linked schedule and progress now", type="primary"):
         moved, progress = _run_linked_sync(ctx)
         ctx.audit("manual_sync", "system", None, f"schedule={moved}; progress={progress}")
@@ -127,22 +124,25 @@ def system_page(ctx: AppContext) -> None:
 
 
 def external_page(ctx: AppContext, page: str) -> None:
+    module_context = build_enterprise_context(ctx)
     try:
         if page == "Field Mode":
-            from jobhub_enterprise import render_field_mode
-            render_field_mode(ctx.enterprise_context())
+            from jobhub_enterprise import ensure_enterprise_schema, render_field_mode
+            ensure_enterprise_schema(ctx.db.connect)
+            render_field_mode(module_context)
         elif page == "Operations Hub":
-            from jobhub_enterprise import render_operations_hub
-            render_operations_hub(ctx.enterprise_context())
+            from jobhub_enterprise import ensure_enterprise_schema, render_operations_hub
+            ensure_enterprise_schema(ctx.db.connect)
+            render_operations_hub(module_context)
         elif page == "Staff Scheduler":
             from pb_jobhub_visual_scheduler import render_jobhub_staff_scheduler
             render_jobhub_staff_scheduler(ctx.user)
         elif page == "Job Progress":
             from jobhub_progress_tracker import render_progress_tracker
-            render_progress_tracker(ctx.enterprise_context())
+            render_progress_tracker(module_context)
         elif page == "Painting Intelligence":
             from jobhub_v4.streamlit_painting import render_painting_intelligence
-            render_painting_intelligence(ctx.enterprise_context())
+            render_painting_intelligence(module_context)
         else:
             st.error(f"Unknown modular page: {page}")
     except Exception as exc:
