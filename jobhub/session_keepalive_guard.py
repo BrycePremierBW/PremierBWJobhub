@@ -2,9 +2,8 @@
 
 Streamlit authentication is stored in session_state. Some browsers suspend an
 inactive tab long enough for the server-side session to be discarded, which
-returns users to the login screen. This guard installs a small fragment heartbeat
-after page configuration so the existing session remains attached without full
-page refreshes or changing logout behaviour.
+returns users to the login screen. The heartbeat is intentionally infrequent so
+it protects long-idle sessions without repeatedly waking an active JobHub tab.
 """
 
 from __future__ import annotations
@@ -14,7 +13,7 @@ from typing import Any
 
 
 PATCH_MARKER = "_pb_session_keepalive_guard"
-HEARTBEAT_INTERVAL = "5m"
+HEARTBEAT_INTERVAL = "30m"
 
 
 def _render_heartbeat(st: Any) -> None:
@@ -24,8 +23,6 @@ def _render_heartbeat(st: Any) -> None:
 
     @fragment(run_every=HEARTBEAT_INTERVAL)
     def _jobhub_session_heartbeat() -> None:
-        # A fragment rerun keeps the websocket/session active without rerunning
-        # the full application or altering authentication state.
         st.empty()
 
     _jobhub_session_heartbeat()
@@ -45,8 +42,6 @@ def install_session_keepalive_guard() -> bool:
         try:
             _render_heartbeat(st)
         except Exception:
-            # Never prevent JobHub from loading if a Streamlit version does not
-            # support timed fragments.
             pass
         return result
 
