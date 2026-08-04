@@ -40,15 +40,22 @@ class ReleaseIntegrityTests(unittest.TestCase):
         performance_source = (ROOT / "jobhub" / "runtime_performance_guard.py").read_text(
             encoding="utf-8"
         )
+        permission_source = (ROOT / "jobhub" / "permission_policy_guard.py").read_text(
+            encoding="utf-8"
+        )
         workflow_source = (ROOT / ".github" / "workflows" / "jobhub-tests.yml").read_text(
             encoding="utf-8"
         )
 
         self.assertIn("install_runtime_performance_guard", package_source)
         self.assertIn("install_runtime_performance_guard()", package_source)
+        self.assertIn("install_permission_policy_guard", package_source)
+        self.assertIn("install_permission_policy_guard()", package_source)
         self.assertIn("_install_dataframe_guard", performance_source)
         self.assertIn("_wrap_scheduler_sync", performance_source)
         self.assertIn("_wrap_progress_sync", performance_source)
+        self.assertIn("ROUTE_REQUIREMENTS", permission_source)
+        self.assertIn("Permissions & Access Audit", permission_source)
         self.assertIn("tests/run_stage_control_ci.py", workflow_source)
 
 

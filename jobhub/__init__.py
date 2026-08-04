@@ -8,6 +8,7 @@ from .mobile_sidebar_guard import install_mobile_sidebar_guard
 from .mobile_top_navigation_guard import install_mobile_top_navigation_guard
 from .navigation_state_guard import install_navigation_state_guard
 from .notification_wording_guard import install_notification_wording_guard
+from .permission_policy_guard import install_permission_policy_guard
 from .po_job_switch_guard import install_po_job_switch_guard
 from .po_stage_state_guard import install_po_stage_state_guard
 from .po_upload_guard import install_po_upload_guard
@@ -52,6 +53,7 @@ install_po_job_switch_guard()
 # The mobile wrapper captures the current sidebar radio function; installing it
 # first caused desktop to bypass later PO/setup options while mobile still saw them.
 install_setup_defaults_route_guard()
+install_permission_policy_guard()
 install_system_health_guard()
 install_integration_health_guard()
 install_setup_defaults_guard()
