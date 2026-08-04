@@ -90,13 +90,81 @@ class Database:
     def _sql(self, sql: str) -> str:
         if not self.postgres:
             return sql
-        statement = re.sub(r"AS\s+'([^']+)'", r'AS "\1"', sql, flags=re.IGNORECASE)
+
+        statement = str(sql).strip()
+        statement = re.sub(r"AS\s+'([^']+)'", r'AS "\1"', statement, flags=re.IGNORECASE)
         statement = statement.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY")
+        statement = re.sub(
+            r"ROUND\(([^()]+),\s*2\)",
+            r"ROUND(CAST(\1 AS numeric), 2)",
+            statement,
+        )
+
         if re.search(r"INSERT\s+OR\s+IGNORE\s+INTO", statement, flags=re.IGNORECASE):
-            statement = re.sub(r"INSERT\s+OR\s+IGNORE\s+INTO", "INSERT INTO", statement, flags=re.IGNORECASE)
+            statement = re.sub(
+                r"INSERT\s+OR\s+IGNORE\s+INTO",
+                "INSERT INTO",
+                statement,
+                flags=re.IGNORECASE,
+            )
             if "ON CONFLICT" not in statement.upper():
                 statement = statement.rstrip().rstrip(";") + " ON CONFLICT DO NOTHING"
+
+        if re.search(r"INSERT\s+OR\s+REPLACE\s+INTO", statement, flags=re.IGNORECASE):
+            match = re.match(
+                r"INSERT\s+OR\s+REPLACE\s+INTO\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\((.*?)\)\s*VALUES\s*\((.*?)\)\s*$",
+                statement,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+            if match:
+                table = match.group(1)
+                columns = [column.strip() for column in match.group(2).replace("\n", " ").split(",")]
+                values = match.group(3)
+                conflict_targets = {
+                    "app_settings": "setting_key",
+                    "jobs": "job_no",
+                    "builders_clients": "name",
+                    "employees": "name",
+                    "products": "product_code",
+                    "equipment_checklist_items": "item_name",
+                    "app_users": "username",
+                }
+                conflict_column = conflict_targets.get(table)
+                if conflict_column:
+                    updates = [
+                        f"{column} = EXCLUDED.{column}"
+                        for column in columns
+                        if column != conflict_column
+                    ]
+                    if updates:
+                        statement = (
+                            f"INSERT INTO {table} ({', '.join(columns)}) "
+                            f"VALUES ({values}) "
+                            f"ON CONFLICT ({conflict_column}) DO UPDATE SET {', '.join(updates)}"
+                        )
+                    else:
+                        statement = (
+                            f"INSERT INTO {table} ({', '.join(columns)}) "
+                            f"VALUES ({values}) ON CONFLICT ({conflict_column}) DO NOTHING"
+                        )
+                else:
+                    statement = re.sub(
+                        r"INSERT\s+OR\s+REPLACE\s+INTO",
+                        "INSERT INTO",
+                        statement,
+                        flags=re.IGNORECASE,
+                    )
+                    statement = statement.rstrip().rstrip(";") + " ON CONFLICT DO NOTHING"
+            else:
+                statement = re.sub(
+                    r"INSERT\s+OR\s+REPLACE\s+INTO",
+                    "INSERT INTO",
+                    statement,
+                    flags=re.IGNORECASE,
+                )
+
         statement = statement.replace("?", "%s")
+        statement = re.sub(r"%(?!s)", "%%", statement)
         return statement
 
     def _postgres_pool(self):
