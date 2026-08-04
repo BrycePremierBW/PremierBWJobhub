@@ -1,0 +1,29 @@
+name: Lean JobHub smoke
+
+on:
+  push:
+    branches:
+      - agent/lean-jobhub-rewrite-v3
+  pull_request:
+    paths:
+      - "pb_jobhub_app.py"
+      - "jobhub_lean/**"
+      - "tests/lean_schema_smoke.py"
+      - "requirements.txt"
+
+jobs:
+  compile-and-schema-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install runtime dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Compile lean application
+        run: python -m py_compile pb_jobhub_app.py jobhub_lean/*.py tests/lean_schema_smoke.py
+      - name: Run additive schema smoke test
+        run: python tests/lean_schema_smoke.py
