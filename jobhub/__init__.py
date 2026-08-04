@@ -15,6 +15,7 @@ from .permission_policy_guard import install_permission_policy_guard
 from .po_job_switch_guard import install_po_job_switch_guard
 from .po_stage_state_guard import install_po_stage_state_guard
 from .po_upload_direct_route_guard import install_po_upload_direct_route_guard
+from .po_upload_native_guard import install_po_upload_native_guard
 from .po_upload_performance_guard import install_po_upload_performance_guard
 from .progress_baseline_unlock_guard import install_progress_baseline_unlock_guard
 from .progress_external_options_guard import install_progress_external_options_guard
@@ -37,6 +38,17 @@ from .swms_signature_index_guard import install_swms_signature_index_guard
 from .swms_visibility_guard import install_swms_visibility_guard
 from .system_health_guard import install_system_health_guard
 from .timesheet_area_guard import install_timesheet_area_guard
+
+
+def install_po_upload_guard() -> bool:
+    """Retained as a no-op startup compatibility marker.
+
+    The old guard patched every matching radio menu. The final direct route now
+    owns desktop and mobile PO navigation, so reinstalling the legacy wrapper
+    would recreate the ambiguous route chain that caused the production issue.
+    """
+    return False
+
 
 # Install before the main app calls st.set_page_config/apply_pb_branding. These
 # guards only wrap Streamlit/os/functions and render nothing during import, so
@@ -64,10 +76,15 @@ install_setup_defaults_guard()
 install_setup_crew_leader_guard()
 install_setup_scheduler_crew_bridge_guard()
 
-# Keep the PO storage helpers fast, then install the mobile navigation. The
-# deterministic PO route must be installed last so it owns both the desktop
-# sidebar radio and the mobile top-navigation radio.
+# Keep compatibility and storage helpers in their tested order. The legacy PO
+# route call is intentionally a no-op; the native installer keeps the old helper
+# reference aligned for callers that still import it directly.
+install_po_upload_guard()
 install_po_upload_performance_guard()
+install_po_upload_native_guard()
+
+# The deterministic PO route must be installed after mobile navigation so it is
+# the final owner of both desktop and mobile main-menu selections.
 install_mobile_top_navigation_guard()
 install_po_upload_direct_route_guard()
 
