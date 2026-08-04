@@ -14,7 +14,6 @@ from .page_render_freeze_guard import install_page_render_freeze_guard
 from .permission_policy_guard import install_permission_policy_guard
 from .po_job_switch_guard import install_po_job_switch_guard
 from .po_stage_state_guard import install_po_stage_state_guard
-from .po_upload_direct_route_guard import install_po_upload_direct_route_guard
 from .po_upload_native_guard import install_po_upload_native_guard
 from .po_upload_performance_guard import install_po_upload_performance_guard
 from .progress_baseline_unlock_guard import install_progress_baseline_unlock_guard
@@ -86,10 +85,9 @@ install_po_upload_guard()
 install_po_upload_performance_guard()
 install_po_upload_native_guard()
 
-# The deterministic PO route must be installed after mobile navigation so it is
-# the final owner of both desktop and mobile main-menu selections.
+# Upload PO is now a first-class route in pb_jobhub_app.py. Mobile navigation
+# reads that same native menu instead of relying on a radio/session wrapper.
 install_mobile_top_navigation_guard()
-install_po_upload_direct_route_guard()
 
 install_progress_baseline_unlock_guard()
 install_job_folder_uploaded_documents_guard()
