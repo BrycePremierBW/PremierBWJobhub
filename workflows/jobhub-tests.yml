@@ -1,0 +1,40 @@
+name: JobHub tests
+
+on:
+  pull_request: {}
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONPYCACHEPREFIX: /tmp/jobhub-pycache
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Compile application modules
+        run: >-
+          python -m compileall -q
+          pb_jobhub_app.py
+          jobhub_enterprise.py
+          pb_jobhub_visual_scheduler.py
+          jobhub_feedback.py
+          jobhub_core.py
+          jobhub
+          jobhub_v2
+          jobhub_v4
+      - name: Run JobHub tests
+        run: python -m unittest discover -s tests -p "test_*.py" -v
+      - name: Run material order workflow
+        run: python tests/material_order_workflow_test.py
+      - name: Render every JobHub route
+        run: python tests/smoke_test.py
+      - name: Run populated staged-job workflow
+        run: python tests/stage_control_runtime_check.py
