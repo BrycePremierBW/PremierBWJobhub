@@ -135,6 +135,7 @@ def po_upload_page(ctx: AppContext) -> None:
             """,
             (job_id, file_name, str(target), now, now, ctx.user.get("username", ""), notes.strip() or f"PO {po_number.strip()}", mime),
         )
+        stage_id = stage_map[stage_label]
         po_id = ctx.db.insert_id(
             """
             INSERT INTO job_purchase_orders
@@ -144,12 +145,17 @@ def po_upload_page(ctx: AppContext) -> None:
             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
-                job_id, stage_map[stage_label], po_number.strip(), scope_label.strip(), calculated["amount"],
+                job_id, stage_id, po_number.strip(), scope_label.strip(), calculated["amount"],
                 calculated["amount"], file_name, str(target), "Uploaded", date.today().isoformat(), now,
                 ctx.user.get("username", ""), notes.strip(), scope_label.strip(), scope_value,
                 calculated["scope_percent"], calculated["job_percent"], mode, now, now,
             ),
         )
+        if stage_id:
+            ctx.db.execute(
+                "UPDATE job_stages SET purchase_order_id=?,updated_at=? WHERE id=? AND job_id=?",
+                (po_id, now, stage_id, job_id),
+            )
         ctx.audit("upload", "job_purchase_orders", po_id, po_number.strip())
         rerun_success(
             f"PO {po_number.strip()} uploaded: ${calculated['amount']:,.2f} ex GST, "
