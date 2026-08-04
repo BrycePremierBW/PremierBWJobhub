@@ -10,12 +10,13 @@ from .job_packs import job_pack_import_page
 from .po_upload import po_upload_page
 from .records import job_files_page, reports_page
 from .setup import setup_page
+from .staff_requests import employee_portal_page, staff_requests_page
 from .admin import external_page, system_page, users_page
 
 __all__ = [
-    "AppContext", "builders_page", "dashboard_page", "employees_page",
-    "equipment_page", "estimating_page", "external_page", "job_files_page",
-    "job_pack_import_page", "jobs_page", "materials_page", "po_upload_page",
-    "products_page", "reports_page", "setup_page", "system_page",
-    "timesheets_page", "users_page",
+    "AppContext", "builders_page", "dashboard_page", "employee_portal_page",
+    "employees_page", "equipment_page", "estimating_page", "external_page",
+    "job_files_page", "job_pack_import_page", "jobs_page", "materials_page",
+    "po_upload_page", "products_page", "reports_page", "setup_page",
+    "staff_requests_page", "system_page", "timesheets_page", "users_page",
 ]
