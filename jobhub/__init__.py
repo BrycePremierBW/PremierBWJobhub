@@ -31,6 +31,7 @@ from .swms_attach_fallback_guard import install_swms_attach_fallback_guard
 from .swms_guard import install_swms_guard
 from .swms_signature_index_guard import install_swms_signature_index_guard
 from .swms_visibility_guard import install_swms_visibility_guard
+from .system_health_guard import install_system_health_guard
 from .timesheet_area_guard import install_timesheet_area_guard
 
 # Install before the main app calls st.set_page_config/apply_pb_branding. These
@@ -50,6 +51,7 @@ install_po_job_switch_guard()
 # The mobile wrapper captures the current sidebar radio function; installing it
 # first caused desktop to bypass later PO/setup options while mobile still saw them.
 install_setup_defaults_route_guard()
+install_system_health_guard()
 install_setup_defaults_guard()
 install_setup_crew_leader_guard()
 install_setup_scheduler_crew_bridge_guard()
