@@ -1,14 +1,18 @@
 """Prevent unnecessary full JobHub reruns and database-wide reconciliation.
 
-The legacy app makes every dataframe selectable, even when it is only being used
-as a report. Selecting one of those tables reruns the entire Streamlit script.
-This guard keeps explicitly keyed tables interactive while making unkeyed report
-tables display-only.
+The legacy app wraps every ``st.dataframe`` call and adds ``on_select='rerun'``
+when the caller did not request selection.  The first freeze guard could only
+remove that behaviour from unkeyed tables.  JobHub also uses keys on many normal
+report tables to avoid duplicate Streamlit element IDs, so clicking those tables
+still restarted the entire 22,000-line application.
 
-The app also calls both linked scheduler and linked progress reconciliation after
-every interaction. The scheduler sync is now only run when linked dates are
-actually dirty, and progress reconciliation is only run when its linked estimate
-source signature has changed.
+This module now intercepts the legacy wrapper when it is assigned to Streamlit.
+Calls that did not explicitly request selection are marked display-only *before*
+the legacy wrapper sees them.  Tables that deliberately pass ``on_select`` or
+``selection_mode`` remain interactive, regardless of whether they have a key.
+
+The scheduler and linked-progress reconciliation guards remain unchanged: they
+only run database-wide synchronisation when source data is actually dirty.
 """
 
 from __future__ import annotations
@@ -19,6 +23,8 @@ from typing import Any, Callable
 
 
 PATCH_MARKER = "_pb_runtime_performance_guard"
+ASSIGNMENT_MARKER = "_pb_dataframe_assignment_guard"
+DISPLAY_ONLY_MARKER = "_pb_dataframe_display_only_default"
 PROGRESS_SIGNATURE_KEY = "_pb_progress_source_signature"
 
 
@@ -26,30 +32,104 @@ def _streamlit() -> Any:
     return sys.modules.get("streamlit")
 
 
-def _install_dataframe_guard(st: Any) -> bool:
-    original = getattr(st, "dataframe", None)
-    if original is None or getattr(original, PATCH_MARKER, False):
+def _protect_legacy_dataframe_wrapper(function: Callable[..., Any]) -> Callable[..., Any]:
+    """Make selection opt-in before JobHub's legacy dataframe wrapper runs.
+
+    JobHub's wrapper checks only whether ``on_select`` exists.  Supplying
+    ``on_select='ignore'`` here prevents it from injecting a full-app rerun.  An
+    explicit selection argument from the real caller is never changed.
+    """
+    if getattr(function, DISPLAY_ONLY_MARKER, False):
+        return function
+
+    @functools.wraps(function)
+    def display_only_by_default(*args: Any, **kwargs: Any):
+        selection_was_explicit = "on_select" in kwargs or "selection_mode" in kwargs
+        if not selection_was_explicit:
+            kwargs["on_select"] = "ignore"
+        return function(*args, **kwargs)
+
+    setattr(display_only_by_default, DISPLAY_ONLY_MARKER, True)
+    # Keep the attributes expected by pb_jobhub_app.py on later Streamlit reruns.
+    # This stops the app from wrapping this protected function again and building
+    # a deeper wrapper chain during a long browser session.
+    setattr(display_only_by_default, "_pb_selectable_wrapper", True)
+    display_only_by_default._pb_original_dataframe = getattr(
+        function,
+        "_pb_original_dataframe",
+        function,
+    )
+    display_only_by_default._pb_legacy_selectable_wrapper = function
+    return display_only_by_default
+
+
+def _install_dataframe_assignment_guard(st: Any) -> bool:
+    """Intercept the later assignment of JobHub's global dataframe wrapper.
+
+    The ``jobhub`` package is imported before ``pb_jobhub_app.py`` creates its
+    legacy selectable wrapper.  A small ModuleType subclass lets us protect that
+    one later assignment without editing or replacing the main application.
+    """
+    module_class = type(st)
+    if getattr(module_class, ASSIGNMENT_MARKER, False):
         return False
 
-    @functools.wraps(original)
-    def dataframe_guard(*args: Any, **kwargs: Any):
-        # pb_jobhub_app.py adds rerun selection to every dataframe globally.
-        # Preserve tables with explicit keys because those are the tables used by
-        # edit/delete workflows. Ordinary unkeyed reports should not become
-        # widgets or rerun the entire 22k-line application when clicked.
-        if (
-            kwargs.get("on_select") == "rerun"
-            and kwargs.get("selection_mode") == "single-row"
-            and not kwargs.get("key")
-        ):
-            kwargs["on_select"] = "ignore"
-            kwargs.pop("selection_mode", None)
-        return original(*args, **kwargs)
+    try:
+        class GuardedStreamlitModule(module_class):
+            def __setattr__(self, name: str, value: Any) -> None:
+                if (
+                    name == "dataframe"
+                    and callable(value)
+                    and getattr(value, "_pb_selectable_wrapper", False)
+                    and not getattr(value, DISPLAY_ONLY_MARKER, False)
+                ):
+                    value = _protect_legacy_dataframe_wrapper(value)
+                super().__setattr__(name, value)
 
-    setattr(dataframe_guard, PATCH_MARKER, True)
-    dataframe_guard._pb_original_dataframe = original
-    st.dataframe = dataframe_guard
+        setattr(GuardedStreamlitModule, ASSIGNMENT_MARKER, True)
+        st.__class__ = GuardedStreamlitModule
+    except (AttributeError, TypeError):
+        # Test doubles and unusual embedded runtimes may not allow module class
+        # replacement.  The existing underlying dataframe guard still applies.
+        return False
+
+    current = getattr(st, "dataframe", None)
+    if (
+        callable(current)
+        and getattr(current, "_pb_selectable_wrapper", False)
+        and not getattr(current, DISPLAY_ONLY_MARKER, False)
+    ):
+        setattr(st, "dataframe", current)
     return True
+
+
+def _install_dataframe_guard(st: Any) -> bool:
+    original = getattr(st, "dataframe", None)
+    installed = False
+
+    if original is not None and not getattr(original, PATCH_MARKER, False):
+        @functools.wraps(original)
+        def dataframe_guard(*args: Any, **kwargs: Any):
+            # Backward-compatible fallback for a legacy wrapper that was already
+            # installed before this module.  The assignment guard above is the
+            # primary fix because it can distinguish explicit selection from the
+            # legacy wrapper's automatic selection.
+            if (
+                kwargs.get("on_select") == "rerun"
+                and kwargs.get("selection_mode") == "single-row"
+                and not kwargs.get("key")
+            ):
+                kwargs["on_select"] = "ignore"
+                kwargs.pop("selection_mode", None)
+            return original(*args, **kwargs)
+
+        setattr(dataframe_guard, PATCH_MARKER, True)
+        dataframe_guard._pb_original_dataframe = original
+        st.dataframe = dataframe_guard
+        installed = True
+
+    installed = _install_dataframe_assignment_guard(st) or installed
+    return installed
 
 
 def _scheduler_has_dirty_links() -> bool:
