@@ -50,11 +50,25 @@ class NativePoUploadTests(unittest.TestCase):
 
         self.assertGreater(MODULE._uploaded_size(Upload()), MODULE.MAX_UPLOAD_BYTES)
 
-    def test_startup_uses_native_page_not_global_po_widget_guards(self):
+    def test_startup_uses_final_direct_route_after_mobile_navigation(self):
         source = (ROOT / "jobhub" / "__init__.py").read_text(encoding="utf-8")
-        self.assertIn("install_po_upload_native_guard()", source)
+        self.assertIn("install_po_upload_direct_route_guard()", source)
+        self.assertNotIn("install_po_upload_guard()", source)
+        self.assertNotIn("install_po_upload_native_guard()", source)
         self.assertNotIn("install_po_upload_scope_return_guard()", source)
         self.assertNotIn("install_po_upload_split_guard()", source)
+        self.assertLess(
+            source.index("install_mobile_top_navigation_guard()"),
+            source.index("install_po_upload_direct_route_guard()"),
+        )
+
+    def test_direct_route_owns_desktop_and_mobile_main_navigation(self):
+        source = (ROOT / "jobhub" / "po_upload_direct_route_guard.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('MAIN_NAV_KEYS = {"main_menu", "pb_mobile_app_main_menu"}', source)
+        self.assertIn("render_native_po_upload_page()", source)
+        self.assertIn("direct PO route", source)
 
     def test_native_page_does_not_call_schema_migration(self):
         source = (ROOT / "jobhub" / "po_upload_native_guard.py").read_text(
