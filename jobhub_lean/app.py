@@ -6,7 +6,7 @@ from typing import Callable
 
 import streamlit as st
 
-from .auth import can_manage, current_user, is_admin, login, logout_button
+from .auth import current_user, login, logout_button
 from .db import Database
 from .pages import (
     AppContext,
@@ -29,7 +29,7 @@ from .schema import ensure_schema
 from .ui import install_style, show_notice
 
 
-BUILD = "2026.08.05-lean-rewrite-v2"
+BUILD = "2026.08.05-lean-rewrite-v3"
 
 
 def _storage_root() -> Path:
@@ -40,54 +40,16 @@ def _storage_root() -> Path:
     return render_disk if render_disk.exists() else Path.cwd() / "data"
 
 
-def _initialise_retained_modules(db: Database) -> tuple[str, ...]:
-    """Run retained module migrations once without importing the old guard package."""
-    warnings: list[str] = []
-    initialisers: list[tuple[str, Callable[[], None]]] = []
-    try:
-        from jobhub_enterprise import ensure_enterprise_schema
-        initialisers.append(("Operations Hub", lambda: ensure_enterprise_schema(db.connect)))
-    except Exception as exc:
-        warnings.append(f"Operations Hub schema loader: {exc}")
-    try:
-        from jobhub_v2.schema import ensure_v2_schema
-        initialisers.append(("JobHub V2", lambda: ensure_v2_schema(db.connect)))
-    except Exception as exc:
-        warnings.append(f"JobHub V2 schema loader: {exc}")
-    try:
-        from jobhub_v4.schema import ensure_v4_schema
-        initialisers.append(("Painting Intelligence", lambda: ensure_v4_schema(db.connect)))
-    except Exception as exc:
-        warnings.append(f"Painting Intelligence schema loader: {exc}")
-    try:
-        from pb_jobhub_visual_scheduler import init_linked_schema
-        initialisers.append(("Staff Scheduler", init_linked_schema))
-    except Exception as exc:
-        warnings.append(f"Staff Scheduler schema loader: {exc}")
-
-    for label, initialise in initialisers:
-        try:
-            initialise()
-        except Exception as exc:
-            warnings.append(f"{label} schema initialisation: {exc}")
-    return tuple(warnings)
-
-
 @st.cache_resource(show_spinner=False)
 def _runtime(database_url: str, data_dir_text: str) -> AppContext:
+    """Initialise only the small core. Large retained modules load on demand."""
     data_dir = Path(data_dir_text)
     data_dir.mkdir(parents=True, exist_ok=True)
     job_files = data_dir / "job_files"
     job_files.mkdir(parents=True, exist_ok=True)
     db = Database(database_url, str(data_dir / "jobhub.db"))
     ensure_schema(db)
-    startup_warnings = _initialise_retained_modules(db)
-    return AppContext(
-        db=db,
-        data_dir=data_dir,
-        job_files_dir=job_files,
-        startup_warnings=startup_warnings,
-    )
+    return AppContext(db=db, data_dir=data_dir, job_files_dir=job_files)
 
 
 def _menu_options() -> list[str]:
