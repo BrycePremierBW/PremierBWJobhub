@@ -14,6 +14,7 @@ from .po_upload_split_guard import install_po_upload_split_guard
 from .progress_baseline_unlock_guard import install_progress_baseline_unlock_guard
 from .progress_external_options_guard import install_progress_external_options_guard
 from .push_configuration_guard import install_push_configuration_guard
+from .session_keepalive_guard import install_session_keepalive_guard
 from .setup_crew_leader_guard import install_setup_crew_leader_guard
 from .setup_defaults_guard import install_setup_defaults_guard
 from .setup_defaults_route_guard import install_setup_defaults_route_guard
@@ -34,6 +35,7 @@ from .timesheet_area_guard import install_timesheet_area_guard
 # guards only wrap Streamlit/os functions and render nothing during import, so
 # Streamlit's page configuration still remains the first UI command.
 install_push_configuration_guard()
+install_session_keepalive_guard()
 install_notification_wording_guard()
 install_mobile_sidebar_guard()
 install_sidebar_readability_guard()
