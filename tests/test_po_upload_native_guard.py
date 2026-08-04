@@ -73,7 +73,19 @@ class NativePoUploadTests(unittest.TestCase):
         )
         self.assertIn('MAIN_NAV_KEYS = {"main_menu", "pb_mobile_app_main_menu"}', source)
         self.assertIn("render_native_po_upload_page()", source)
-        self.assertIn("direct PO route", source)
+        self.assertIn("direct PO route v2", source)
+
+    def test_direct_route_survives_dashboard_fallback_validation(self):
+        source = (ROOT / "jobhub" / "po_upload_direct_route_guard.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("RESET_SAFE_VALUES", source)
+        self.assertIn("def _install_session_state_reset_guard", source)
+        self.assertIn(
+            "if key_text in RESET_SAFE_VALUES and str(value) == PO_UPLOAD_LABEL:",
+            source,
+        )
+        self.assertIn("installed = _install_session_state_reset_guard(st)", source)
 
     def test_native_page_does_not_call_schema_migration(self):
         source = (ROOT / "jobhub" / "po_upload_native_guard.py").read_text(
