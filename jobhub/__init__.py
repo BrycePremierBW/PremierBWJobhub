@@ -15,6 +15,7 @@ from .permission_policy_guard import install_permission_policy_guard
 from .po_job_switch_guard import install_po_job_switch_guard
 from .po_stage_state_guard import install_po_stage_state_guard
 from .po_upload_guard import install_po_upload_guard
+from .po_upload_performance_guard import install_po_upload_performance_guard
 from .po_upload_scope_return_guard import install_po_upload_scope_return_guard
 from .po_upload_split_guard import install_po_upload_split_guard
 from .progress_baseline_unlock_guard import install_progress_baseline_unlock_guard
@@ -66,6 +67,9 @@ install_setup_defaults_guard()
 install_setup_crew_leader_guard()
 install_setup_scheduler_crew_bridge_guard()
 install_po_upload_guard()
+# Install before the split guard: its legacy installer attempts a database DDL
+# change immediately, while the performance guard defers that work to split save.
+install_po_upload_performance_guard()
 install_po_upload_scope_return_guard()
 install_po_upload_split_guard()
 install_mobile_top_navigation_guard()
