@@ -23,6 +23,7 @@ from .pages import (
     materials_page,
     products_page,
     reports_page,
+    setup_page,
     system_page,
     timesheets_page,
     users_page,
@@ -31,7 +32,7 @@ from .schema import ensure_schema
 from .ui import install_style, show_notice
 
 
-BUILD = "2026.08.05-lean-rewrite-v4"
+BUILD = "2026.08.05-lean-rewrite-v5"
 
 
 def _storage_root() -> Path:
@@ -58,24 +59,12 @@ def _menu_options() -> list[str]:
     role = str(current_user().get("role") or "employee").lower()
     employee = ["Dashboard", "Field Mode", "Timesheets", "Job Files"]
     manager = [
-        "Dashboard",
-        "Jobs",
-        "Job Pack Import",
-        "Builders & Clients",
-        "Employees",
-        "Products",
-        "Staff Scheduler",
-        "Timesheets",
-        "Materials",
-        "Equipment",
-        "Estimating",
-        "Job Progress",
-        "Job Files",
-        "Operations Hub",
-        "Painting Intelligence",
-        "Reports",
+        "Dashboard", "Jobs", "Job Pack Import", "Builders & Clients", "Employees",
+        "Products", "Staff Scheduler", "Timesheets", "Materials", "Equipment",
+        "Estimating", "Job Progress", "Job Files", "Operations Hub",
+        "Painting Intelligence", "Reports",
     ]
-    admin = manager + ["User Access", "System"]
+    admin = manager + ["Setup & Defaults", "User Access", "System"]
     return admin if role == "admin" else manager if role == "manager" else employee
 
 
@@ -93,6 +82,7 @@ def _dispatch(ctx: AppContext, page: str) -> None:
         "Estimating": estimating_page,
         "Job Files": job_files_page,
         "Reports": reports_page,
+        "Setup & Defaults": setup_page,
         "User Access": users_page,
         "System": system_page,
     }
