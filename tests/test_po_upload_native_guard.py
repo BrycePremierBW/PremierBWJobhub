@@ -51,6 +51,8 @@ class NativePoUploadTests(unittest.TestCase):
         self.assertGreater(MODULE._uploaded_size(Upload()), MODULE.MAX_UPLOAD_BYTES)
 
     def test_upload_po_is_a_first_class_main_app_route(self):
+        # Regression: the hard-coded menu must own Upload PO before session-state
+        # validation runs, otherwise Streamlit replaces it with Dashboard.
         source = (ROOT / "pb_jobhub_app.py").read_text(encoding="utf-8")
         menu_anchor = '        "Job Folders",\n        "Upload PO",\n        "Estimating",'
         self.assertEqual(source.count(menu_anchor), 2)
@@ -60,6 +62,10 @@ class NativePoUploadTests(unittest.TestCase):
             source,
         )
         self.assertIn("render_native_po_upload_page()", source)
+        self.assertLess(
+            source.index(menu_anchor),
+            source.index('if st.session_state.get("main_menu") not in main_menu_options:'),
+        )
 
     def test_startup_does_not_install_po_radio_or_session_wrapper(self):
         source = (ROOT / "jobhub" / "__init__.py").read_text(encoding="utf-8")
