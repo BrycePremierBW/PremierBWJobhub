@@ -1,10 +1,25 @@
 from __future__ import annotations
 
 import os
+import sys
+import types
 from pathlib import Path
 from typing import Callable
 
 import streamlit as st
+
+
+def _isolate_legacy_jobhub_package() -> None:
+    """Allow legacy helper imports without executing the old guard installers."""
+    if "jobhub" in sys.modules:
+        return
+    package = types.ModuleType("jobhub")
+    package.__package__ = "jobhub"
+    package.__path__ = [str(Path(__file__).resolve().parents[1] / "jobhub")]
+    sys.modules["jobhub"] = package
+
+
+_isolate_legacy_jobhub_package()
 
 from .auth import current_user, login, logout_button
 from .db import Database
@@ -36,7 +51,7 @@ from .schema import ensure_schema
 from .ui import install_style, show_notice
 
 
-BUILD = "2026.08.05-lean-rewrite-v8"
+BUILD = "2026.08.05-lean-rewrite-v9"
 
 LEGACY_ROUTE_ALIASES = {
     "Job Folders": "Job Files",
@@ -141,9 +156,8 @@ def run() -> None:
     _apply_requested_route(options)
     current = st.session_state.get("lean_menu")
     if current not in options:
-        current = options[0]
-        st.session_state["lean_menu"] = current
-    page = st.sidebar.radio("Navigation", options, index=options.index(current), key="lean_menu")
+        st.session_state["lean_menu"] = options[0]
+    page = st.sidebar.radio("Navigation", options, key="lean_menu")
     render_phone_push_opt_in()
     logout_button()
 
