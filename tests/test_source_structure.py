@@ -61,7 +61,7 @@ class SourceStructureTests(unittest.TestCase):
         self.assertIn('initial_sidebar_state="auto"', app)
         self.assertIn("install_mobile_shell()", app)
         self.assertIn("PB_JOBHUB_MOBILE_VIEWPORT_FIX", mobile)
-        self.assertIn('div[data-testid=\\"stHorizontalBlock\\"]', mobile)
+        self.assertIn('div[data-testid="stHorizontalBlock"]', mobile)
         self.assertIn("max-width: 100vw !important", mobile)
         self.assertIn("-webkit-overflow-scrolling: touch !important", mobile)
         self.assertIn("font-size: 16px !important", mobile)
@@ -92,7 +92,7 @@ class SourceStructureTests(unittest.TestCase):
     def test_phone_push_has_server_connection_and_delivery_diagnostics(self):
         source = (LEAN / "mobile.py").read_text(encoding="utf-8")
         self.assertIn("def phone_push_provider_status", source)
-        self.assertIn('requests.get(', source)
+        self.assertIn("requests.get(", source)
         self.assertIn('"https://api.onesignal.com/notifications"', source)
         self.assertIn('"connected"', source)
         self.assertIn('"status_code"', source)
@@ -142,6 +142,16 @@ class SourceStructureTests(unittest.TestCase):
         self.assertIn('"purchase_orders.csv"', source)
         self.assertIn('"job_stages.csv"', source)
         self.assertIn("def import_job_pack", source)
+
+    def test_setup_and_po_routes_are_explicit(self):
+        app = (LEAN / "app.py").read_text(encoding="utf-8")
+        setup = (LEAN / "setup.py").read_text(encoding="utf-8")
+        po = (LEAN / "po_upload.py").read_text(encoding="utf-8")
+        self.assertIn('"Upload PO"', app)
+        self.assertIn('"Setup & Defaults"', app)
+        self.assertIn('st.tabs(["Rates & Forecast", "Stage Defaults", "Crews & Members"])', setup)
+        self.assertIn("CALC_BY_AMOUNT", po)
+        self.assertIn("CALC_BY_PERCENT", po)
 
     def test_operations_hub_calculates_contract_hours_automatically(self):
         source = (ROOT / "jobhub_enterprise.py").read_text(encoding="utf-8")
