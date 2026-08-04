@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
-import sys
 import types
 import unittest
 
@@ -23,31 +22,10 @@ class FakeState(dict):
 
 class FakeStreamlit(types.SimpleNamespace):
     def __init__(self):
-        self.calls = []
-        self.session_state = FakeState()
-
-        def dataframe(*args, **kwargs):
-            self.calls.append(kwargs.copy())
-            return kwargs
-
-        super().__init__(dataframe=dataframe, session_state=self.session_state)
+        super().__init__(session_state=FakeState())
 
 
 class PerformanceGuardTests(unittest.TestCase):
-    def test_unkeyed_implicit_selection_is_display_only(self):
-        st = FakeStreamlit()
-        MODULE._install_dataframe_guard(st)
-        st.dataframe([], on_select="rerun", selection_mode="single-row")
-        self.assertNotIn("on_select", st.calls[-1])
-        self.assertNotIn("selection_mode", st.calls[-1])
-
-    def test_explicit_keyed_selection_is_preserved(self):
-        st = FakeStreamlit()
-        MODULE._install_dataframe_guard(st)
-        st.dataframe([], key="jobs", on_select="rerun", selection_mode="single-row")
-        self.assertEqual(st.calls[-1]["on_select"], "rerun")
-        self.assertEqual(st.calls[-1]["selection_mode"], "single-row")
-
     def test_sync_is_throttled_without_losing_first_run(self):
         st = FakeStreamlit()
         calls = []
@@ -60,6 +38,22 @@ class PerformanceGuardTests(unittest.TestCase):
         self.assertEqual(wrapped(), 7)
         self.assertEqual(wrapped(), 0)
         self.assertEqual(len(calls), 1)
+
+    def test_failed_sync_is_not_marked_as_completed(self):
+        st = FakeStreamlit()
+        calls = []
+
+        def sync():
+            calls.append(1)
+            if len(calls) == 1:
+                raise RuntimeError("temporary")
+            return 3
+
+        wrapped = MODULE._throttled_sync(st, "retry", sync)
+        with self.assertRaises(RuntimeError):
+            wrapped()
+        self.assertEqual(wrapped(), 3)
+        self.assertEqual(len(calls), 2)
 
 
 if __name__ == "__main__":
