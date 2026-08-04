@@ -7,6 +7,7 @@ from .mobile_sidebar_guard import install_mobile_sidebar_guard
 from .mobile_top_navigation_guard import install_mobile_top_navigation_guard
 from .navigation_state_guard import install_navigation_state_guard
 from .notification_wording_guard import install_notification_wording_guard
+from .po_stage_state_guard import install_po_stage_state_guard
 from .po_upload_guard import install_po_upload_guard
 from .po_upload_scope_return_guard import install_po_upload_scope_return_guard
 from .po_upload_split_guard import install_po_upload_split_guard
@@ -37,6 +38,7 @@ install_notification_wording_guard()
 install_mobile_sidebar_guard()
 install_sidebar_readability_guard()
 install_navigation_state_guard()
+install_po_stage_state_guard()
 
 # Menu-injection guards must be installed before the mobile navigation wrapper.
 # The mobile wrapper captures the current sidebar radio function; installing it
