@@ -19,6 +19,7 @@ except Exception:  # pragma: no cover
 
 
 SESSION_KEY = "jobhub_user"
+LEGACY_SESSION_KEY = "user"
 
 
 def hash_password(password: str) -> str:
@@ -49,9 +50,50 @@ def verify_password(password: str, stored: str) -> bool:
         return False
 
 
+def _store_user(user: dict[str, Any]) -> dict[str, Any]:
+    """Keep the lean and legacy session keys aligned for retained modules."""
+    clean = dict(user)
+    clean.pop("password_hash", None)
+    st.session_state[SESSION_KEY] = clean
+    st.session_state[LEGACY_SESSION_KEY] = clean
+    return clean
+
+
+def _session_user() -> dict[str, Any]:
+    lean = st.session_state.get(SESSION_KEY)
+    legacy = st.session_state.get(LEGACY_SESSION_KEY)
+    if isinstance(lean, dict) and lean.get("id"):
+        if not isinstance(legacy, dict) or legacy.get("id") != lean.get("id"):
+            st.session_state[LEGACY_SESSION_KEY] = dict(lean)
+        return lean
+    if isinstance(legacy, dict) and legacy.get("id"):
+        st.session_state[SESSION_KEY] = dict(legacy)
+        return legacy
+    return {}
+
+
 def _bootstrap_admin(db: Database) -> None:
     if int(db.scalar("SELECT COUNT(*) FROM app_users", default=0) or 0) > 0:
         return
+
+    bootstrap_password = os.getenv("JOBHUB_BOOTSTRAP_ADMIN_PASSWORD", "").strip()
+    bootstrap_username = os.getenv("JOBHUB_BOOTSTRAP_ADMIN_USERNAME", "admin").strip() or "admin"
+    if bootstrap_password:
+        db.execute(
+            """
+            INSERT INTO app_users
+            (username,password_hash,role,active,must_change_password,password_changed_at,notes)
+            VALUES (?,?,'admin',1,1,?,?)
+            """,
+            (
+                bootstrap_username,
+                hash_password(bootstrap_password),
+                datetime.now().isoformat(timespec="seconds"),
+                "Created from JOBHUB_BOOTSTRAP_ADMIN_PASSWORD.",
+            ),
+        )
+        return
+
     st.warning("No JobHub user exists yet. Create the first administrator.")
     with st.form("bootstrap_admin"):
         username = st.text_input("Administrator username", value="admin")
@@ -70,22 +112,22 @@ def _bootstrap_admin(db: Database) -> None:
                 """
                 INSERT INTO app_users
                 (username,password_hash,role,active,must_change_password,password_changed_at)
-                VALUES (?,?, 'admin',1,0,?)
+                VALUES (?,?,'admin',1,0,?)
                 """,
-                (username.strip(), hash_password(password), datetime.now().isoformat()),
+                (username.strip(), hash_password(password), datetime.now().isoformat(timespec="seconds")),
             )
             st.success("Administrator created. Sign in below.")
             st.rerun()
 
 
 def login(db: Database) -> dict[str, Any]:
-    user = st.session_state.get(SESSION_KEY)
-    if isinstance(user, dict) and user.get("id"):
+    user = _session_user()
+    if user:
         return user
 
+    _bootstrap_admin(db)
     st.title("Premier Brushworks JobHub")
     st.caption("Lean operations system")
-    _bootstrap_admin(db)
 
     with st.form("jobhub_login"):
         username = st.text_input("Username")
@@ -95,7 +137,10 @@ def login(db: Database) -> dict[str, Any]:
         frame = db.query(
             """
             SELECT u.id,u.username,u.password_hash,u.role,u.employee_id,
-                   COALESCE(u.active,1) AS active,COALESCE(e.name,'') AS employee_name
+                   COALESCE(u.active,1) AS active,
+                   COALESCE(u.must_change_password,0) AS must_change_password,
+                   COALESCE(u.notes,'') AS notes,
+                   COALESCE(e.name,'') AS employee_name
             FROM app_users u
             LEFT JOIN employees e ON e.id=u.employee_id
             WHERE LOWER(TRIM(u.username))=LOWER(TRIM(?))
@@ -108,8 +153,7 @@ def login(db: Database) -> dict[str, Any]:
         else:
             row = frame.iloc[0].to_dict()
             if verify_password(password, str(row.get("password_hash") or "")):
-                row.pop("password_hash", None)
-                st.session_state[SESSION_KEY] = row
+                _store_user(row)
                 st.rerun()
             else:
                 st.error("Incorrect username or password.")
@@ -118,13 +162,13 @@ def login(db: Database) -> dict[str, Any]:
 
 def logout_button() -> None:
     if st.sidebar.button("Sign out", use_container_width=True):
-        st.session_state.clear()
+        st.session_state.pop(SESSION_KEY, None)
+        st.session_state.pop(LEGACY_SESSION_KEY, None)
         st.rerun()
 
 
 def current_user() -> dict[str, Any]:
-    value = st.session_state.get(SESSION_KEY)
-    return value if isinstance(value, dict) else {}
+    return _session_user()
 
 
 def is_admin() -> bool:
