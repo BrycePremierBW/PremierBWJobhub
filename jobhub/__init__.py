@@ -2,6 +2,7 @@
 
 from .ai_menu_guard import install_ai_menu_guard
 from .bulk_delete_guard import install_bulk_delete_guard
+from .integration_health_guard import install_integration_health_guard
 from .job_folder_uploaded_documents_guard import install_job_folder_uploaded_documents_guard
 from .mobile_sidebar_guard import install_mobile_sidebar_guard
 from .mobile_top_navigation_guard import install_mobile_top_navigation_guard
@@ -54,6 +55,7 @@ install_po_job_switch_guard()
 install_setup_defaults_route_guard()
 install_permission_policy_guard()
 install_system_health_guard()
+install_integration_health_guard()
 install_setup_defaults_guard()
 install_setup_crew_leader_guard()
 install_setup_scheduler_crew_bridge_guard()
