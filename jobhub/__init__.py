@@ -14,7 +14,7 @@ from .page_render_freeze_guard import install_page_render_freeze_guard
 from .permission_policy_guard import install_permission_policy_guard
 from .po_job_switch_guard import install_po_job_switch_guard
 from .po_stage_state_guard import install_po_stage_state_guard
-from .po_upload_guard import install_po_upload_guard
+from .po_upload_direct_route_guard import install_po_upload_direct_route_guard
 from .po_upload_native_guard import install_po_upload_native_guard
 from .po_upload_performance_guard import install_po_upload_performance_guard
 from .progress_baseline_unlock_guard import install_progress_baseline_unlock_guard
@@ -39,6 +39,20 @@ from .swms_visibility_guard import install_swms_visibility_guard
 from .system_health_guard import install_system_health_guard
 from .timesheet_area_guard import install_timesheet_area_guard
 
+
+def _retired_po_upload_route_guard() -> bool:
+    """Retained as a no-op startup compatibility marker.
+
+    The old guard patched every matching radio menu. The final direct route now
+    owns desktop and mobile PO navigation, so reinstalling the legacy wrapper
+    would recreate the ambiguous route chain that caused the production issue.
+    """
+    return False
+
+
+install_po_upload_guard = _retired_po_upload_route_guard
+
+
 # Install before the main app calls st.set_page_config/apply_pb_branding. These
 # guards only wrap Streamlit/os/functions and render nothing during import, so
 # Streamlit's page configuration still remains the first UI command.
@@ -56,8 +70,7 @@ install_po_stage_state_guard()
 install_po_job_switch_guard()
 
 # Menu-injection guards must be installed before the mobile navigation wrapper.
-# The mobile wrapper captures the current sidebar radio function; installing it
-# first caused desktop to bypass later PO/setup options while mobile still saw them.
+# The mobile wrapper captures the current sidebar radio function.
 install_setup_defaults_route_guard()
 install_permission_policy_guard()
 install_system_health_guard()
@@ -65,12 +78,18 @@ install_integration_health_guard()
 install_setup_defaults_guard()
 install_setup_crew_leader_guard()
 install_setup_scheduler_crew_bridge_guard()
+
+# Keep compatibility and storage helpers in their tested order. The legacy PO
+# route call is intentionally a no-op; the native installer keeps the old helper
+# reference aligned for callers that still import it directly.
 install_po_upload_guard()
 install_po_upload_performance_guard()
-# The old scope and split installers globally wrapped Streamlit input widgets.
-# The native page includes those features directly without global interception.
 install_po_upload_native_guard()
+
+# The deterministic PO route must be installed after mobile navigation so it is
+# the final owner of both desktop and mobile main-menu selections.
 install_mobile_top_navigation_guard()
+install_po_upload_direct_route_guard()
 
 install_progress_baseline_unlock_guard()
 install_job_folder_uploaded_documents_guard()
