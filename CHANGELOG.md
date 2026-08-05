@@ -1,5 +1,20 @@
 # JobHub secured release
 
+## 2026-08-05 - Smart intake accuracy test pack
+
+- Added an accuracy test pack (`tests/test_intake_accuracy.py`) that locks the
+  realistic plan, scope-of-works and colour-schedule fixtures to exact expected
+  quantities, hours and litres (23 new tests).
+- Fixed scope parsing so a following item (e.g. a ceiling line) can no longer
+  re-classify the substrate of the item above it; the line's own wording is used
+  first and the surrounding window is only a fallback.
+- "8 interior doors" style item counts are now recognised when an adjective
+  (interior / internal / timber / etc.) sits between the quantity and the unit.
+- Material estimates for repeated substrates now accumulate instead of silently
+  dropping the later item, so a 3-coat feature wall's litres are counted.
+- Plan reader address detection no longer mistakes drawing text such as
+  "1 FLOOR PLAN SCALE 1:100" for a street address (street suffix must end a word).
+
 ## 2026-08-05 - Missed timesheets and mobile tuning
 
 - Employees can catch up on missed timesheets: the roster (`staff_schedule`) is

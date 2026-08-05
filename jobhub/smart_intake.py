@@ -79,7 +79,7 @@ _LM_RE = re.compile(
     re.I,
 )
 _ITEM_COUNT_RE = re.compile(
-    r"(?P<qty>\d+)\s*(?P<unit>doors|door frames|door jambs|window frames|windows|"
+    r"(?P<qty>\d+)\s+(?:[A-Za-z][A-Za-z\-]*\s+){0,3}(?P<unit>doors|door frames|door jambs|window frames|windows|"
     r"frames|jambs|architraves|skirting boards)\b",
     re.I,
 )
@@ -360,10 +360,32 @@ def _accum_material(
     if qty <= 0 or not name:
         return
     key = (_header(name), _header(colour), _header(location), _header(substrate), _header(system))
-    if key in seen:
-        return
+    for row in rows:
+        match_key = (
+            _header(row.get("Product / Material Name")),
+            _header(row.get("Colour / Finish")),
+            _header(row.get("Location")),
+            _header(row.get("Substrate")),
+            _header(row.get("Coating System")),
+        )
+        if match_key == key:
+            row["Qty Required"] = round(_num(row.get("Qty Required")) + qty, 2)
+            return
     seen.add(key)
     rows.append(_material_row(name, qty, colour, location, substrate, system, notes))
+
+
+def _detect_substrate_window(line_text: str, window_text: str) -> Tuple[str, str, str]:
+    """Detect a scope line's substrate from its own wording first.
+
+    The wider ``window_text`` (neighbouring lines) is only used when the line
+    itself carries no substrate keyword, so a following item such as
+    "2. Ceilings - paint 85 m2" cannot re-classify a wall line above it.
+    """
+    line_result = detect_substrate_from_text(line_text)
+    if line_result[0] != "Painting item":
+        return line_result
+    return detect_substrate_from_text(window_text)
 
 
 def _scope_description(context: str, fallback: str) -> str:
@@ -426,7 +448,7 @@ def parse_scope_text(text: str, source_name: str = "") -> Dict[str, Any]:
             qty = _num(match.group("qty"))
             if qty <= 0:
                 continue
-            substrate, labour_cat, area_type = detect_substrate_from_text(context)
+            substrate, labour_cat, area_type = _detect_substrate_window(low, context)
             hours = explicit_hours or _estimate_line_hours(qty, "m²", coats, substrate, labour_cat, area_type)
             litres = _estimate_line_paint_litres(qty, "m²", coats, substrate, labour_cat)
             description = _scope_description(context, f"{substrate} {qty:g} m2")
@@ -442,7 +464,7 @@ def parse_scope_text(text: str, source_name: str = "") -> Dict[str, Any]:
                 continue
             if not any(keyword in context.lower() for keyword in _TRIM_KEYWORDS):
                 continue
-            substrate, labour_cat, area_type = detect_substrate_from_text(context)
+            substrate, labour_cat, area_type = _detect_substrate_window(low, context)
             if substrate == "Painting item":
                 substrate, labour_cat = "Skirting / architraves", "Woodwork"
             hours = explicit_hours or _estimate_line_hours(qty, "lm", coats, substrate, labour_cat, area_type)

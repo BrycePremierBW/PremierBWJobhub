@@ -332,7 +332,7 @@ def infer_project_info(all_text: str, filenames: List[str]) -> Dict[str, str]:
             break
     address_pats = [
         r"AT\s+([^\n\r]{8,120}(?:QLD|QUEENSLAND|NSW|VIC|SA|WA|TAS|NT|ACT)[^\n\r]{0,40})",
-        r"\b\d{1,5}\s+[A-Z][A-Za-z0-9 .,'\-/]+(?:ROAD|RD|STREET|ST|AVENUE|AVE|DRIVE|DR|COURT|CT|CRESCENT|CRES|PLACE|PL|LANE|LN)[^\n\r]{0,80}",
+        r"\b\d{1,5}\s+[A-Z][A-Za-z0-9 .,'\-/]+(?:ROAD|RD|STREET|ST|AVENUE|AVE|DRIVE|DR|COURT|CT|CRESCENT|CRES|PLACE|PL|LANE|LN)\b[^\n\r]{0,80}",
     ]
     for pat in address_pats:
         m = re.search(pat, all_text or "", re.I)
