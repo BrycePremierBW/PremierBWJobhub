@@ -30,6 +30,7 @@ from .stage_dwelling_builder_guard import install_stage_dwelling_builder_guard
 from .stage_preset_guard import install_stage_preset_guard
 from .stage_preset_selector_fix_guard import install_stage_preset_selector_fix_guard
 from .stage_preset_visibility_guard import install_stage_preset_visibility_guard
+from .stage_scope_refresh_guard import install_stage_scope_refresh_guard
 from .stage_selection_guard import install_stage_selection_guard
 from .stage_setup_simplifier_guard import install_stage_setup_simplifier_guard
 from .swms_attach_fallback_guard import install_swms_attach_fallback_guard
@@ -96,6 +97,7 @@ install_progress_external_options_guard()
 install_stage_selection_guard()
 install_stage_preset_selector_fix_guard()
 install_stage_dwelling_builder_guard()
+install_stage_scope_refresh_guard()
 install_stage_preset_guard()
 install_stage_preset_visibility_guard()
 install_stage_setup_simplifier_guard()
