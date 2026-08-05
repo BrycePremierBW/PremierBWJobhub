@@ -15,10 +15,13 @@ def test_split_po_guard_source_parses():
     ast.parse(read("jobhub/po_upload_split_guard.py"), filename="jobhub/po_upload_split_guard.py")
 
 
-def test_split_po_guard_is_installed_at_startup():
+def test_split_po_guard_is_installed_lazily_at_startup():
     init_source = read("jobhub/__init__.py")
-    assert "from .po_upload_split_guard import install_po_upload_split_guard" in init_source
-    assert "install_po_upload_split_guard()" in init_source
+    assert "install_po_upload_split_guard()" not in init_source
+    performance_source = read("jobhub/po_upload_performance_guard.py")
+    assert "jobhub.po_upload_split_guard" in performance_source
+    assert "_split_module()" in performance_source
+    assert "_patch_split_constraint(split, po)" in performance_source
 
 
 def test_split_po_creates_internal_and_external_lines_from_one_file():
