@@ -1,5 +1,21 @@
 # JobHub secured release
 
+## 2026-08-05 - v1.0.0
+
+- Fixed the login flow so a successful submit renders the app in the same run
+  instead of calling a forced rerun from inside the form, removing the AppTest
+  KeyError caused by pruned login-form widgets.
+- Stopped placing the auth token in URL query parameters; tokens now persist
+  only in session state and the app_users table.
+- Fixed the visual scheduler grid KeyError when schedule assignments reference
+  employees deactivated after being booked, and guarded the leave page when no
+  active staff exist.
+- Made the plan reader import PyMuPDF lazily with a clear installation error and
+  added PyMuPDF to the Python dependencies.
+- Removed PII CSV exports, the nested repository zip, the dead insecure
+  jobhub/security.py module (unsalted hashes and default accounts), and the
+  duplicate CI workflow; added the data files to .gitignore.
+
 ## 2026-07-28 - Performance and Deployment Cleanup
 
 - Stopped estimator-linked progress from rewriting unchanged external rows.
