@@ -15,6 +15,10 @@ DEFAULT_DAY_HOURS = 8.0
 DEFAULT_VALUE_LOW = 1000.0
 DEFAULT_VALUE_TARGET = 1000.0
 DEFAULT_VALUE_HIGH = 1000.0
+DEFAULT_PLANNING_LABOUR_RATE = 60.0
+DEFAULT_MATERIAL_MARKUP_PERCENT = 10.0
+MARGIN_GREEN_PERCENT = 40.0
+MARGIN_AMBER_PERCENT = 25.0
 
 
 def _non_negative_number(value: Any, name: str) -> float:
@@ -397,6 +401,7 @@ def production_sell_pricing(
     gst_percent: Any = 10,
     day_hours: Any = DEFAULT_DAY_HOURS,
     value_target: Any = DEFAULT_VALUE_TARGET,
+    material_markup_percent: Any = 0,
 ) -> dict[str, float]:
     """Price work from the profit-inclusive painter-day target with no margin input.
 
@@ -404,6 +409,10 @@ def production_sell_pricing(
     from labour hours instead, the equivalent selling value is derived from the
     configured painter-day target.  Taking the larger of the two prevents labour
     from being counted twice when hours were calculated from the take-off.
+
+    Materials are charged to the client at cost plus an optional markup.  The
+    markup defaults to zero so existing callers keep the pass-through behaviour;
+    estimate working sheets pass their saved material_markup_percent through.
     """
     settings = validate_production_targets(
         day_hours=day_hours,
@@ -415,15 +424,15 @@ def production_sell_pricing(
     hours = _non_negative_number(labour_hours, "Labour hours")
     labour_sell_value = hours / settings["day_hours"] * settings["value_target"]
     work_sell_value = max(lines, labour_sell_value)
-    allowances = sum(
-        _non_negative_number(value, name)
-        for value, name in (
-            (material_allowance, "Material allowance"),
-            (access_equipment_allowance, "Access allowance"),
-            (subcontractor_allowance, "Subcontractor allowance"),
-            (sundries_allowance, "Sundries allowance"),
-        )
+    materials = _non_negative_number(material_allowance, "Material allowance")
+    access = _non_negative_number(access_equipment_allowance, "Access allowance")
+    subcontractors = _non_negative_number(
+        subcontractor_allowance, "Subcontractor allowance"
     )
+    sundries = _non_negative_number(sundries_allowance, "Sundries allowance")
+    markup = _non_negative_number(material_markup_percent, "Material markup percent")
+    materials_sell_value = materials * (1 + markup / 100.0)
+    allowances = materials_sell_value + access + subcontractors + sundries
     gst = _non_negative_number(gst_percent, "GST percent")
     subtotal = work_sell_value + allowances
     # Kept in the call signature so older Job Packs remain importable, but the
@@ -437,6 +446,9 @@ def production_sell_pricing(
         "line_total": round(lines, 2),
         "labour_sell_value": round(labour_sell_value, 2),
         "work_sell_value": round(work_sell_value, 2),
+        "material_allowance": round(materials, 2),
+        "material_markup_percent": markup,
+        "materials_sell_value": round(materials_sell_value, 2),
         "allowances_total": round(allowances, 2),
         "direct_total": round(subtotal, 2),
         "contingency_amount": round(contingency_amount, 2),
@@ -446,4 +458,76 @@ def production_sell_pricing(
         "total_ex_gst": round(total_ex_gst, 2),
         "gst_amount": round(gst_amount, 2),
         "total_inc_gst": round(total_ex_gst + gst_amount, 2),
+    }
+
+
+def estimate_margin_metrics(
+    *,
+    line_total: Any,
+    labour_hours: Any,
+    labour_cost_per_hour: Any = DEFAULT_PLANNING_LABOUR_RATE,
+    material_allowance: Any = 0,
+    material_markup_percent: Any = DEFAULT_MATERIAL_MARKUP_PERCENT,
+    access_equipment_allowance: Any = 0,
+    subcontractor_allowance: Any = 0,
+    sundries_allowance: Any = 0,
+    value_target: Any = DEFAULT_VALUE_TARGET,
+    day_hours: Any = DEFAULT_DAY_HOURS,
+) -> dict[str, float | str]:
+    """Return the projected gross-profit margin for an estimate.
+
+    Gross profit = (labour sell + marked-up materials + pass-throughs)
+                  minus (painter wages + base material cost + pass-throughs).
+    The labour sell value reuses the profit-inclusive painter-day target so the
+    banner agrees with ``production_sell_pricing``.
+    """
+    settings = validate_production_targets(
+        day_hours=day_hours,
+        value_low=value_target,
+        value_target=value_target,
+        value_high=value_target,
+    )
+    lines = _non_negative_number(line_total, "Line total")
+    hours = _non_negative_number(labour_hours, "Labour hours")
+    labour_cost_rate = _non_negative_number(
+        labour_cost_per_hour, "Labour cost per hour"
+    )
+    materials = _non_negative_number(material_allowance, "Material allowance")
+    markup = _non_negative_number(material_markup_percent, "Material markup percent")
+    access = _non_negative_number(access_equipment_allowance, "Access allowance")
+    subcontractors = _non_negative_number(
+        subcontractor_allowance, "Subcontractor allowance"
+    )
+    sundries = _non_negative_number(sundries_allowance, "Sundries allowance")
+    labour_sell_value = hours / settings["day_hours"] * settings["value_target"]
+    work_sell_value = max(lines, labour_sell_value)
+    materials_sell_value = materials * (1 + markup / 100.0)
+    pass_through = access + subcontractors + sundries
+    total_sell = work_sell_value + materials_sell_value + pass_through
+    labour_cost = hours * labour_cost_rate
+    total_cost = labour_cost + materials + pass_through
+    gross_profit = total_sell - total_cost
+    margin_percent = gross_profit / total_sell * 100.0 if total_sell > 0 else 0.0
+    if margin_percent >= MARGIN_GREEN_PERCENT:
+        status = "Strong"
+    elif margin_percent >= MARGIN_AMBER_PERCENT:
+        status = "Acceptable"
+    else:
+        status = "Low"
+    return {
+        "line_total": round(lines, 2),
+        "labour_hours": hours,
+        "labour_sell_value": round(labour_sell_value, 2),
+        "work_sell_value": round(work_sell_value, 2),
+        "labour_cost_per_hour": labour_cost_rate,
+        "labour_cost": round(labour_cost, 2),
+        "material_allowance": round(materials, 2),
+        "material_markup_percent": markup,
+        "materials_sell_value": round(materials_sell_value, 2),
+        "pass_through_sell_value": round(pass_through, 2),
+        "total_sell": round(total_sell, 2),
+        "total_cost": round(total_cost, 2),
+        "gross_profit": round(gross_profit, 2),
+        "margin_percent": round(margin_percent, 2),
+        "margin_status": status,
     }

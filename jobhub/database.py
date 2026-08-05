@@ -621,6 +621,11 @@ def init_db():
     ensure_column("estimate_working_sheets", "production_value_low", "REAL DEFAULT 800")
     ensure_column("estimate_working_sheets", "production_value_target", "REAL DEFAULT 1000")
     ensure_column("estimate_working_sheets", "production_value_high", "REAL DEFAULT 1000")
+    ensure_column("estimate_working_sheets", "labour_cost_per_hour", "REAL DEFAULT 60")
+    ensure_column("estimate_working_sheets", "material_markup_percent", "REAL DEFAULT 10")
+    ensure_column("estimate_working_sheets", "floor_area_base_rate", "REAL DEFAULT 60")
+    ensure_column("estimate_working_sheets", "ceiling_surcharge_2700", "REAL DEFAULT 5")
+    ensure_column("estimate_working_sheets", "ceiling_surcharge_3000", "REAL DEFAULT 8")
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS estimate_line_items (
@@ -665,6 +670,23 @@ def init_db():
         "CREATE INDEX IF NOT EXISTS idx_estimate_line_items_job_stage "
         "ON estimate_line_items(job_stage_id)"
     )
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS estimate_rate_register (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        estimate_id INTEGER NOT NULL,
+        job_id INTEGER,
+        rate_key TEXT NOT NULL,
+        rate_label TEXT,
+        value REAL DEFAULT 0,
+        unit TEXT,
+        source TEXT,
+        changed_by TEXT,
+        changed_at TEXT,
+        FOREIGN KEY(estimate_id) REFERENCES estimate_working_sheets(id)
+    )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_estimate_rate_register_estimate ON estimate_rate_register(estimate_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_estimate_rate_register_job ON estimate_rate_register(job_id)")
     cur.execute("""
     CREATE TABLE IF NOT EXISTS takeoff_pack_imports (
         id INTEGER PRIMARY KEY AUTOINCREMENT,

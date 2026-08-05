@@ -1,5 +1,36 @@
 # JobHub secured release
 
+## 2026-08-05 - Smart document intake
+
+- Import Take-off Job Pack now has a Smart Document Intake mode that reads
+  uploaded plans, scope-of-works and colour schedules instead of a Job Pack ZIP.
+- Plans are read from PDF text with labelled room dimensions converted into
+  computed wall and ceiling areas; scopes are scanned for m², lineal-metre,
+  each and litre take-off lines plus colours; colour schedules are read from
+  CSV or Excel files.
+- The intake can create a brand-new job (a standard Job Pack is synthesised
+  internally so the normal importer runs unchanged), attach a new estimate to an
+  existing job, or merge the take-off into the job's current estimate with
+  matching lines keeping the larger quantity / hours and material quantities
+  accumulated.
+- Source documents are written into the job folder and attached to the job. A
+  stated job number protects against attaching a take-off to the wrong job.
+- Materials and colours are matched to existing products where possible and
+  custom rows are created otherwise.
+
+## 2026-08-05 - Estimate production pricing
+
+- Estimate Summary now shows a live gross-profit margin banner built from the
+  production pricing model (Strong / Acceptable / Low thresholds) with editable
+  labour cost per hour, material markup per cent, material allowance and access /
+  subcontractor / sundries allowances saved on the Summary.
+- Line Items supports inline editing of line rates and totals plus a floor-area
+  quick add that builds wall / ceiling take-off lines from room dimensions.
+- A rate register records the planning rate and any production-line rate
+  overrides per estimate for managers and administrators.
+- Estimate pricing no longer locks on stage changes and staff never see dollar
+  values in the rate register.
+
 ## 2026-08-05 - PlanReader elevation progress tracker
 
 - Rendered elevation drawing pages are now tagged so they can be used as a

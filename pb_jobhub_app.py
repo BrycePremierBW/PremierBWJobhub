@@ -48,6 +48,7 @@ from jobhub_v4.measurements import (
     recommended_measurement_basis,
 )
 from jobhub.job_pack_matching import match_job_pack_to_jobs
+from jobhub.smart_intake import parse_intake_upload, parts_to_intake_package
 from jobhub_core import (
     calculate_shift_hours,
     hash_password as secure_hash_password,
@@ -61,9 +62,12 @@ from jobhub_core import (
 from jobhub_production import (
     DEFAULT_DAY_HOURS,
     DEFAULT_VALUE_TARGET,
+    MARGIN_AMBER_PERCENT,
+    MARGIN_GREEN_PERCENT,
     budget_production_allowance,
     crew_duration_days,
     claimable_value,
+    estimate_margin_metrics,
     expected_progress,
     line_production_metrics,
     overhead_recovery_metrics,
@@ -1860,6 +1864,11 @@ def init_db():
     ensure_column("estimate_working_sheets", "production_value_low", "REAL DEFAULT 800")
     ensure_column("estimate_working_sheets", "production_value_target", "REAL DEFAULT 1000")
     ensure_column("estimate_working_sheets", "production_value_high", "REAL DEFAULT 1000")
+    ensure_column("estimate_working_sheets", "labour_cost_per_hour", "REAL DEFAULT 60")
+    ensure_column("estimate_working_sheets", "material_markup_percent", "REAL DEFAULT 10")
+    ensure_column("estimate_working_sheets", "floor_area_base_rate", "REAL DEFAULT 60")
+    ensure_column("estimate_working_sheets", "ceiling_surcharge_2700", "REAL DEFAULT 5")
+    ensure_column("estimate_working_sheets", "ceiling_surcharge_3000", "REAL DEFAULT 8")
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS estimate_line_items (
@@ -1906,6 +1915,24 @@ def init_db():
         "CREATE INDEX IF NOT EXISTS idx_estimate_line_items_job_stage "
         "ON estimate_line_items(job_stage_id)"
     )
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS estimate_rate_register (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        estimate_id INTEGER NOT NULL,
+        job_id INTEGER,
+        rate_key TEXT NOT NULL,
+        rate_label TEXT,
+        value REAL DEFAULT 0,
+        unit TEXT,
+        source TEXT,
+        changed_by TEXT,
+        changed_at TEXT,
+        FOREIGN KEY(estimate_id) REFERENCES estimate_working_sheets(id)
+    )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_estimate_rate_register_estimate ON estimate_rate_register(estimate_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_estimate_rate_register_job ON estimate_rate_register(job_id)")
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS job_photos (
@@ -10773,6 +10800,454 @@ def import_takeoff_job_pack(
     }
 
 
+def _intake_line_key(description, location, colour_finish):
+    return "|".join([
+        _takeoff_header(description),
+        _takeoff_header(location),
+        _takeoff_header(colour_finish),
+    ])
+
+
+def attach_intake_package_to_job(
+    job_id,
+    parsed,
+    merge=True,
+    import_materials=True,
+    attach_documents=True,
+):
+    """Attach a Smart Document Intake package to an existing job.
+
+    When ``merge`` is true the intake take-off lines are merged into the job's
+    current estimate (matching lines keep the larger quantity / hours and add
+    material allowance) and material quantities are accumulated. When false a
+    new estimate is created for the intake. Source documents are always written
+    into the job folder and attached to the job.
+    """
+    summary = parsed["summary"]
+    pack_id = _takeoff_text(summary.get("pack_id"), "smart-intake")[:120]
+    revision = _takeoff_text(summary.get("revision"), "1")[:60]
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    imported_by = current_username()
+    conn = connect()
+    pack_folder = None
+    extracted_paths = {}
+    estimate_id = None
+    estimate_no = ""
+    line_count = 0
+    merged_line_count = 0
+    material_count = 0
+    merged_material_count = 0
+    document_count = 0
+    estimate_mode = "merged" if merge else "new"
+    labour_rate = PLANNING_LABOUR_RATE
+    try:
+        cur = conn.cursor()
+        job_row = cur.execute("SELECT job_no FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        if not job_row:
+            raise ValueError("The selected job could not be found.")
+        job_no = _takeoff_text(job_row[0], f"job_{job_id}")
+        intake_job_no = _takeoff_text(summary.get("job_no")).strip()
+        if intake_job_no and intake_job_no.casefold() != job_no.casefold():
+            raise ValueError(
+                "SMART-intake-JOB-NUMBER-MISMATCH-DATA-ENTRY: "
+                f"the intake document states job number {intake_job_no!r} "
+                f"but the selected job is {job_no!r}."
+            )
+
+        safe_pack = safe_file_name(pack_id)[:80]
+        pack_folder = Path(get_job_folder(job_no)) / "job_packs" / (
+            f"{safe_pack}_intake_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        )
+        pack_folder.mkdir(parents=True, exist_ok=False)
+        source_zip_path = pack_folder / safe_file_name(parsed.get("source_name") or "smart_intake.zip")
+        source_zip_path.write_bytes(parsed["source_bytes"])
+        with zipfile.ZipFile(BytesIO(parsed["source_bytes"]), "r") as zf:
+            for member in parsed["member_names"]:
+                target = _takeoff_safe_extract_target(pack_folder, member)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(zf.read(member))
+                extracted_paths[member] = target
+
+        existing_lines = {}
+        if merge:
+            est_row = cur.execute(
+                """SELECT id, estimate_no, labour_rate FROM estimate_working_sheets
+                   WHERE job_id = ? AND COALESCE(archived, 0) = 0 ORDER BY id DESC LIMIT 1""",
+                (job_id,),
+            ).fetchone()
+            if est_row:
+                estimate_id = int(est_row[0])
+                estimate_no = _takeoff_text(est_row[1])
+                labour_rate = _takeoff_float(est_row[2]) or labour_rate
+            else:
+                estimate_no = f"{job_no}-INTAKE-1"
+                estimate_id = _takeoff_insert_id(
+                    cur,
+                    _takeoff_new_estimate_insert_sql(),
+                    _takeoff_new_estimate_values(job_id, estimate_no, revision, summary, now),
+                )
+            for (line_id, desc, location, colour, qty, hours, allowance) in cur.execute(
+                """SELECT id, item_description, work_location, colour_finish, qty,
+                          estimated_labour_hours, material_allowance
+                   FROM estimate_line_items WHERE estimate_id = ?""",
+                (estimate_id,),
+            ):
+                key = _intake_line_key(_takeoff_text(desc), _takeoff_text(location), _takeoff_text(colour))
+                existing_lines[key] = {
+                    "id": int(line_id),
+                    "qty": _takeoff_float(qty),
+                    "hours": _takeoff_float(hours),
+                    "allowance": _takeoff_float(allowance),
+                }
+        else:
+            count_row = cur.execute(
+                "SELECT COUNT(*) FROM estimate_working_sheets WHERE job_id = ?", (job_id,)
+            ).fetchone()
+            estimate_no = f"{job_no}-INTAKE-{int(count_row[0] or 0) + 1}"
+            estimate_id = _takeoff_insert_id(
+                cur,
+                _takeoff_new_estimate_insert_sql(),
+                _takeoff_new_estimate_values(job_id, estimate_no, revision, summary, now),
+            )
+
+        insert_line_sql = """
+            INSERT INTO estimate_line_items
+            (estimate_id, job_stage_id, section, item_description, qty, unit, unit_rate, line_total, notes,
+             estimated_labour_hours, material_allowance, substrate, work_location,
+             coating_system, colour_finish, source_pack)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        for _, row in parsed["lines"].iterrows():
+            description = _takeoff_text(row.get("Item Description"))
+            if not description:
+                continue
+            location = _takeoff_text(row.get("Location"))
+            colour = _takeoff_text(row.get("Colour / Finish"))
+            qty = _takeoff_float(row.get("Qty"))
+            hours = _takeoff_float(row.get("Estimated Labour Hours"))
+            allowance = _takeoff_float(row.get("Material Allowance"))
+            key = _intake_line_key(description, location, colour)
+            line_count += 1
+            if key in existing_lines:
+                current = existing_lines[key]
+                cur.execute(
+                    """UPDATE estimate_line_items
+                       SET qty = ?, estimated_labour_hours = ?, material_allowance = ?, notes = ?
+                       WHERE id = ?""",
+                    (
+                        max(qty, current["qty"]),
+                        max(hours, current["hours"]),
+                        current["allowance"] + allowance,
+                        _takeoff_text(row.get("Notes")),
+                        current["id"],
+                    ),
+                )
+                merged_line_count += 1
+            else:
+                cur.execute(insert_line_sql, (
+                    estimate_id,
+                    None,
+                    _takeoff_text(row.get("Section"), "Take-off"),
+                    description,
+                    qty,
+                    _takeoff_text(row.get("Unit"), "item"),
+                    0.0,
+                    0.0,
+                    _takeoff_text(row.get("Notes")),
+                    hours,
+                    allowance,
+                    _takeoff_text(row.get("Substrate")),
+                    location,
+                    _takeoff_text(row.get("Coating System")),
+                    colour,
+                    f"Smart intake {pack_id}",
+                ))
+                existing_lines[key] = {"id": None, "qty": qty, "hours": hours, "allowance": allowance}
+
+        agg = cur.execute(
+            """SELECT COALESCE(SUM(estimated_labour_hours), 0), COALESCE(SUM(material_allowance), 0),
+                      COALESCE(SUM(qty * unit_rate), 0)
+               FROM estimate_line_items WHERE estimate_id = ?""",
+            (estimate_id,),
+        ).fetchone()
+        est_hours = _takeoff_float(agg[0])
+        est_allowance = _takeoff_float(agg[1])
+        est_line_total = _takeoff_float(agg[2])
+        totals = production_sell_pricing(
+            line_total=est_line_total,
+            labour_hours=est_hours,
+            material_allowance=est_allowance,
+            access_equipment_allowance=0.0,
+            subcontractor_allowance=0.0,
+            sundries_allowance=0.0,
+            contingency_percent=0.0,
+            gst_percent=_takeoff_float(summary.get("gst_percent"), 10.0),
+            day_hours=DEFAULT_DAY_HOURS,
+            value_target=DEFAULT_VALUE_TARGET,
+        )
+        existing_notes = cur.execute(
+            "SELECT notes FROM estimate_working_sheets WHERE id = ?", (estimate_id,)
+        ).fetchone()
+        estimate_notes = "\n".join(filter(None, [
+            _takeoff_text(existing_notes[0]) if existing_notes else "",
+            f"Smart Document Intake {pack_id} attached on {now} by {imported_by}.",
+        ]))
+        cur.execute(
+            """UPDATE estimate_working_sheets
+               SET labour_hours = ?, labour_rate = ?, material_allowance = ?,
+                   total_ex_gst = ?, gst_amount = ?, total_inc_gst = ?, updated_at = ?, notes = ?
+               WHERE id = ?""",
+            (
+                est_hours, labour_rate, est_allowance,
+                totals["total_ex_gst"], totals["gst_amount"], totals["total_inc_gst"], now,
+                estimate_notes, estimate_id,
+            ),
+        )
+
+        if import_materials:
+            material_rows = []
+            for _, row in parsed["materials"].iterrows():
+                material_rows.append({
+                    "code": _takeoff_text(row.get("Product Code / Ref"), "CUSTOM"),
+                    "name": _takeoff_text(row.get("Product / Material Name")),
+                    "supplier": _takeoff_text(row.get("Supplier")),
+                    "unit": _takeoff_text(row.get("Unit"), "each"),
+                    "unit_price": _takeoff_float(row.get("Unit Price Ex GST")),
+                    "colour": _takeoff_text(row.get("Colour / Finish")),
+                    "qty": _takeoff_float(row.get("Qty Required")),
+                    "location": _takeoff_text(row.get("Location")),
+                    "substrate": _takeoff_text(row.get("Substrate")),
+                    "system": _takeoff_text(row.get("Coating System")),
+                    "notes": _takeoff_text(row.get("Notes")),
+                })
+            for _, row in parsed["colours"].iterrows():
+                material_rows.append({
+                    "code": "COLOUR-SCHEDULE",
+                    "name": _takeoff_text(row.get("Product / Material Name"), "Colour schedule"),
+                    "supplier": "",
+                    "unit": "schedule",
+                    "unit_price": 0.0,
+                    "colour": _takeoff_text(row.get("Colour / Finish")),
+                    "qty": 0.0,
+                    "location": _takeoff_text(row.get("Location")),
+                    "substrate": _takeoff_text(row.get("Substrate")),
+                    "system": _takeoff_text(row.get("Coating System")),
+                    "notes": _takeoff_text(row.get("Notes")),
+                })
+
+            seen_materials = set()
+            for row in material_rows:
+                dedupe_key = tuple(str(row.get(key, "")).strip().casefold() for key in ["code", "name", "colour", "location", "substrate", "system"])
+                if dedupe_key in seen_materials:
+                    continue
+                seen_materials.add(dedupe_key)
+                if not row["name"]:
+                    continue
+                cur.execute(
+                    """SELECT id, qty_required FROM material_entries
+                       WHERE job_id = ? AND LOWER(TRIM(COALESCE(custom_product_code, ''))) = LOWER(TRIM(?))
+                         AND LOWER(TRIM(COALESCE(custom_product_name, ''))) = LOWER(TRIM(?))
+                         AND LOWER(TRIM(COALESCE(custom_colour, ''))) = LOWER(TRIM(?))
+                       LIMIT 1""",
+                    (job_id, row["code"], row["name"], row["colour"]),
+                )
+                existing_material = cur.fetchone()
+                if merge and existing_material:
+                    cur.execute(
+                        "UPDATE material_entries SET qty_required = qty_required + ?, updated_at = ? WHERE id = ?",
+                        (row["qty"], now, int(existing_material[0])),
+                    )
+                    merged_material_count += 1
+                    continue
+                cur.execute(
+                    "SELECT id FROM products WHERE LOWER(TRIM(product_code)) = LOWER(TRIM(?)) LIMIT 1",
+                    (row["code"],),
+                )
+                product_match = cur.fetchone()
+                product_id = int(product_match[0]) if product_match else None
+                detail_notes = " | ".join(filter(None, [
+                    row["notes"],
+                    f"Location: {row['location']}" if row["location"] else "",
+                    f"Substrate: {row['substrate']}" if row["substrate"] else "",
+                    f"System: {row['system']}" if row["system"] else "",
+                    f"Smart intake: {pack_id}",
+                ]))
+                cur.execute("""
+                    INSERT INTO material_entries
+                    (job_id, product_id, qty_required, qty_received, date_ordered, supplier, notes,
+                     custom_product_code, custom_product_name, custom_supplier, custom_unit,
+                     custom_unit_price, custom_colour)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    job_id,
+                    product_id,
+                    row["qty"],
+                    0.0,
+                    "",
+                    row["supplier"],
+                    detail_notes,
+                    "" if product_id else row["code"],
+                    "" if product_id else row["name"],
+                    "" if product_id else row["supplier"],
+                    "" if product_id else row["unit"],
+                    None if product_id else row["unit_price"],
+                    row["colour"],
+                ))
+                material_count += 1
+
+        if attach_documents:
+            for document in parsed["documents"]:
+                file_path = extracted_paths.get(document["member"])
+                if not file_path or not Path(file_path).exists():
+                    continue
+                cur.execute("""
+                    INSERT INTO job_documents
+                    (job_id, document_type, file_name, file_path, created_at, notes, mime_type)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    job_id,
+                    document["document_type"],
+                    document["file_name"],
+                    str(file_path),
+                    now,
+                    f"Attached from Smart Document Intake {pack_id}.",
+                    document.get("mime_type", "application/octet-stream"),
+                ))
+                document_count += 1
+
+        existing_budget = cur.execute(
+            "SELECT quoted_labour_hours, quoted_materials, notes FROM job_budgets WHERE job_id = ?",
+            (job_id,),
+        ).fetchone()
+        if merge:
+            budget_hours = est_hours
+            budget_materials = est_allowance
+        else:
+            if existing_budget:
+                budget_hours = _takeoff_float(existing_budget[0]) + est_hours
+                budget_materials = _takeoff_float(existing_budget[1]) + est_allowance
+            else:
+                budget_hours = est_hours
+                budget_materials = est_allowance
+        budget_cost = round(budget_hours * labour_rate, 2)
+        budget_notes = "\n".join(filter(None, [
+            _takeoff_text(existing_budget[2]) if existing_budget else "",
+            f"Smart Document Intake {pack_id} on {now} by {imported_by}.",
+        ]))
+        cur.execute("""
+            INSERT INTO job_budgets
+            (job_id, quoted_labour_hours, quoted_labour_cost, quoted_materials,
+             quoted_access_equipment, quoted_subcontractors, quoted_sundries,
+             target_gp_percent, locked_at, locked_by, notes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(job_id) DO UPDATE SET
+                quoted_labour_hours = excluded.quoted_labour_hours,
+                quoted_labour_cost = excluded.quoted_labour_cost,
+                quoted_materials = excluded.quoted_materials,
+                quoted_access_equipment = excluded.quoted_access_equipment,
+                quoted_subcontractors = excluded.quoted_subcontractors,
+                quoted_sundries = excluded.quoted_sundries,
+                target_gp_percent = excluded.target_gp_percent,
+                locked_at = excluded.locked_at,
+                locked_by = excluded.locked_by,
+                notes = excluded.notes
+        """, (
+            job_id,
+            round(budget_hours, 2),
+            budget_cost,
+            round(budget_materials, 2),
+            _takeoff_float(existing_budget[1] if existing_budget else 0),
+            0.0,
+            0.0,
+            0.0,
+            now,
+            imported_by,
+            budget_notes,
+        ))
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        if pack_folder is not None:
+            shutil.rmtree(pack_folder, ignore_errors=True)
+        raise
+    finally:
+        conn.close()
+
+    record_audit_event(
+        "smart_intake_attached",
+        "job",
+        job_id,
+        {
+            "pack_id": pack_id,
+            "revision": revision,
+            "estimate_id": estimate_id,
+            "estimate_mode": estimate_mode,
+            "line_count": line_count,
+            "merged_line_count": merged_line_count,
+            "material_count": material_count,
+            "merged_material_count": merged_material_count,
+            "document_count": document_count,
+        },
+    )
+    return {
+        "job_id": job_id,
+        "job_no": job_no,
+        "estimate_id": estimate_id,
+        "estimate_no": estimate_no,
+        "estimate_mode": estimate_mode,
+        "line_count": line_count,
+        "merged_line_count": merged_line_count,
+        "material_count": material_count,
+        "merged_material_count": merged_material_count,
+        "document_count": document_count,
+        "labour_hours": est_hours,
+        "material_allowance": est_allowance,
+        "pack_folder": str(pack_folder),
+    }
+
+
+def _takeoff_new_estimate_insert_sql():
+    return """
+        INSERT INTO estimate_working_sheets
+        (job_id, estimate_no, estimate_date, revision, status, labour_hours, labour_rate,
+         material_allowance, access_equipment_allowance, subcontractor_allowance, sundries_allowance,
+         margin_percent, contingency_percent, gst_percent, pricing_method,
+         total_ex_gst, gst_amount, total_inc_gst, created_at, updated_at, notes)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """
+
+
+def _takeoff_new_estimate_values(job_id, estimate_no, revision, summary, now):
+    labour_hours = _takeoff_float(summary.get("labour_hours"))
+    material_allowance = _takeoff_float(summary.get("material_allowance"))
+    return (
+        job_id,
+        estimate_no,
+        _takeoff_text(summary.get("estimate_date"), str(date.today())),
+        revision,
+        _takeoff_text(summary.get("estimate_status"), "Draft"),
+        labour_hours,
+        PLANNING_LABOUR_RATE,
+        material_allowance,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        _takeoff_float(summary.get("gst_percent"), 10.0),
+        "Production Target Included",
+        0.0,
+        0.0,
+        0.0,
+        now,
+        now,
+        "Created by Smart Document Intake.",
+    )
+
+
 def _takeoff_jobs_for_matching():
     return df_query("""
         SELECT j.id, j.job_no, COALESCE(j.job_name, '') AS job_name,
@@ -11077,6 +11552,15 @@ def _takeoff_render_bulk_import(uploaded_packs):
 
 
 def takeoff_job_pack_import_page():
+    intake_source = st.radio(
+        "What are you importing?",
+        ["Premier Brushworks Job Pack ZIP", "Smart Document Intake (plans / scopes / colour schedules)"],
+        horizontal=True,
+        key="takeoff_import_source_mode",
+    )
+    if intake_source.startswith("Smart"):
+        smart_intake_import_page()
+        return
     st.header("Import / Create Job Pack")
     st.caption(
         "Upload one or more Premier Brushworks Job Pack ZIPs. JobHub can create a complete new job or update an existing job, "
@@ -11673,6 +12157,239 @@ def takeoff_job_pack_import_page():
             pb_error(f"The Job Pack was not imported: {exc}")
 
 
+def smart_intake_import_page():
+    st.header("Smart Document Intake")
+    st.caption(
+        "Upload plans, scope-of-works or colour schedules. JobHub reads room dimensions, areas, "
+        "labour lines, materials and colours, then creates a new job, attaches a new estimate to an "
+        "existing job, or merges the take-off into the current estimate. Nothing is saved until the "
+        "final review is confirmed."
+    )
+
+    job_options = get_job_options()
+    intake_actions = ["Create a new job from these documents"]
+    if job_options:
+        intake_actions.append("Attach to an existing job (new estimate)")
+        intake_actions.append("Merge into an existing job's current estimate")
+    intake_action = st.radio(
+        "What should JobHub do?",
+        intake_actions,
+        index=0,
+        horizontal=True,
+        key="smart_intake_job_action",
+    )
+    create_new_job = intake_action.startswith("Create")
+    merge_into_existing = intake_action.startswith("Merge")
+
+    selected_job_id = None
+    selected_job_no = ""
+    if not create_new_job:
+        labels = list(job_options.keys())
+        selected_job_label = st.selectbox(
+            "Existing job",
+            labels,
+            key="smart_intake_target_job",
+        )
+        selected_job_id = job_options[selected_job_label]
+        selected_job_no = labels[labels.index(selected_job_label)].split(" - ", 1)[0].strip()
+
+    stated_job_no = ""
+    with st.expander("Job number stated in the documents (optional)", expanded=False):
+        stated_job_no = st.text_input(
+            "Job number stated in the documents",
+            value="",
+            key="smart_intake_stated_job_no",
+            help="When the intake documents name a job number, enter it here so JobHub can match the "
+            "job and refuse to attach the take-off to a different job.",
+        ).strip()
+        if stated_job_no and job_options:
+            matched_label = next(
+                (label for label in job_options if label.split(" - ", 1)[0].strip().casefold() == stated_job_no.casefold()),
+                None,
+            )
+            if matched_label:
+                st.success(f"Stated job number matches {matched_label}.")
+            elif not create_new_job:
+                st.warning("No existing job has this job number. The take-off will be blocked if it conflicts.")
+
+    if create_new_job:
+        st.markdown("#### New Job Details")
+        jc1, jc2 = st.columns(2)
+        intake_job_name = jc1.text_input(
+            "Job Name",
+            value="",
+            key="smart_intake_new_job_name",
+            help="A job name is required to create a new job from the intake.",
+        ).strip()
+        intake_site_address = jc2.text_input(
+            "Site Address",
+            value="",
+            key="smart_intake_new_job_address",
+        ).strip()
+
+    uploaded_documents = st.file_uploader(
+        "Choose plans, scope-of-works or colour schedules",
+        type=["pdf", "txt", "csv", "xlsx"],
+        key="smart_intake_upload",
+        accept_multiple_files=True,
+    )
+    if not uploaded_documents:
+        st.info("Choose one or more documents to preview what JobHub reads before anything is saved.")
+        return
+    oversize = [f.name for f in uploaded_documents if uploaded_file_size(f) > MAX_CSV_UPLOAD_BYTES]
+    if oversize:
+        pb_error("These files are too large to read: " + ", ".join(oversize))
+        return
+
+    parts_list = []
+    for uploaded in uploaded_documents:
+        try:
+            parts_list.append(parse_intake_upload(uploaded.getvalue(), uploaded.name))
+        except Exception as exc:
+            pb_error(f"Could not read {uploaded.name}: {exc}")
+            return
+    if stated_job_no:
+        parts_list[0]["job_hints"]["job_no"] = stated_job_no
+    try:
+        parsed = parts_to_intake_package(parts_list, source_name=f"smart_intake_{len(parts_list)}_documents.zip")
+    except Exception as exc:
+        pb_error(f"Could not combine the documents: {exc}")
+        return
+
+    summary = parsed["summary"]
+    st.markdown("### Intake Preview")
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Pack ID", summary.get("pack_id") or "PB-SMART-INTAKE")
+    m2.metric("Take-off Lines", len(parsed["lines"]))
+    m3.metric("Materials", len(parsed["materials"]))
+    m4.metric("Colours", len(parsed["colours"]))
+    m5.metric("Source Documents", len(parsed["documents"]))
+
+    if not create_new_job:
+        current_totals = df_query(
+            """SELECT COALESCE(SUM(estimated_labour_hours), 0) AS labour_hours,
+                      COALESCE(SUM(material_allowance), 0) AS material_allowance
+               FROM estimate_line_items eli
+               JOIN estimate_working_sheets ews ON ews.id = eli.estimate_id
+               WHERE ews.job_id = ? AND COALESCE(ews.archived, 0) = 0""",
+            (selected_job_id,),
+        )
+        if not current_totals.empty:
+            st.info(
+                f"Selected job currently has {float(current_totals.iloc[0]['labour_hours'] or 0):.2f} "
+                f"estimated labour hours and ${float(current_totals.iloc[0]['material_allowance'] or 0):,.2f} "
+                "material allowance across its estimates."
+            )
+
+    if not parsed["lines"].empty:
+        st.markdown("#### Detected Take-off Lines")
+        st.dataframe(parsed["lines"], width="stretch", hide_index=True)
+    if not parsed["materials"].empty:
+        st.markdown("#### Detected Materials")
+        st.dataframe(parsed["materials"], width="stretch", hide_index=True)
+    if not parsed["colours"].empty:
+        st.markdown("#### Detected Colour Schedule")
+        st.dataframe(parsed["colours"], width="stretch", hide_index=True)
+
+    st.markdown("### What to Import")
+    include_lines = st.checkbox(
+        "Include take-off lines (labour hours and material allowances)",
+        value=True,
+        key="smart_intake_include_lines",
+    )
+    include_materials = st.checkbox(
+        "Include materials and colours",
+        value=True,
+        key="smart_intake_include_materials",
+    )
+    attach_source_documents = st.checkbox(
+        "Attach the source documents to the job",
+        value=True,
+        key="smart_intake_attach_documents",
+    )
+
+    if create_new_job:
+        action_label = "Create Job and Import"
+        action_help = "Creates a new job with the intake details and imports the estimate, materials and documents."
+    elif merge_into_existing:
+        action_label = "Merge Take-off into Job"
+        action_help = "Merges matching lines (larger quantity / hours win), accumulates materials and attaches the documents."
+    else:
+        action_label = "Attach Take-off to Job"
+        action_help = "Creates a new estimate on the existing job and attaches the materials and documents."
+
+    if st.button(
+        action_label,
+        type="primary",
+        key="smart_intake_confirm",
+        help=action_help,
+    ):
+        work_parsed = dict(parsed)
+        if not include_lines:
+            work_parsed["lines"] = parsed["lines"].iloc[0:0].copy()
+            work_parsed["labour"] = parsed["labour"].iloc[0:0].copy()
+        if not include_materials:
+            work_parsed["materials"] = parsed["materials"].iloc[0:0].copy()
+            work_parsed["colours"] = parsed["colours"].iloc[0:0].copy()
+        try:
+            if create_new_job:
+                if not intake_job_name:
+                    raise ValueError("A job name is required to create a new job from the intake.")
+                work_parsed["summary"]["job_name"] = intake_job_name
+                work_parsed["summary"]["site_address"] = intake_site_address
+                if not _takeoff_text(work_parsed["summary"].get("job_no")):
+                    work_parsed["summary"]["job_no"] = next_job_no()
+                result = import_takeoff_job_pack(
+                    None,
+                    work_parsed,
+                    create_estimate=True,
+                    update_budget=True,
+                    import_materials=include_materials,
+                    attach_documents=attach_source_documents,
+                    import_stages=False,
+                    use_imported_line_pricing=False,
+                    job_mode="create",
+                    job_details=work_parsed["summary"],
+                    update_job_record=True,
+                    create_missing_builder=True,
+                    fill_blank_builder_details=True,
+                )
+            else:
+                result = attach_intake_package_to_job(
+                    selected_job_id,
+                    work_parsed,
+                    merge=merge_into_existing,
+                    import_materials=include_materials,
+                    attach_documents=attach_source_documents,
+                )
+            action_verb = {
+                "created": "created",
+                "updated": "updated",
+                "linked_without_job_changes": "updated",
+            }.get(result.get("job_action"), "updated")
+            if create_new_job:
+                pb_success(
+                    f"Job {result['job_no']} was successfully {action_verb} from the intake. "
+                    f"Added {result['line_count']} take-off line(s), "
+                    f"{result['material_count']} material/colour row(s), and "
+                    f"{result['document_count']} plan/document(s)."
+                )
+            else:
+                pb_success(
+                    f"Job {result['job_no']} was updated from the intake "
+                    f"({result['estimate_mode']} estimate {result['estimate_no']}). "
+                    f"Added {result['line_count']} line(s) and merged {result['merged_line_count']}, "
+                    f"{result['material_count']} material/colour row(s) and merged "
+                    f"{result['merged_material_count']}, and attached {result['document_count']} document(s)."
+                )
+            st.info(
+                f"Budget: {result['labour_hours']:.2f} estimated labour hours and "
+                f"${result['material_allowance']:,.2f} material allowance."
+            )
+            st.caption(f"Saved intake folder: {result['pack_folder']}")
+        except Exception as exc:
+            pb_error(f"The intake was not imported: {exc}")
+
 
 def estimate_totals(
     estimate_id,
@@ -11692,7 +12409,9 @@ def estimate_totals(
     settings_df = safe_df_query(
         """
         SELECT COALESCE(production_day_hours, 8) AS day_hours,
-               COALESCE(production_value_target, 1000) AS value_target
+               COALESCE(production_value_target, 1000) AS value_target,
+               COALESCE(labour_cost_per_hour, 60) AS labour_cost_per_hour,
+               COALESCE(material_markup_percent, 10) AS material_markup_percent
         FROM estimate_working_sheets
         WHERE id = ?
         """,
@@ -11700,9 +12419,13 @@ def estimate_totals(
     )
     day_hours = DEFAULT_DAY_HOURS
     value_target = DEFAULT_VALUE_TARGET
+    labour_cost_per_hour = PLANNING_LABOUR_RATE
+    material_markup_percent = 0.0
     if not settings_df.empty:
         day_hours = float(settings_df.iloc[0]["day_hours"] or DEFAULT_DAY_HOURS)
         value_target = float(settings_df.iloc[0]["value_target"] or DEFAULT_VALUE_TARGET)
+        labour_cost_per_hour = float(settings_df.iloc[0]["labour_cost_per_hour"] or PLANNING_LABOUR_RATE)
+        material_markup_percent = float(settings_df.iloc[0]["material_markup_percent"] or 0)
     totals = production_sell_pricing(
         line_total=line_total,
         labour_hours=labour_hours,
@@ -11714,8 +12437,12 @@ def estimate_totals(
         gst_percent=gst_percent,
         day_hours=day_hours,
         value_target=value_target,
+        material_markup_percent=material_markup_percent,
     )
     totals["labour_total"] = round(float(labour_hours or 0) * PLANNING_LABOUR_RATE, 2)
+    totals["labour_cost"] = round(float(labour_hours or 0) * labour_cost_per_hour, 2)
+    totals["labour_cost_per_hour"] = labour_cost_per_hour
+    totals["material_markup_percent"] = material_markup_percent
     return totals
 
 
@@ -11743,6 +12470,105 @@ def recalc_estimate_totals(estimate_id):
         datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         estimate_id,
     ))
+
+
+# PB_ESTIMATE_RATE_REGISTER_V1
+def build_estimate_rate_register_entries(estimate_id):
+    """Build the default rate-register snapshot for an estimate working sheet."""
+    sheet = df_query("SELECT * FROM estimate_working_sheets WHERE id = ?", (int(estimate_id),))
+    if sheet.empty:
+        return 0, []
+    row = sheet.iloc[0]
+    job_id = int(row["job_id"] or 0)
+    entries = [
+        {
+            "rate_key": "labour_cost_per_hour",
+            "rate_label": "Painter labour cost per hour",
+            "value": float(row.get("labour_cost_per_hour") or PLANNING_LABOUR_RATE),
+            "unit": "$ / hr",
+            "source": "saved",
+        },
+        {
+            "rate_key": "material_markup_percent",
+            "rate_label": "Material markup",
+            "value": float(row.get("material_markup_percent") or 0),
+            "unit": "%",
+            "source": "saved",
+        },
+        {
+            "rate_key": "floor_area_base_rate",
+            "rate_label": "Internal floor area base rate",
+            "value": float(row.get("floor_area_base_rate") or 0),
+            "unit": "$ / m\u00b2",
+            "source": "saved",
+        },
+        {
+            "rate_key": "ceiling_surcharge_2700",
+            "rate_label": "2,700 mm ceiling surcharge",
+            "value": float(row.get("ceiling_surcharge_2700") or 0),
+            "unit": "$ / m\u00b2",
+            "source": "saved",
+        },
+        {
+            "rate_key": "ceiling_surcharge_3000",
+            "rate_label": "3,000 mm ceiling surcharge",
+            "value": float(row.get("ceiling_surcharge_3000") or 0),
+            "unit": "$ / m\u00b2",
+            "source": "saved",
+        },
+    ]
+    return job_id, entries
+
+
+def snapshot_estimate_rate_register(estimate_id):
+    """Replace the rate-register snapshot for an estimate with current rates."""
+    job_id, entries = build_estimate_rate_register_entries(estimate_id)
+    if job_id <= 0 or not entries:
+        return
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    user = get_current_user() or {}
+    changed_by = str(
+        user.get("username") or user.get("employee_name") or current_role() or "estimator"
+    )
+    conn = connect()
+    try:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM estimate_rate_register WHERE estimate_id = ?", (int(estimate_id),))
+        for entry in entries:
+            cur.execute("""
+                INSERT INTO estimate_rate_register
+                (estimate_id, job_id, rate_key, rate_label, value, unit, source, changed_by, changed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                int(estimate_id),
+                job_id,
+                entry["rate_key"],
+                entry["rate_label"],
+                float(entry["value"]),
+                entry.get("unit", ""),
+                entry.get("source", "saved"),
+                changed_by,
+                now,
+            ))
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+
+
+def estimate_rate_register_dataframe(estimate_id):
+    return df_query("""
+        SELECT rate_label AS 'Rate', value AS 'Value', unit AS 'Unit',
+               source AS 'Source', changed_by AS 'Changed By', changed_at AS 'Changed At'
+        FROM estimate_rate_register
+        WHERE estimate_id = ?
+        ORDER BY id
+    """, (int(estimate_id),))
 
 
 # PB_ESTIMATE_ARCHIVE_DELETE_V1
@@ -12166,83 +12992,308 @@ def estimate_working_sheet_page():
     )
 
     with tab_summary:
-        with st.form("estimate_summary_form"):
-            col1, col2, col3, col4 = st.columns(4)
-            estimate_no = col1.text_input("Estimate No", value=str(current["estimate_no"] or ""))
-            estimate_date = col2.text_input("Estimate Date", value=str(current["estimate_date"] or str(date.today())))
-            revision = col3.text_input("Revision", value=str(current["revision"] or ""))
-            statuses = ["Draft", "Sent", "Approved", "Lost", "Superseded"]
-            current_status = str(current["status"] or "Draft")
-            status_index = statuses.index(current_status) if current_status in statuses else 0
-            status = col4.selectbox("Status", statuses, index=status_index)
+        summary_keys = {
+            "estimate_no": f"est_sum_no_{selected_estimate_id}",
+            "estimate_date": f"est_sum_date_{selected_estimate_id}",
+            "revision": f"est_sum_rev_{selected_estimate_id}",
+            "status": f"est_sum_status_{selected_estimate_id}",
+            "hours": f"est_sum_hours_{selected_estimate_id}",
+            "materials": f"est_sum_materials_{selected_estimate_id}",
+            "access": f"est_sum_access_{selected_estimate_id}",
+            "subbie": f"est_sum_subbie_{selected_estimate_id}",
+            "sundries": f"est_sum_sundries_{selected_estimate_id}",
+            "labour_cost": f"est_sum_labour_cost_{selected_estimate_id}",
+            "markup": f"est_sum_markup_{selected_estimate_id}",
+            "floor_base": f"est_sum_floor_base_{selected_estimate_id}",
+            "ceil_2700": f"est_sum_ceil_2700_{selected_estimate_id}",
+            "ceil_3000": f"est_sum_ceil_3000_{selected_estimate_id}",
+            "gst": f"est_sum_gst_{selected_estimate_id}",
+            "notes": f"est_sum_notes_{selected_estimate_id}",
+        }
 
-            col5, col6 = st.columns(2)
-            labour_hours = col5.number_input("Labour Hours", min_value=0.0, step=1.0, value=float(current["labour_hours"] or 0))
-            labour_rate = PLANNING_LABOUR_RATE
-            col6.metric("Labour Rate", "$1,000 / painter per 8-hour day")
+        def _live_float(key, fallback):
+            try:
+                value = st.session_state[key]
+            except (KeyError, TypeError):
+                value = fallback
+            try:
+                return float(value or 0)
+            except (TypeError, ValueError):
+                return float(fallback or 0)
 
-            col7, col8, col9, col10 = st.columns(4)
-            material_allowance = col7.number_input("Material Allowance", min_value=0.0, step=100.0, value=float(current["material_allowance"] or 0))
-            access_equipment_allowance = col8.number_input("Access / Equipment Allowance", min_value=0.0, step=100.0, value=float(current["access_equipment_allowance"] or 0))
-            subcontractor_allowance = col9.number_input("Subcontractor Allowance", min_value=0.0, step=100.0, value=float(current["subcontractor_allowance"] or 0))
-            sundries_allowance = col10.number_input("Sundries / Consumables", min_value=0.0, step=50.0, value=float(current["sundries_allowance"] or 0))
+        live_line_df = df_query(
+            "SELECT COALESCE(SUM(line_total), 0) AS total FROM estimate_line_items WHERE estimate_id = ?",
+            (selected_estimate_id,),
+        )
+        live_line_total = float(live_line_df.iloc[0]["total"] or 0) if not live_line_df.empty else 0.0
+        live = {
+            "hours": _live_float(summary_keys["hours"], float(current["labour_hours"] or 0)),
+            "materials": _live_float(summary_keys["materials"], float(current["material_allowance"] or 0)),
+            "access": _live_float(summary_keys["access"], float(current["access_equipment_allowance"] or 0)),
+            "subbie": _live_float(summary_keys["subbie"], float(current["subcontractor_allowance"] or 0)),
+            "sundries": _live_float(summary_keys["sundries"], float(current["sundries_allowance"] or 0)),
+            "labour_cost": _live_float(
+                summary_keys["labour_cost"],
+                float(current.get("labour_cost_per_hour") or PLANNING_LABOUR_RATE),
+            ),
+            "markup": _live_float(
+                summary_keys["markup"],
+                float(current.get("material_markup_percent") or 0),
+            ),
+            "floor_base": _live_float(
+                summary_keys["floor_base"],
+                float(current.get("floor_area_base_rate") or 0),
+            ),
+            "ceil_2700": _live_float(
+                summary_keys["ceil_2700"],
+                float(current.get("ceiling_surcharge_2700") or 0),
+            ),
+            "ceil_3000": _live_float(
+                summary_keys["ceil_3000"],
+                float(current.get("ceiling_surcharge_3000") or 0),
+            ),
+            "gst": _live_float(summary_keys["gst"], float(current["gst_percent"] or 10)),
+        }
+        margin = estimate_margin_metrics(
+            line_total=live_line_total,
+            labour_hours=live["hours"],
+            labour_cost_per_hour=live["labour_cost"],
+            material_allowance=live["materials"],
+            material_markup_percent=live["markup"],
+            access_equipment_allowance=live["access"],
+            subcontractor_allowance=live["subbie"],
+            sundries_allowance=live["sundries"],
+        )
 
-            st.info(
-                "The $1,000 daily rate already covers wages, overheads and profit. JobHub does not "
-                "add a second margin, markup or contingency percentage."
+        st.subheader("Live Gross-Profit Margin")
+        status_colour = {
+            "Strong": "#27ae60",
+            "Acceptable": "#f39c12",
+            "Low": "#e74c3c",
+        }.get(margin["margin_status"], "#888888")
+        st.markdown(
+            f"<div style='border:1px solid {status_colour};border-radius:8px;padding:12px 16px;"
+            f"background:{status_colour}18'>"
+            f"<strong>Projected Gross-Profit Margin: {margin['margin_percent']:.1f}%"
+            f" ({margin['margin_status']})</strong> — ${margin['gross_profit']:,.2f} gross profit on "
+            f"${margin['total_sell']:,.2f} sell ex GST. Thresholds: "
+            f"{MARGIN_GREEN_PERCENT:.0f}%+ strong, {MARGIN_AMBER_PERCENT:.0f}%+ acceptable.</div>",
+            unsafe_allow_html=True,
+        )
+        c0 = st.columns(5)
+        c0[0].metric("Take-off / Labour Sell Value", f"${margin['work_sell_value']:,.2f}")
+        c0[1].metric("Sell Ex GST", f"${margin['total_sell']:,.2f}")
+        c0[2].metric("Cost Ex GST", f"${margin['total_cost']:,.2f}")
+        c0[3].metric("Gross Profit", f"${margin['gross_profit']:,.2f}")
+        c0[4].metric("GP Margin", f"{margin['margin_percent']:.1f}%")
+        st.caption(
+            "Projected from the values below, refreshed live as you edit. "
+            "Gross profit = labour sell + marked-up materials + pass-throughs minus "
+            "painter wages + base material cost + pass-throughs."
+        )
+
+        st.markdown("### Estimate Details")
+        col1, col2, col3, col4 = st.columns(4)
+        estimate_no = col1.text_input(
+            "Estimate No", value=str(current["estimate_no"] or ""), key=summary_keys["estimate_no"]
+        )
+        estimate_date = col2.text_input(
+            "Estimate Date", value=str(current["estimate_date"] or str(date.today())), key=summary_keys["estimate_date"]
+        )
+        revision = col3.text_input("Revision", value=str(current["revision"] or ""), key=summary_keys["revision"])
+        statuses = ["Draft", "Sent", "Approved", "Lost", "Superseded"]
+        current_status = str(current["status"] or "Draft")
+        status_index = statuses.index(current_status) if current_status in statuses else 0
+        status = col4.selectbox("Status", statuses, index=status_index, key=summary_keys["status"])
+
+        st.markdown("### Pricing Inputs")
+        col5, col6 = st.columns(2)
+        labour_hours = col5.number_input(
+            "Labour Hours", min_value=0.0, step=1.0, value=live["hours"], key=summary_keys["hours"]
+        )
+        col6.metric("Labour Rate", "$1,000 / painter per 8-hour day")
+        c1, c2, c3 = st.columns(3)
+        labour_cost_per_hour = c1.number_input(
+            "Painter Labour Cost ($ / hour)",
+            min_value=0.0,
+            step=5.0,
+            value=live["labour_cost"],
+            key=summary_keys["labour_cost"],
+            help="Labour cost basis used by the live margin banner.",
+        )
+        material_markup_percent = c2.number_input(
+            "Material Markup %", min_value=0.0, max_value=100.0, step=1.0,
+            value=live["markup"], key=summary_keys["markup"],
+        )
+        gst_percent = c3.number_input(
+            "GST %", min_value=0.0, max_value=100.0, step=1.0,
+            value=live["gst"], key=summary_keys["gst"],
+        )
+        st.caption("The labour sell value converts labour hours at $1,000 per painter per 8-hour day.")
+
+        c5, c6, c7, c8 = st.columns(4)
+        material_allowance = c5.number_input(
+            "Material Allowance", min_value=0.0, step=100.0, value=live["materials"], key=summary_keys["materials"]
+        )
+        access_equipment_allowance = c6.number_input(
+            "Access / Equipment Allowance", min_value=0.0, step=100.0, value=live["access"], key=summary_keys["access"]
+        )
+        subcontractor_allowance = c7.number_input(
+            "Subcontractor Allowance", min_value=0.0, step=100.0, value=live["subbie"], key=summary_keys["subbie"]
+        )
+        sundries_allowance = c8.number_input(
+            "Sundries / Consumables", min_value=0.0, step=50.0, value=live["sundries"], key=summary_keys["sundries"]
+        )
+
+        st.markdown("#### Whole-Job Floor-Area Rate Defaults")
+        st.caption(
+            "Used by the 'Quick add internal floor area' tool on the Line Items tab. "
+            "These rates are saved against this estimate only."
+        )
+        c9, c10, c11 = st.columns(3)
+        floor_area_base_rate = c9.number_input(
+            "Base rate ($ / m\u00b2)", min_value=0.0, step=1.0, value=live["floor_base"], key=summary_keys["floor_base"]
+        )
+        ceiling_surcharge_2700 = c10.number_input(
+            "Surcharge — 2,700 mm ceilings ($ / m\u00b2)", min_value=0.0, step=1.0,
+            value=live["ceil_2700"], key=summary_keys["ceil_2700"],
+        )
+        ceiling_surcharge_3000 = c11.number_input(
+            "Surcharge — 3,000 mm ceilings ($ / m\u00b2)", min_value=0.0, step=1.0,
+            value=live["ceil_3000"], key=summary_keys["ceil_3000"],
+        )
+
+        notes = st.text_area("Notes / Scope Notes", value=str(current["notes"] or ""), key=summary_keys["notes"])
+
+        st.info(
+            "The $1,000 daily rate covers wages, overheads and profit. The live banner projects gross "
+            "profit after painter wages (labour cost per hour) and base material cost. Materials are "
+            "charged to the client at base cost plus the material markup %."
+        )
+        contingency_percent = 0.0
+        pricing_method = "Production Target Included"
+        margin_percent = 0.0
+
+        saved = st.button("Save Estimate Summary", type="primary", key=f"save_estimate_summary_{selected_estimate_id}")
+        if saved:
+            preview = production_sell_pricing(
+                line_total=live_line_total,
+                labour_hours=labour_hours,
+                material_allowance=material_allowance,
+                access_equipment_allowance=access_equipment_allowance,
+                subcontractor_allowance=subcontractor_allowance,
+                sundries_allowance=sundries_allowance,
+                contingency_percent=0.0,
+                gst_percent=gst_percent,
+                material_markup_percent=material_markup_percent,
             )
-            contingency_percent = 0.0
-            gst_percent = st.number_input(
-                "GST %", min_value=0.0, max_value=100.0,
-                step=1.0, value=float(current["gst_percent"] or 10),
-            )
-            pricing_method = "Production Target Included"
-            margin_percent = 0.0
-            notes = st.text_area("Notes / Scope Notes", value=str(current["notes"] or ""))
-
-            preview = estimate_totals(
-                selected_estimate_id, labour_hours, labour_rate, material_allowance,
-                access_equipment_allowance, subcontractor_allowance, sundries_allowance,
+            execute("""
+                UPDATE estimate_working_sheets
+                SET estimate_no = ?, estimate_date = ?, revision = ?, status = ?, labour_hours = ?, labour_rate = ?,
+                    material_allowance = ?, access_equipment_allowance = ?, subcontractor_allowance = ?, sundries_allowance = ?,
+                    margin_percent = ?, contingency_percent = ?, gst_percent = ?, pricing_method = ?,
+                    labour_cost_per_hour = ?, material_markup_percent = ?,
+                    floor_area_base_rate = ?, ceiling_surcharge_2700 = ?, ceiling_surcharge_3000 = ?,
+                    total_ex_gst = ?, gst_amount = ?, total_inc_gst = ?,
+                    updated_at = ?, notes = ?
+                WHERE id = ?
+            """, (
+                estimate_no, estimate_date, revision, status, labour_hours, PLANNING_LABOUR_RATE,
+                material_allowance, access_equipment_allowance, subcontractor_allowance, sundries_allowance,
                 margin_percent, contingency_percent, gst_percent, pricing_method,
+                labour_cost_per_hour, material_markup_percent,
+                floor_area_base_rate, ceiling_surcharge_2700, ceiling_surcharge_3000,
+                preview["total_ex_gst"], preview["gst_amount"], preview["total_inc_gst"],
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"), notes, selected_estimate_id,
+            ))
+            record_audit_event(
+                "estimate_pricing_updated",
+                "estimate",
+                selected_estimate_id,
+                {
+                    "pricing_method": pricing_method,
+                    "pricing_percent": margin_percent,
+                    "material_markup_percent": material_markup_percent,
+                    "labour_cost_per_hour": labour_cost_per_hour,
+                    "total_ex_gst": preview["total_ex_gst"],
+                },
             )
-            st.markdown("### Pricing Preview")
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Take-off / Labour Sell Value", f"${preview['work_sell_value']:,.2f}")
-            c2.metric("Added Allowances", f"${preview['allowances_total']:,.2f}")
-            c3.metric("Total Ex GST", f"${preview['total_ex_gst']:,.2f}")
-            c4.metric("Total Inc GST", f"${preview['total_inc_gst']:,.2f}")
+            snapshot_estimate_rate_register(selected_estimate_id)
+            pb_success("Estimate summary saved.")
+            refresh()
 
-            saved = st.form_submit_button("Save Estimate Summary")
-            if saved:
-                execute("""
-                    UPDATE estimate_working_sheets
-                    SET estimate_no = ?, estimate_date = ?, revision = ?, status = ?, labour_hours = ?, labour_rate = ?,
-                        material_allowance = ?, access_equipment_allowance = ?, subcontractor_allowance = ?, sundries_allowance = ?,
-                        margin_percent = ?, contingency_percent = ?, gst_percent = ?, pricing_method = ?,
-                        total_ex_gst = ?, gst_amount = ?, total_inc_gst = ?,
-                        updated_at = ?, notes = ?
-                    WHERE id = ?
-                """, (estimate_no, estimate_date, revision, status, labour_hours, labour_rate, material_allowance,
-                      access_equipment_allowance, subcontractor_allowance, sundries_allowance, margin_percent, contingency_percent,
-                      gst_percent, pricing_method, preview["total_ex_gst"], preview["gst_amount"], preview["total_inc_gst"],
-                      datetime.now().strftime("%Y-%m-%d %H:%M:%S"), notes, selected_estimate_id))
-                record_audit_event(
-                    "estimate_pricing_updated",
-                    "estimate",
-                    selected_estimate_id,
-                    {
-                        "pricing_method": pricing_method,
-                        "pricing_percent": margin_percent,
-                        "total_ex_gst": preview["total_ex_gst"],
-                    },
-                )
-                pb_success("Estimate summary saved.")
-                refresh()
+        if is_manager_or_admin():
+            with st.expander("Rate Register — Rates Used on This Estimate", expanded=False):
+                register_df = estimate_rate_register_dataframe(selected_estimate_id)
+                if register_df.empty:
+                    st.caption("Rates are logged here when the estimate summary is saved.")
+                else:
+                    st.dataframe(register_df, width="stretch", hide_index=True)
+                if st.button(
+                    "Refresh Rate Register Snapshot",
+                    key=f"refresh_rate_register_{selected_estimate_id}",
+                ):
+                    snapshot_estimate_rate_register(selected_estimate_id)
+                    pb_success("Rate register snapshot refreshed.")
+                    refresh()
 
     with tab_lines:
         st.subheader("Estimate Line Items")
         render_estimate_line_item_csv_importer(selected_estimate_id)
         render_rate_library_estimate_adder(selected_estimate_id)
+
+        with st.expander("Quick add internal floor area (whole job)", expanded=False):
+            base_rate = float(current.get("floor_area_base_rate") or 0)
+            surcharge_2700 = float(current.get("ceiling_surcharge_2700") or 0)
+            surcharge_3000 = float(current.get("ceiling_surcharge_3000") or 0)
+            ceiling_choice = st.radio(
+                "Ceiling height",
+                ["Standard", "2,700 mm", "3,000 mm"],
+                horizontal=True,
+                key=f"floor_area_ceiling_{selected_estimate_id}",
+            )
+            if ceiling_choice == "2,700 mm":
+                ceiling_surcharge = surcharge_2700
+            elif ceiling_choice == "3,000 mm":
+                ceiling_surcharge = surcharge_3000
+            else:
+                ceiling_surcharge = 0.0
+            suggested_rate = base_rate + ceiling_surcharge
+            fa_col1, fa_col2, fa_col3 = st.columns(3)
+            floor_area_m2 = fa_col1.number_input(
+                "Internal floor area (m\u00b2)", min_value=0.0, step=10.0,
+                key=f"floor_area_m2_{selected_estimate_id}",
+            )
+            final_floor_rate = fa_col2.number_input(
+                "Rate Ex GST ($ / m\u00b2)", min_value=0.0, step=1.0,
+                value=float(suggested_rate), key=f"floor_area_rate_{selected_estimate_id}",
+            )
+            fa_col3.metric("Suggested Rate", f"${suggested_rate:,.2f} / m\u00b2")
+            floor_area_total = round(float(floor_area_m2 or 0) * float(final_floor_rate or 0), 2)
+            st.metric("Line Total Ex GST", f"${floor_area_total:,.2f}")
+            if st.button("Add Floor-Area Line", key=f"add_floor_area_{selected_estimate_id}"):
+                if float(floor_area_m2 or 0) <= 0:
+                    pb_error("Enter an internal floor area greater than zero.")
+                else:
+                    execute("""
+                        INSERT INTO estimate_line_items
+                        (estimate_id, section, item_description, qty, unit, unit_rate, line_total, notes)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        selected_estimate_id,
+                        "Labour",
+                        f"Internal floor area painting - {ceiling_choice} ceilings - whole job",
+                        float(floor_area_m2),
+                        "m\u00b2",
+                        float(final_floor_rate),
+                        floor_area_total,
+                        f"Whole-job floor-area rate: ${float(final_floor_rate):,.2f} / m\u00b2. "
+                        f"Base ${base_rate:,.2f} + ceiling surcharge ${ceiling_surcharge:,.2f} / m\u00b2.",
+                    ))
+                    recalc_estimate_totals(selected_estimate_id)
+                    snapshot_estimate_rate_register(selected_estimate_id)
+                    pb_success("Floor-area line added to the estimate.")
+                    refresh()
 
         st.markdown("#### Add Manual Line Item")
         stage_rows = safe_df_query(
@@ -12307,13 +13358,50 @@ def estimate_working_sheet_page():
         if lines_df.empty:
             st.info("No line items added yet.")
         else:
-            st.dataframe(
-                lines_df.drop(columns=["id"]),
+            st.markdown("#### Edit Line Rates")
+            st.caption(
+                "Change Qty, Unit or Unit Rate inline, then press 'Save Rate Edits'. "
+                "Line totals and estimate totals recalculate automatically."
+            )
+            editor_df = lines_df[["id", "Section", "Description", "Qty", "Unit", "Unit Rate", "Line Total"]].copy()
+            editor_df["id"] = editor_df["id"].astype(int)
+            edited = st.data_editor(
+                editor_df,
+                key=f"estimate_line_items_{selected_estimate_id}",
                 width="stretch",
                 hide_index=True,
-                key=f"estimate_line_items_{selected_estimate_id}",
+                disabled=["id", "Section", "Description", "Line Total"],
+                column_config={
+                    "Qty": st.column_config.NumberColumn("Qty", min_value=0.0, format="%.3f"),
+                    "Unit Rate": st.column_config.NumberColumn("Unit Rate", min_value=0.0, format="$%.2f"),
+                    "Line Total": st.column_config.NumberColumn("Line Total", format="$%.2f", disabled=True),
+                },
+                num_rows="fixed",
             )
-            st.metric("Line Item Total", f"${float(lines_df['Line Total'].fillna(0).sum()):,.2f}")
+            if st.button("Save Rate Edits", key=f"save_line_rate_edits_{selected_estimate_id}"):
+                updated_rows = 0
+                for _, row in edited.iterrows():
+                    line_id = row["id"]
+                    if pd.isna(line_id):
+                        continue
+                    qty = float(row["Qty"] or 0)
+                    unit_rate = float(row["Unit Rate"] or 0)
+                    line_total = round(qty * unit_rate, 2)
+                    unit = str(row["Unit"] or "").strip()
+                    execute("""
+                        UPDATE estimate_line_items
+                        SET qty = ?, unit = ?, unit_rate = ?, line_total = ?
+                        WHERE id = ?
+                    """, (qty, unit, unit_rate, line_total, int(line_id)))
+                    updated_rows += 1
+                if updated_rows:
+                    recalc_estimate_totals(selected_estimate_id)
+                    snapshot_estimate_rate_register(selected_estimate_id)
+                    pb_success(f"Saved {updated_rows} line row(s).")
+                    refresh()
+                else:
+                    pb_error("No line items to update.")
+            st.metric("Line Item Total", f"${float(edited['Line Total'].fillna(0).sum()):,.2f}")
             delete_options = {f"{r['Section']} - {r['Description']} - ${float(r['Line Total'] or 0):,.2f}": int(r["id"]) for _, r in lines_df.iterrows()}
             selected_delete = st.selectbox("Line item to delete", list(delete_options.keys()))
             confirm = st.checkbox("Confirm delete selected line item")
