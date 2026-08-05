@@ -15,6 +15,17 @@ import streamlit as st
 
 APP_NAME = "PB PlanReader"
 DEFAULT_COVERAGE_M2_PER_L = 12.0
+DEFAULT_CEILING_HEIGHT_M = 2.7
+DEFAULT_OPENINGS_ALLOWANCE_M2 = 0.0
+
+ROOM_KEYWORDS = [
+    "lounge", "living", "family", "dining", "kitchen", "meals", "bedroom",
+    "bed 1", "bed 2", "bed 3", "bed 4", "bed 5", "master", "ensuite", "bath",
+    "laundry", "toilet", "wc", "study", "office", "garage", "rumpus", "play",
+    "hall", "entry", "foyer", "alfresco", "porch", "verandah", "veranda",
+    "patio", "store", "corridor", "passage", "sitting", "theatre", "retreat",
+    "closet", "dressing", "powder", "sunroom", "bunk", "guest",
+]
 
 ROOT = Path(__file__).resolve().parent
 ASSETS_DIR = ROOT / "assets"
@@ -61,9 +72,13 @@ def money(v: Any) -> str:
         return "$0.00"
 
 
-def litres_from_area(area_m2: float, coats: float = 2.0) -> float:
+def litres_from_area(
+    area_m2: float,
+    coats: float = 2.0,
+    coverage_m2_per_l: float = DEFAULT_COVERAGE_M2_PER_L,
+) -> float:
     try:
-        return round(float(area_m2) * float(coats) / DEFAULT_COVERAGE_M2_PER_L, 2)
+        return round(float(area_m2) * float(coats) / float(coverage_m2_per_l), 2)
     except Exception:
         return 0.0
 
@@ -204,6 +219,101 @@ def extract_area_candidates(text: str) -> List[Dict[str, Any]]:
     return rows[:300]
 
 
+def _parse_dimension(raw: str) -> float | None:
+    try:
+        return float(str(raw).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalise_dims(a: float, b: float) -> Tuple[float, float] | None:
+    # Architectural dimensions above 50 are almost always millimetres.
+    if a > 50 or b > 50:
+        a, b = a / 1000, b / 1000
+    if a <= 0 or b <= 0:
+        return None
+    return (round(a, 3), round(b, 3))
+
+
+def _room_label(prefix: str, lines: List[str], idx: int) -> str:
+    window = [prefix] + list(reversed(lines[max(0, idx - 3): idx]))
+    for text in window:
+        low = text.lower()
+        best_pos, best_kw = None, None
+        for kw in ROOM_KEYWORDS:
+            p = low.find(kw)
+            if p < 0:
+                continue
+            if best_pos is None or p < best_pos or (p == best_pos and len(kw) > len(best_kw or "")):
+                best_pos, best_kw = p, kw
+        if best_kw:
+            seg = text[best_pos:]
+            seg = re.split(r"[x×]", seg, maxsplit=1)[0]
+            seg = re.sub(
+                r"\s*(?:\d{1,2}[.,]\d+|\d{3,4})\s*(?:m|mm|metres?|meters?)?\s*$",
+                "",
+                seg,
+                flags=re.I,
+            )
+            seg = re.sub(
+                r"\s*(?:approx\.?|approximately|appx|dimension|dims?|size)\s*$",
+                "",
+                seg,
+                flags=re.I,
+            )
+            seg = re.sub(r"\s+", " ", seg).strip(" -:,")
+            if seg:
+                return seg[:40].title()
+    return "Room"
+
+
+def extract_room_dimensions(text: str) -> List[Dict[str, Any]]:
+    """Pull room dimension pairs (e.g. 'Lounge 5400 x 3200') out of plan text.
+
+    Dimensions in metres, millimetres or comma-grouped figures are converted to
+    metres and labelled with the room they belong to. Only clearly labelled rooms
+    large enough to be painted spaces are returned, so schedule/sheet sizes do
+    not pollute the take-off.
+    """
+    lines = [re.sub(r"\s+", " ", x).strip() for x in (text or "").splitlines()]
+    dim_re = re.compile(
+        r"(?P<d1>\d{1,5}(?:[.,]\d{1,3})?)\s*(?:m|mm|metres?|meters?)?\s*"
+        r"[x×]\s*"
+        r"(?P<d2>\d{1,5}(?:[.,]\d{1,3})?)\s*(?:m|mm|metres?|meters?)?",
+        re.I,
+    )
+    results: List[Dict[str, Any]] = []
+    for i, line in enumerate(lines):
+        prev_end = 0
+        for m in dim_re.finditer(line):
+            d1, d2 = _parse_dimension(m.group("d1")), _parse_dimension(m.group("d2"))
+            if d1 is None or d2 is None:
+                continue
+            dims = _normalise_dims(d1, d2)
+            if dims is None:
+                continue
+            d1m, d2m = dims
+            area = round(d1m * d2m, 2)
+            if area < 2.0 or d1m > 50 or d2m > 50 or area > 2500:
+                prev_end = m.end()
+                continue
+            label = _room_label(line[prev_end:m.start()].strip(" -:,"), lines, i)
+            if label == "Room":
+                prev_end = m.end()
+                continue
+            results.append({
+                "room": label,
+                "dim1_m": d1m,
+                "dim2_m": d2m,
+                "area_m2": area,
+                "source": line[:250],
+            })
+            prev_end = m.end()
+            if len(results) >= 250:
+                return results
+    return results
+
+
 def infer_project_info(all_text: str, filenames: List[str]) -> Dict[str, str]:
     text = re.sub(r"\s+", " ", all_text or " ")
     first_lines = [l.strip() for l in (all_text or "").splitlines() if l.strip()][:100]
@@ -247,6 +357,7 @@ def analyse_pdf(path: Path, render_pages: bool = False, dpi: int = 150) -> Dict[
     all_text_parts = []
     paint_snips = []
     area_candidates = []
+    room_rows = []
     converted = []
     conv_dir = path.parent.parent / "converted_images" / path.stem
     conv_dir.mkdir(parents=True, exist_ok=True)
@@ -268,6 +379,9 @@ def analyse_pdf(path: Path, render_pages: bool = False, dpi: int = 150) -> Dict[
         for c in extract_area_candidates(text):
             c.update({"file": path.name, "page": idx + 1})
             area_candidates.append(c)
+        for r in extract_room_dimensions(text):
+            r.update({"file": path.name, "page": idx + 1})
+            room_rows.append(r)
         if render_pages:
             pix = page.get_pixmap(matrix=fitz.Matrix(dpi / 72, dpi / 72), alpha=False)
             img_path = conv_dir / f"{path.stem}_page_{idx+1:03d}.png"
@@ -282,6 +396,7 @@ def analyse_pdf(path: Path, render_pages: bool = False, dpi: int = 150) -> Dict[
         "all_text": "\n".join(all_text_parts),
         "painting_snippets": paint_snips[:500],
         "area_candidates": area_candidates[:500],
+        "rooms": room_rows[:250],
         "converted_images": converted,
     }
 
@@ -301,14 +416,99 @@ def detect_substrate_from_text(text: str) -> Tuple[str, str, str]:
     return "Painting item", "General", "Internal"
 
 
+def compute_room_takeoff_rows(
+    rooms: List[Dict[str, Any]],
+    ceiling_height: float = DEFAULT_CEILING_HEIGHT_M,
+    openings_allowance_m2: float = DEFAULT_OPENINGS_ALLOWANCE_M2,
+) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    allowance = max(float(openings_allowance_m2 or 0), 0.0)
+    for r in rooms or []:
+        room = str(r.get("room") or "Room").strip() or "Room"
+        d1 = float(r.get("dim1_m") or 0)
+        d2 = float(r.get("dim2_m") or 0)
+        if d1 <= 0 or d2 <= 0:
+            continue
+        perimeter = 2 * (d1 + d2)
+        area = round(d1 * d2, 2)
+        wall_area = round(max(perimeter * float(ceiling_height) - allowance, 0.0), 2)
+        note = f"Room dimension {room}: {d1:g} x {d2:g} m"
+        rows.append({
+            "internal_external": "Internal",
+            "area_location": room,
+            "substrate": "Internal walls",
+            "labour_category": "Walls",
+            "qty_m2": wall_area,
+            "lineal_m": 0.0,
+            "count": 0,
+            "coats": 2,
+            "rate_ex_gst": 0.0,
+            "labour_hours": 0.0,
+            "paint_litres": litres_from_area(wall_area, 2),
+            "source_note": note,
+            "confidence": "Computed from room dimensions",
+        })
+        rows.append({
+            "internal_external": "Internal",
+            "area_location": room,
+            "substrate": "Internal ceilings",
+            "labour_category": "Ceilings",
+            "qty_m2": area,
+            "lineal_m": 0.0,
+            "count": 0,
+            "coats": 2,
+            "rate_ex_gst": 0.0,
+            "labour_hours": 0.0,
+            "paint_litres": litres_from_area(area, 2),
+            "source_note": note,
+            "confidence": "Computed from room dimensions",
+        })
+    return rows
+
+
 def build_takeoff_from_analysis(analysis: Dict[str, Any]) -> pd.DataFrame:
     rows = []
     seen = set()
+    rooms = analysis.get("rooms", [])
     snippets = analysis.get("painting_snippets", [])
     area_candidates = analysis.get("area_candidates", [])
-    # First use area lines that mention paint/finish words.
+    # Computed wall/ceiling areas from room dimensions come first (highest confidence).
+    for r in compute_room_takeoff_rows(rooms):
+        key = (r["substrate"], round(r["qty_m2"], 2), r["source_note"][:60])
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append(r)
+    # Lineal quantities for trims first, then m² text quantities for painted areas.
     for cand in area_candidates:
         source = cand.get("source", "")
+        low_source = source.lower()
+        if cand.get("unit") == "lm":
+            if any(k in low_source for k in PAINT_KEYWORDS) and any(
+                t in low_source
+                for t in ["skirting", "architrave", "trim", "scotia", "cornice", "picture rail", "shadow"]
+            ):
+                substrate, labour_cat, int_ext = detect_substrate_from_text(source)
+                key = (substrate, round(float(cand.get("qty", 0)), 2), source[:60])
+                if key in seen:
+                    continue
+                seen.add(key)
+                rows.append({
+                    "internal_external": int_ext,
+                    "area_location": f"{Path(cand.get('file','')).stem} p{cand.get('page','')}",
+                    "substrate": substrate,
+                    "labour_category": labour_cat,
+                    "qty_m2": 0.0,
+                    "lineal_m": float(cand.get("qty", 0)),
+                    "count": 0,
+                    "coats": 2,
+                    "rate_ex_gst": 0.0,
+                    "labour_hours": 0.0,
+                    "paint_litres": 0.0,
+                    "source_note": source[:250],
+                    "confidence": "Medium - lineal quantity found",
+                })
+            continue
         if cand.get("unit") != "m²":
             continue
         if not any(k in source.lower() for k in PAINT_KEYWORDS):
@@ -566,12 +766,14 @@ def process_uploads_page(job_id: str):
         job["analyses"] = analyses
         job["last_combined_text"] = combined_text[:200000]
         # Build take-off rows from all analyses.
-        combined_analysis = {"painting_snippets": [], "area_candidates": []}
+        combined_analysis = {"painting_snippets": [], "area_candidates": [], "rooms": []}
         for a in analyses:
             combined_analysis["painting_snippets"].extend(a.get("painting_snippets", []))
             combined_analysis["area_candidates"].extend(a.get("area_candidates", []))
+            combined_analysis["rooms"].extend(a.get("rooms", []))
         df = build_takeoff_from_analysis(combined_analysis)
         job["takeoff_rows"] = df.to_dict("records")
+        job["rooms"] = combined_analysis["rooms"]
         if run_ai:
             job["ai_summary"] = run_optional_ai_extract(combined_text)
         save_job(job_id, job)
@@ -600,6 +802,7 @@ def overview_page(job_id: str):
         ("PDF pages read", len(pages)),
         ("Painting lines found", len(snippets)),
         ("Area/lineal quantities found", len(areas)),
+        ("Rooms detected", len(job.get("rooms", []))),
         ("Take-off rows", len(job.get("takeoff_rows", []))),
     ]:
         st.markdown(f"<div class='metric-box'><div class='big'>{value}</div><div class='label'>{label}</div></div>", unsafe_allow_html=True)
@@ -673,10 +876,53 @@ def takeoff_page(job_id: str):
         },
         key=f"takeoff_editor_{job_id}",
     )
+    st.markdown("#### Room dimension take-off")
+    rooms = job.get("rooms", [])
+    st.caption("Rooms detected from dimension text on the plans. Edit sizes, set ceiling height and door/window opening allowance, then rebuild wall/ceiling rows. Computed rows replace any existing wall/ceiling rows for the same room.")
+    room_df = pd.DataFrame(rooms) if rooms else pd.DataFrame(columns=["room", "dim1_m", "dim2_m"])
+    room_cols = ["room", "dim1_m", "dim2_m"] + ([c for c in ["area_m2", "page"] if c in room_df.columns])
+    for col in room_cols:
+        if col not in room_df.columns:
+            room_df[col] = 0.0 if col in ["dim1_m", "dim2_m", "area_m2", "page"] else ""
+    edited_rooms = st.data_editor(
+        room_df[room_cols],
+        width="stretch",
+        num_rows="dynamic",
+        height=220,
+        column_config={
+            "room": st.column_config.TextColumn("Room"),
+            "dim1_m": st.column_config.NumberColumn("Dim 1 (m)", min_value=0.0, step=0.1),
+            "dim2_m": st.column_config.NumberColumn("Dim 2 (m)", min_value=0.0, step=0.1),
+            "area_m2": st.column_config.NumberColumn("Area m²", min_value=0.0, step=0.1, disabled=True),
+            "page": st.column_config.NumberColumn("Page", min_value=0, step=1, disabled=True),
+        },
+        key=f"rooms_editor_{job_id}",
+    )
+    c_h, c_o, c_cov = st.columns(3)
+    ceiling_height = c_h.number_input("Ceiling height (m)", min_value=2.1, max_value=4.5, value=DEFAULT_CEILING_HEIGHT_M, step=0.1, key=f"pr_ceiling_{job_id}")
+    opening_allowance = c_o.number_input("Door/window opening allowance per room (m²)", min_value=0.0, max_value=20.0, value=DEFAULT_OPENINGS_ALLOWANCE_M2, step=0.5, key=f"pr_openings_{job_id}")
+    coverage = c_cov.number_input("Paint coverage (m²/L)", min_value=6.0, max_value=20.0, value=DEFAULT_COVERAGE_M2_PER_L, step=0.5, key=f"pr_coverage_{job_id}")
+    if st.button("Build wall / ceiling rows from rooms", type="secondary"):
+        room_records = edited_rooms.to_dict("records")
+        computed = compute_room_takeoff_rows(room_records, ceiling_height=ceiling_height, openings_allowance_m2=opening_allowance)
+        computed_map = {(r["substrate"], str(r["area_location"])): r for r in computed}
+        current = edited.to_dict("records")
+        keep = []
+        for r in current:
+            key = (r.get("substrate"), str(r.get("area_location", "")))
+            if key in computed_map:
+                continue
+            keep.append(r)
+        keep.extend(computed_map.values())
+        job["takeoff_rows"] = keep
+        job["rooms"] = room_records
+        save_job(job_id, job)
+        st.success(f"Rebuilt {len(computed)} wall/ceiling rows from {len(room_records)} rooms.")
+        st.rerun()
     col1, col2, col3 = st.columns(3)
     with col1:
         if st.button("Recalculate paint litres", type="secondary"):
-            edited["paint_litres"] = edited.apply(lambda r: litres_from_area(r.get("qty_m2", 0), r.get("coats", 2)), axis=1)
+            edited["paint_litres"] = edited.apply(lambda r: litres_from_area(r.get("qty_m2", 0), r.get("coats", 2), coverage), axis=1)
             job["takeoff_rows"] = edited.to_dict("records")
             save_job(job_id, job)
             st.success("Paint litres recalculated.")
@@ -768,6 +1014,7 @@ def export_page(job_id: str):
         "Drawing Pages": pd.DataFrame(pages),
         "Painting Lines Found": pd.DataFrame(snippets),
         "Quantities Found": pd.DataFrame(areas),
+        "Rooms Detected": pd.DataFrame(job.get("rooms", [])),
         "Takeoff Draft": pd.DataFrame(job.get("takeoff_rows", [])),
     }
     excel = df_to_excel_bytes({k: v for k, v in sheets.items() if not v.empty})

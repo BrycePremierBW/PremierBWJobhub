@@ -1,5 +1,18 @@
 # JobHub secured release
 
+## 2026-08-05 - PlanReader take-off precision
+
+- PlanReader now extracts labelled room dimensions from plan text (e.g.
+  "Lounge 5400 x 3200") and converts them into computed internal wall and
+  ceiling areas using configurable ceiling height and door/window opening
+  allowances, replacing the manual "to be measured" buckets for those rooms.
+- Rooms are editable in the Take-off Draft page and rows can be rebuilt after
+  changing room sizes, ceiling height or opening allowance.
+- Lineal quantities for skirting/architrave/trim are now turned into take-off
+  rows instead of being dropped.
+- Paint coverage (m²/L) is configurable when recalculating litres.
+- Added room detection to the overview metrics and the Excel export pack.
+
 ## 2026-08-05 - v1.0.0
 
 - Fixed the login flow so a successful submit renders the app in the same run
