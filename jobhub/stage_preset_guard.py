@@ -187,8 +187,10 @@ def _is_add_stage_name_input(label: Any, kwargs: dict[str, Any]) -> bool:
 
 
 def _is_add_stage_percent_input(label: Any, kwargs: dict[str, Any]) -> bool:
+    widget_key = str(kwargs.get("key") or "")
     return (
         str(label or "") == "Job %"
+        and widget_key.startswith("add_job_stage_percent_")
         and float(kwargs.get("value", 0.0) or 0.0) == 0.0
         and float(kwargs.get("max_value", 0.0) or 0.0) >= 100.0
     )
