@@ -387,6 +387,7 @@ def analyse_pdf(path: Path, render_pages: bool = False, dpi: int = 150) -> Dict[
             img_path = conv_dir / f"{path.stem}_page_{idx+1:03d}.png"
             pix.save(str(img_path))
             converted.append(str(img_path))
+            rec["image_path"] = str(img_path)
     doc.close()
     return {
         "file": path.name,
@@ -631,6 +632,157 @@ TEXT:
         return f"OpenAI request failed: {e}"
 
 
+def normalise_progress(value: Any) -> float:
+    try:
+        p = float(value)
+    except (TypeError, ValueError):
+        p = 0.0
+    if p < 0:
+        p = 0.0
+    if p > 100:
+        p = 100.0
+    return round(p, 1)
+
+
+def zone_colour(progress: float) -> Tuple[int, int, int]:
+    p = normalise_progress(progress)
+    if p == 0:
+        return (128, 128, 128)
+    if p < 50:
+        return (230, 140, 30)
+    if p < 100:
+        return (255, 180, 0)
+    return (0, 150, 60)
+
+
+def zone_rect_px(zone: Dict[str, Any], width: int, height: int) -> Tuple[int, int, int, int]:
+    def val(key: str, default: float) -> float:
+        try:
+            return float(zone.get(key, default))
+        except (TypeError, ValueError):
+            return float(default)
+
+    x = round(val("x", 0.0) / 100.0 * width)
+    y = round(val("y", 0.0) / 100.0 * height)
+    w = round(val("w", 0.0) / 100.0 * width)
+    h = round(val("h", 0.0) / 100.0 * height)
+    x = max(0, min(x, width - 1))
+    y = max(0, min(y, height - 1))
+    w = max(0, min(w, width - x))
+    h = max(0, min(h, height - y))
+    return (x, y, w, h)
+
+
+def render_elevation_overlay(
+    image_path: str,
+    zones: List[Dict[str, Any]],
+    out_path: str,
+    overall_progress: float = 0.0,
+) -> Path:
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError:
+        raise ImportError(
+            "Pillow is required to render elevation progress overlays. Install it with: pip install Pillow"
+        ) from None
+    img = Image.open(image_path).convert("RGB")
+    width, height = img.size
+    overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    font = ImageFont.load_default()
+    for z in zones or []:
+        label = str(z.get("label") or "").strip()
+        x, y, w, h = zone_rect_px(z, width, height)
+        colour = zone_colour(normalise_progress(z.get("progress", 0)))
+        draw.rectangle([x, y, x + w, y + h], fill=colour + (120,), outline=(255, 255, 255, 220), width=2)
+        if label:
+            tb = draw.textbbox((x + 4, y + 4), label, font=font)
+            pad = 3
+            draw.rectangle([tb[0] - pad, tb[1] - pad, tb[2] + pad, tb[3] + pad], fill=(20, 20, 20, 200))
+            draw.text((x + 4, y + 4), label, fill=(255, 255, 255, 255), font=font)
+    header = 46
+    draw.rectangle([0, 0, width, header], fill=zone_colour(normalise_progress(overall_progress)) + (210,))
+    draw.text((10, 14), f"Elevation progress: {normalise_progress(overall_progress):g}%", fill=(255, 255, 255, 255), font=font)
+    composed = Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
+    out = Path(out_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    composed.save(str(out))
+    return out
+
+
+def build_elevation_board(entries: List[Tuple[str, str, Any]], out_path: str, cols: int = 2) -> Path | None:
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError:
+        raise ImportError(
+            "Pillow is required to build the elevation progress board. Install it with: pip install Pillow"
+        ) from None
+    cell_w = 900
+    caption_h = 44
+    gap = 24
+    margin = 24
+    cells = []
+    for img_path, label, progress in entries:
+        try:
+            im = Image.open(img_path).convert("RGB")
+        except Exception:
+            continue
+        scale = cell_w / im.width if im.width > 0 else 1.0
+        cell_h = round(im.height * scale)
+        cells.append({"im": im, "label": label, "progress": normalise_progress(progress), "h": cell_h})
+    if not cells:
+        return None
+    block_h = max(c["h"] for c in cells) + caption_h
+    ncols = min(cols, len(cells))
+    nrows = (len(cells) + ncols - 1) // ncols
+    canvas_w = margin * 2 + ncols * cell_w + (ncols - 1) * gap
+    canvas_h = margin * 2 + nrows * block_h + (nrows - 1) * gap
+    canvas = Image.new("RGB", (canvas_w, canvas_h), (245, 245, 245))
+    draw = ImageDraw.Draw(canvas)
+    font = ImageFont.load_default()
+    for i, c in enumerate(cells):
+        col = i % ncols
+        row = i // ncols
+        x0 = margin + col * (cell_w + gap)
+        y0 = margin + row * (block_h + gap)
+        im = c["im"].resize((cell_w, c["h"]), Image.Resampling.LANCZOS)
+        canvas.paste(im, (x0, y0))
+        bar = zone_colour(c["progress"])
+        draw.rectangle([x0, y0 + c["h"], x0 + cell_w, y0 + c["h"] + caption_h], fill=bar)
+        label = str(c["label"] or "Elevation")[:80]
+        draw.text((x0 + 8, y0 + c["h"] + 15), f"{label} - {c['progress']:g}%", fill=(255, 255, 255, 255), font=font)
+    out = Path(out_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    canvas.save(str(out))
+    return out
+
+
+def elevation_image_options(job: Dict[str, Any]) -> List[Dict[str, str]]:
+    seen = set()
+    out = []
+    for a in job.get("analyses", []):
+        for p in a.get("pages", []):
+            if p.get("page_type") != "elevation":
+                continue
+            ip = p.get("image_path") or ""
+            if not ip or ip in seen or not Path(ip).exists():
+                continue
+            seen.add(ip)
+            out.append({
+                "label": f"{a.get('file','')} - {p.get('title') or 'Elevation'} (p{p.get('page')})",
+                "image_path": ip,
+            })
+    for f in job.get("files", []):
+        if f.get("category") != "Drawing image":
+            continue
+        ip = f.get("path") or ""
+        if not ip or ip in seen or not Path(ip).exists():
+            continue
+        seen.add(ip)
+        out.append({"label": f.get("name", "Elevation image"), "image_path": ip})
+    return out
+
+
 def df_to_excel_bytes(sheets: Dict[str, pd.DataFrame]) -> bytes:
     out = io.BytesIO()
     with pd.ExcelWriter(out, engine="openpyxl") as writer:
@@ -774,6 +926,17 @@ def process_uploads_page(job_id: str):
         df = build_takeoff_from_analysis(combined_analysis)
         job["takeoff_rows"] = df.to_dict("records")
         job["rooms"] = combined_analysis["rooms"]
+        opts = elevation_image_options(job)
+        if opts:
+            try:
+                board = build_elevation_board(
+                    [(o["image_path"], o["label"], 0) for o in opts],
+                    str(job_dir(job_id) / "rendered_progress" / "elevation_board.png"),
+                )
+                if board:
+                    job["elevation_board"] = str(board)
+            except ImportError:
+                pass
         if run_ai:
             job["ai_summary"] = run_optional_ai_extract(combined_text)
         save_job(job_id, job)
@@ -803,6 +966,7 @@ def overview_page(job_id: str):
         ("Painting lines found", len(snippets)),
         ("Area/lineal quantities found", len(areas)),
         ("Rooms detected", len(job.get("rooms", []))),
+        ("Elevations tracked", len(job.get("elevation_progress", {}))),
         ("Take-off rows", len(job.get("takeoff_rows", []))),
     ]:
         st.markdown(f"<div class='metric-box'><div class='big'>{value}</div><div class='label'>{label}</div></div>", unsafe_allow_html=True)
@@ -946,6 +1110,114 @@ def takeoff_page(job_id: str):
     st.markdown("</div>", unsafe_allow_html=True)
 
 
+def progress_page(job_id: str):
+    job = load_job(job_id)
+    st.markdown("<div class='pb-card'>", unsafe_allow_html=True)
+    st.subheader("Elevation progress tracker")
+    st.caption("Rendered external elevations become a visual progress tracker. Mark painted/unpainted zones per elevation (zone positions are stored as exact percentages), then build a progress board for the whole house.")
+    options = elevation_image_options(job)
+    if not options:
+        st.warning("No elevation drawing images yet. Upload PDF plans and tick 'Convert PDF pages to PNG' (elevation pages are rendered automatically), or upload elevation images directly.")
+        st.markdown("</div>", unsafe_allow_html=True)
+        return
+    labels = [o["label"] for o in options]
+    selected = st.selectbox("Elevation", labels, index=0)
+    opt = next((o for o in options if o["label"] == selected), options[0])
+    img_path = opt["image_path"]
+    state = job.get("elevation_progress", {}).get(img_path, {})
+    zones = list(state.get("zones", []) or [])
+    overall = float(state.get("progress", 0.0))
+    st.image(img_path, caption=opt["label"], width="stretch")
+
+    st.markdown("#### Zones")
+    st.caption("Zone coords are percentages of the image (0-100, up to 4 decimals). x/y = top-left corner, w/h = width/height. Colours: grey = not started, amber = <50%, orange = <100%, green = done.")
+    zone_df = pd.DataFrame(zones) if zones else pd.DataFrame(columns=["label", "x", "y", "w", "h", "progress"])
+    for col in ["label", "x", "y", "w", "h", "progress"]:
+        if col not in zone_df.columns:
+            zone_df[col] = "" if col == "label" else 0.0
+    edited_zones = st.data_editor(
+        zone_df[["label", "x", "y", "w", "h", "progress"]],
+        width="stretch",
+        num_rows="dynamic",
+        height=200,
+        column_config={
+            "label": st.column_config.TextColumn("Zone label"),
+            "x": st.column_config.NumberColumn("x %", min_value=0.0, max_value=100.0, step=0.1, format="%.4f"),
+            "y": st.column_config.NumberColumn("y %", min_value=0.0, max_value=100.0, step=0.1, format="%.4f"),
+            "w": st.column_config.NumberColumn("w %", min_value=0.0, max_value=100.0, step=0.1, format="%.4f"),
+            "h": st.column_config.NumberColumn("h %", min_value=0.0, max_value=100.0, step=0.1, format="%.4f"),
+            "progress": st.column_config.NumberColumn("Progress %", min_value=0.0, max_value=100.0, step=1.0),
+        },
+        key=f"zones_editor_{job_id}",
+    )
+    zone_records = edited_zones.where(edited_zones.notna(), None).to_dict("records")
+    zone_records = [z for z in zone_records if (str(z.get("label") or "").strip() or (z.get("w") or 0) > 0)]
+    for z in zone_records:
+        z["progress"] = normalise_progress(z.get("progress", 0))
+        z["label"] = str(z.get("label") or "").strip()[:60]
+    c1, c2, c3 = st.columns(3)
+    overall_slider = c1.slider("Overall elevation progress %", 0, 100, int(overall), step=1, key=f"pr_overall_{job_id}")
+    if c2.button("Set all zones to overall %", type="secondary"):
+        for z in zone_records:
+            z["progress"] = normalise_progress(overall_slider)
+        job.setdefault("elevation_progress", {})[img_path] = {
+            "progress": normalise_progress(overall_slider),
+            "zones": zone_records,
+            "updated_at": now_stamp(),
+        }
+        save_job(job_id, job)
+        st.rerun()
+    if c3.button("Save progress state", type="secondary"):
+        job.setdefault("elevation_progress", {})[img_path] = {
+            "progress": normalise_progress(overall_slider),
+            "zones": zone_records,
+            "updated_at": now_stamp(),
+        }
+        save_job(job_id, job)
+        st.success("Elevation progress saved.")
+
+    st.markdown("#### Renders")
+    render_dir = job_dir(job_id) / "rendered_progress"
+    overlay_path = render_dir / f"{safe_name(Path(img_path).stem, 'elevation')}_overlay.png"
+    if st.button("Render elevation overlay", type="primary"):
+        try:
+            render_elevation_overlay(img_path, zone_records, str(overlay_path), overall_slider)
+            job.setdefault("elevation_progress", {})[img_path] = {
+                "progress": normalise_progress(overall_slider),
+                "zones": zone_records,
+                "updated_at": now_stamp(),
+            }
+            save_job(job_id, job)
+            st.success(f"Overlay rendered to {overlay_path.name}")
+        except ImportError as e:
+            st.error(str(e))
+    if overlay_path.exists():
+        st.image(str(overlay_path), caption=overlay_path.name, width="stretch")
+        file_download_button(overlay_path, "Download overlay PNG")
+
+    board_path = render_dir / "elevation_board.png"
+    if st.button("Build elevation progress board", type="secondary"):
+        progress_state = job.get("elevation_progress", {})
+        entries = []
+        for o in options:
+            entry = progress_state.get(o["image_path"], {})
+            entries.append((o["image_path"], o["label"], entry.get("progress", 0)))
+        try:
+            board = build_elevation_board(entries, str(board_path))
+            if board:
+                job["elevation_board"] = str(board)
+                save_job(job_id, job)
+                st.success("Elevation progress board built.")
+            else:
+                st.warning("No elevation images could be opened to build the board.")
+        except ImportError as e:
+            st.error(str(e))
+    if board_path.exists():
+        st.image(str(board_path), caption=board_path.name, width="stretch")
+        file_download_button(board_path, "Download board PNG")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
 def images_page(job_id: str):
     job = load_job(job_id)
     st.markdown("<div class='pb-card'>", unsafe_allow_html=True)
@@ -1015,6 +1287,15 @@ def export_page(job_id: str):
         "Painting Lines Found": pd.DataFrame(snippets),
         "Quantities Found": pd.DataFrame(areas),
         "Rooms Detected": pd.DataFrame(job.get("rooms", [])),
+        "Elevation Progress": pd.DataFrame([
+            {
+                "image_path": img_path,
+                "progress": entry.get("progress", 0),
+                "zones": json.dumps(entry.get("zones", [])),
+                "updated_at": entry.get("updated_at", ""),
+            }
+            for img_path, entry in (job.get("elevation_progress", {}) or {}).items()
+        ]),
         "Takeoff Draft": pd.DataFrame(job.get("takeoff_rows", [])),
     }
     excel = df_to_excel_bytes({k: v for k, v in sheets.items() if not v.empty})
@@ -1052,6 +1333,7 @@ def main():
             "Upload Plans",
             "Extracted Info",
             "Take-off Draft",
+            "Progress Tracking",
             "Converted Images",
             "File Manager",
             "Export",
@@ -1065,6 +1347,8 @@ def main():
         overview_page(job_id)
     elif menu == "Take-off Draft":
         takeoff_page(job_id)
+    elif menu == "Progress Tracking":
+        progress_page(job_id)
     elif menu == "Converted Images":
         images_page(job_id)
     elif menu == "File Manager":

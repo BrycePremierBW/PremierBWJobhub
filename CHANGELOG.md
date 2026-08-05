@@ -1,5 +1,17 @@
 # JobHub secured release
 
+## 2026-08-05 - PlanReader elevation progress tracker
+
+- Rendered elevation drawing pages are now tagged so they can be used as a
+  visual progress tracker. A new Progress Tracking page marks painted/unpainted
+  zones per elevation with colour-coded overlays (grey/amber/orange/green by
+  completion) and builds a whole-house elevation progress board.
+- Zone geometry is stored as exact percentage coords and converted to pixels
+  deterministically at render time; overall and per-zone progress persist with
+  the job.
+- A progress board is built automatically when plans are imported, and elevation
+  progress is included in the Excel export pack.
+
 ## 2026-08-05 - PlanReader take-off precision
 
 - PlanReader now extracts labelled room dimensions from plan text (e.g.
