@@ -27,6 +27,8 @@ import streamlit as st
 from jobhub_feedback import error as pb_error, replay_pending as pb_replay_pending, rerun as pb_rerun, success as pb_success
 from jobhub_time import jobhub_today
 from pb_jobhub_visual_scheduler import (
+    assignment_rows,
+    has_approved_leave,
     init_linked_schema,
     render_job_folder_schedule_editor,
     render_jobhub_staff_scheduler,
@@ -229,18 +231,33 @@ ensure_runtime_storage()
 
 @st.cache_resource(show_spinner=False)
 def ensure_mobile_web_assets():
-    """Publish the existing square logo at a stable PWA icon URL."""
+    """Publish the existing square logo at stable PWA icon URLs (192/512/300)."""
     try:
         source = Path(PB_LOGO_BACKGROUND_IMAGE)
-        target = Path(PB_PWA_ICON)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if source.exists() and (
-            not target.exists()
-            or source.stat().st_size != target.stat().st_size
-            or source.read_bytes() != target.read_bytes()
-        ):
-            shutil.copyfile(source, target)
-        return target.exists()
+        source_bytes = source.read_bytes() if source.exists() else b""
+        if not source_bytes:
+            return False
+
+        targets = {
+            192: os.path.join(STATIC_DIR, "PB_JobHub_Icon_192.png"),
+            512: os.path.join(STATIC_DIR, "PB_JobHub_Icon_512.png"),
+            300: PB_PWA_ICON,
+        }
+        for size, target_path in targets.items():
+            target = Path(target_path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.exists() and target.read_bytes() == source_bytes:
+                continue
+            try:
+                image = Image.open(source)
+                resized = ImageOps.fit(
+                    image.convert("RGBA"), (size, size), method=Image.LANCZOS
+                )
+                resized.save(target, format="PNG")
+            except Exception:
+                if not target.exists():
+                    shutil.copyfile(source, target)
+        return Path(PB_PWA_ICON).exists()
     except OSError:
         # Android and desktop web push still work without the install icon. The
         # public manifest remains available and the next restart retries.
@@ -292,7 +309,7 @@ def install_mobile_app_shell():
             touchIcon.rel = 'apple-touch-icon';
             head.appendChild(touchIcon);
           }
-          touchIcon.href = '/app/static/PB_JobHub_Icon.png';
+          touchIcon.href = '/app/static/PB_JobHub_Icon_192.png';
         })();
         </script>
         """,
@@ -311,8 +328,11 @@ install_mobile_app_shell()
 PB_MENU_ICONS = {
     "Dashboard": "🏠",
     "Control Centre": "🎯",
+    "Operations Hub": "🧭",
     "Jobs": "🧾",
     "Job Folders": "📁",
+    "Upload PO": "📤",
+    "Field Mode": "📱",
     "Estimating": "💰",
     "Site Operations": "🛠️",
     "Reports": "📊",
@@ -3354,11 +3374,11 @@ def render_phone_push_opt_in(user, key_prefix="phone_push"):
               );
               button.disabled = false;
               button.textContent = subscribed
-                ? 'Phone notifications enabled'
+                ? 'Disable notifications on this device'
                 : 'Enable phone notifications on this device';
               setStatus(
                 subscribed
-                  ? 'This device is registered to receive JobHub notifications.'
+                  ? 'This device is registered to receive JobHub notifications. Tap the button to disable.'
                   : 'Tap the button, then allow notifications when your phone asks.',
                 subscribed ? '#1f7a4d' : '#5f574f'
               );
@@ -3382,6 +3402,18 @@ def render_phone_push_opt_in(user, key_prefix="phone_push"):
             button.disabled = true;
             setStatus('Waiting for your phone or browser permission…');
             try {{
+              const currentlySubscribed = Boolean(
+                OneSignal.Notifications.permission
+                && OneSignal.User.PushSubscription.optedIn
+                && OneSignal.User.PushSubscription.id
+              );
+              if (currentlySubscribed) {{
+                setStatus('Disabling notifications on this device…');
+                await OneSignal.User.PushSubscription.optOut();
+                await new Promise((resolve) => setTimeout(resolve, 700));
+                await showSubscriptionState();
+                return;
+              }}
               if (!OneSignal.Notifications.permission) {{
                 await OneSignal.Notifications.requestPermission();
               }}
@@ -7198,17 +7230,219 @@ def calculate_hours_from_times(start_time, finish_time, break_minutes):
         return 0.0
 
 
-def review_acceptance_checkbox(key_prefix, payload, label):
-    """Reset confirmation whenever any reviewed value changes."""
-    fingerprint = hashlib.sha256(
-        json.dumps(payload, default=str, sort_keys=True).encode("utf-8")
-    ).hexdigest()
-    fingerprint_key = f"{key_prefix}_review_fingerprint"
-    accepted_key = f"{key_prefix}_review_accepted"
-    if st.session_state.get(fingerprint_key) != fingerprint:
-        st.session_state[fingerprint_key] = fingerprint
-        st.session_state[accepted_key] = False
-    return st.checkbox(label, key=accepted_key)
+def missed_timesheet_days(employee_id, lookback_days=21):
+    """Scheduled shifts that never received a timesheet entry.
+
+    Uses the staff roster (``staff_schedule``) to decide which work days are
+    "expected", then compares against ``timesheet_entries``. Approved leave and
+    any day that already has a timesheet are excluded, so the result is a safe
+    catch-up list of genuine misses.
+    """
+    if not employee_id:
+        return []
+    try:
+        employee_id = int(employee_id)
+    except (TypeError, ValueError):
+        return []
+    window_end = jobhub_today()
+    window_start = window_end - timedelta(days=max(1, int(lookback_days)))
+    try:
+        scheduled = assignment_rows(window_start, window_end, employee_id=employee_id)
+    except Exception:
+        return []
+    if scheduled is None or scheduled.empty:
+        return []
+
+    submitted_df = df_query(
+        """
+        SELECT DISTINCT work_date FROM timesheet_entries
+        WHERE employee_id = ?
+          AND work_date BETWEEN ? AND ?
+        """,
+        (employee_id, window_start.isoformat(), window_end.isoformat()),
+    )
+    submitted_dates = (
+        set(submitted_df["work_date"].astype(str))
+        if submitted_df is not None and not submitted_df.empty
+        else set()
+    )
+
+    missed = []
+    for _, row in scheduled.iterrows():
+        work_date = str(row.get("schedule_date") or "").strip()
+        if not work_date:
+            continue
+        if work_date in submitted_dates:
+            continue
+        try:
+            work_day = date.fromisoformat(work_date)
+        except ValueError:
+            continue
+        try:
+            if has_approved_leave(employee_id, work_day):
+                continue
+        except Exception:
+            pass
+
+        stage_id = row.get("job_stage_id")
+        try:
+            stage_id = int(stage_id) if stage_id not in (None, "", 0) else None
+        except (TypeError, ValueError):
+            stage_id = None
+        missed.append({
+            "work_date": work_date,
+            "job_id": int(row.get("job_id") or 0),
+            "job_no": str(row.get("job_no") or ""),
+            "job_name": str(row.get("job_name") or ""),
+            "stage_id": stage_id,
+            "stage_name": str(row.get("stage_name") or "Whole Job"),
+            "start_time": str(row.get("start_time") or "07:00")[:5],
+            "finish_time": str(row.get("finish_time") or "15:00")[:5],
+            "planned_hours": float(row.get("planned_hours") or 0),
+            "site_role": str(row.get("site_role") or "Site Work"),
+        })
+    missed.sort(key=lambda item: (item["work_date"], item["job_no"], item["job_id"]))
+    return missed
+
+
+def render_missed_timesheet_catchup(
+    employee_id,
+    key_prefix="missed_timesheet",
+    include_name_header=True,
+):
+    """Quick catch-up for scheduled shifts with no timesheet yet.
+
+    Pre-fills the roster's start/finish and job/stage, lets the employee (or an
+    admin on their behalf) adjust the shift details, and submits each missed day
+    through the normal ``save_timesheet_entry`` path.
+    """
+    if not employee_id:
+        st.info("Select an employee to see missed timesheets.")
+        return
+    missed = missed_timesheet_days(employee_id)
+    if not missed:
+        st.success(
+            "No missed timesheets detected. Every scheduled shift in the last "
+            "21 days has a timesheet."
+        )
+        return
+
+    if include_name_header:
+        employee_name = "Employee"
+        name_df = df_query(
+            "SELECT name FROM employees WHERE id = ?",
+            (int(employee_id),),
+        )
+        if name_df is not None and not name_df.empty:
+            employee_name = str(name_df.iloc[0]["name"])
+        st.markdown(f"#### Generate missed timesheets for {employee_name}")
+
+    st.caption(
+        f"{len(missed)} scheduled shift(s) in the last 21 days have no timesheet. "
+        "Shifts shown use the rostered start/finish and can be adjusted before submitting."
+    )
+
+    work_type_options = ["Painting", "Prep", "Spraying", "Touch-ups", "Travel", "Site Setup", "Other"]
+    submitted_count = 0
+    for index, item in enumerate(missed):
+        row_key = f"{key_prefix}_{index}"
+        with st.container(border=True):
+            header_line = f"{item['work_date']} — {item['job_no']} {item['job_name']}".strip()
+            if item["stage_name"]:
+                header_line += f" — {item['stage_name']}"
+            if item["site_role"]:
+                header_line += f" — {item['site_role']}"
+            st.markdown(f"**{header_line}**")
+
+            try:
+                default_start = datetime.strptime(item["start_time"], "%H:%M").time()
+            except ValueError:
+                default_start = time(7, 0)
+            try:
+                default_finish = datetime.strptime(item["finish_time"], "%H:%M").time()
+            except ValueError:
+                default_finish = time(15, 0)
+
+            start_col, finish_col, break_col = st.columns(3)
+            start_value = start_col.time_input(
+                "Start",
+                value=default_start,
+                step=timedelta(minutes=15),
+                key=f"{row_key}_start",
+            )
+            finish_value = finish_col.time_input(
+                "Finish",
+                value=default_finish,
+                step=timedelta(minutes=15),
+                key=f"{row_key}_finish",
+            )
+            break_value = int(break_col.number_input(
+                "Break (min)",
+                min_value=0,
+                max_value=300,
+                step=15,
+                value=0,
+                key=f"{row_key}_break",
+            ))
+            type_col, notes_col = st.columns([1, 2])
+            selected_work_type = type_col.selectbox(
+                "Work Type",
+                work_type_options,
+                index=work_type_options.index(item["site_role"])
+                if item["site_role"] in work_type_options
+                else 0,
+                key=f"{row_key}_work_type",
+            )
+            selected_notes = notes_col.text_area(
+                "Notes",
+                value="Missed timesheet (auto-generated).",
+                key=f"{row_key}_notes",
+            )
+
+            try:
+                total_hours = calculate_shift_hours(
+                    start_value, finish_value, break_value
+                )
+                hours_label = f"{total_hours:.2f} hrs"
+            except ValueError as exc:
+                total_hours = 0.0
+                hours_label = str(exc)
+            st.caption(
+                f"Rostered: {item['planned_hours']:.1f} hrs. Calculated: {hours_label} "
+                f"({start_value.strftime('%H:%M')} to {finish_value.strftime('%H:%M')}, "
+                f"less {break_value} min break)."
+            )
+
+            submit_button = st.button(
+                f"Submit timesheet for {item['work_date']}",
+                key=f"{row_key}_submit",
+                width="stretch",
+            )
+            if submit_button:
+                if total_hours <= 0:
+                    pb_error(f"Shift for {item['work_date']} has zero or negative hours. Fix the times first.")
+                    continue
+                try:
+                    save_timesheet_entry(
+                        job_id=item["job_id"],
+                        employee_id=int(employee_id),
+                        work_date=item["work_date"],
+                        start_time=start_value.strftime("%H:%M"),
+                        finish_time=finish_value.strftime("%H:%M"),
+                        break_minutes=break_value,
+                        total_hours=total_hours,
+                        work_type=selected_work_type,
+                        notes=selected_notes,
+                        job_stage_id=item["stage_id"],
+                    )
+                    submitted_count += 1
+                    st.session_state[f"{row_key}_submitted"] = True
+                except Exception as exc:
+                    pb_error(f"Could not submit timesheet for {item['work_date']}: {exc}")
+
+    if submitted_count:
+        pb_success(f"{submitted_count} missed timesheet(s) submitted.")
+        pb_rerun()
 
 
 def save_timesheet_entry(
@@ -8360,6 +8594,17 @@ def timesheets_page(employee_restricted=False):
         tab_submit, tab_my = st.tabs(["Submit Timesheet", "My Timesheets"])
         with tab_submit:
             timesheet_entry_form(employee_id=current_employee_id, employee_restricted=True, key_prefix="employee_timesheet")
+            st.divider()
+            st.subheader("Missed a timesheet?")
+            st.caption(
+                "If a scheduled shift never got a timesheet, it shows up here so you "
+                "can catch up in one tap. Un-scheduled days are not included."
+            )
+            render_missed_timesheet_catchup(
+                current_employee_id,
+                key_prefix="employee_missed_timesheet",
+                include_name_header=False,
+            )
         with tab_my:
             my_df = df_query("""
                 SELECT t.id, t.work_date AS 'Date', j.job_no AS 'Job No', j.job_name AS 'Job Name',
@@ -8426,6 +8671,29 @@ def timesheets_page(employee_restricted=False):
                 key_prefix=f"admin_timesheet_review_{selected_status.lower().replace(' ', '_')}",
                 empty_message=f"No {selected_status.lower()} timesheets found.",
             )
+
+            st.divider()
+            st.markdown("### Generate missed timesheets")
+            st.caption(
+                "Choose an employee to see scheduled shifts that never received a "
+                "timesheet, then generate one on their behalf with the rostered shift "
+                "details pre-filled."
+            )
+            admin_employee_options = get_employee_options(active_only=True)
+            if not admin_employee_options:
+                st.info("Create employees first.")
+            else:
+                selected_employee_label = st.selectbox(
+                    "Employee",
+                    list(admin_employee_options.keys()),
+                    key="admin_missed_timesheet_employee",
+                )
+                selected_employee_id = int(admin_employee_options[selected_employee_label])
+                render_missed_timesheet_catchup(
+                    selected_employee_id,
+                    key_prefix="admin_missed_timesheet",
+                    include_name_header=True,
+                )
 
     with tab_by_job:
         job_options = get_job_options()

@@ -15,8 +15,11 @@ from typing import Any
 _MENU_ICONS = {
     "Dashboard": "🏠",
     "Control Centre": "🎯",
+    "Operations Hub": "🧭",
     "Jobs": "🧾",
     "Job Folders": "📁",
+    "Upload PO": "📤",
+    "Field Mode": "📱",
     "Estimating": "💰",
     "Site Operations": "🛠️",
     "Reports": "📊",

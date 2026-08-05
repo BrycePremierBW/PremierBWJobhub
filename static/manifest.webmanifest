@@ -6,17 +6,47 @@
   "description": "Premier Brushworks field and operations hub",
   "start_url": "/?jobhub-home=1",
   "scope": "/",
+  "lang": "en",
+  "dir": "ltr",
   "display": "standalone",
+  "display_override": ["standalone", "minimal-ui", "browser"],
   "orientation": "any",
   "background_color": "#F7F3ED",
   "theme_color": "#8B6F47",
+  "categories": ["business", "productivity", "utilities"],
   "gcm_sender_id": "482941778795",
   "icons": [
+    {
+      "src": "/app/static/PB_JobHub_Icon_192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/app/static/PB_JobHub_Icon_512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
     {
       "src": "/app/static/PB_JobHub_Icon.png",
       "sizes": "300x300",
       "type": "image/png",
-      "purpose": "any maskable"
+      "purpose": "maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Timesheets",
+      "short_name": "Timesheets",
+      "description": "Submit and review timesheets",
+      "url": "/?jobhub-home=1&go_to_menu=Timesheets"
+    },
+    {
+      "name": "Jobs",
+      "short_name": "Jobs",
+      "description": "Open active jobs",
+      "url": "/?jobhub-home=1&go_to_menu=Jobs"
     }
   ]
 }

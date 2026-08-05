@@ -1,5 +1,21 @@
 # JobHub secured release
 
+## 2026-08-05 - Missed timesheets and mobile tuning
+
+- Employees can catch up on missed timesheets: the roster (`staff_schedule`) is
+  compared against `timesheet_entries` so any scheduled shift without a timesheet
+  in the last 21 days appears with the rostered job, stage, start and finish
+  pre-filled. Approved leave and days that already have a timesheet are excluded.
+- Management can generate missed timesheets on an employee's behalf from the
+  Review Timesheets tab, using the same catch-up list.
+- Mobile app navigation now has icons for Operations Hub, Upload PO and Field
+  Mode in both the phone header and the desktop sidebar.
+- Phone notifications can now be disabled from the same button that enables
+  them (tap while enabled to opt this device out).
+- PWA installability tuning: dedicated 192×192 and 512×512 icons are generated
+  from the square logo, the manifest lists them, adds display_override, language
+  and app shortcuts, and iOS uses the 192px apple-touch-icon.
+
 ## 2026-08-05 - Smart document intake
 
 - Import Take-off Job Pack now has a Smart Document Intake mode that reads
