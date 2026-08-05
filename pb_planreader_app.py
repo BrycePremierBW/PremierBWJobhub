@@ -14,6 +14,7 @@ import requests
 import streamlit as st
 
 from planreader_marker_component import plan_marker_editor
+from planreader_substrate_component import substrate_box_editor
 
 APP_NAME = "PB PlanReader"
 DEFAULT_COVERAGE_M2_PER_L = 12.0
@@ -53,6 +54,28 @@ PAGE_TYPES = {
     "painting_spec": ["painting", "paint systems", "coatings", "sealer", "primer"],
     "site_plan": ["site plan", "locality", "setout", "set out"],
     "specification": ["technical specification", "general requirements", "worksection"],
+}
+
+ELEVATION_BOX_SOURCE = "Manual elevation box"
+
+SUBSTRATE_OPTIONS = [
+    "External walls / render",
+    "Cladding / external lining",
+    "Soffits / eaves",
+    "Fascia / gutters / trim",
+    "Windows / doors / frames",
+    "Floors / balconies",
+    "Other",
+]
+
+SUBSTRATE_LABOUR_MAP = {
+    "External walls / render": ("Exterior", "External"),
+    "Cladding / external lining": ("Exterior", "External"),
+    "Soffits / eaves": ("Ceilings", "External"),
+    "Fascia / gutters / trim": ("Woodwork", "External"),
+    "Windows / doors / frames": ("Woodwork", "External"),
+    "Floors / balconies": ("Floor coating", "External"),
+    "Other": ("General", "External"),
 }
 
 
@@ -227,7 +250,8 @@ def _rebuild_takeoff(job: Dict[str, Any], rooms: List[Dict[str, Any]]) -> pd.Dat
     for analysis in job.get("analyses", []):
         combined["painting_snippets"].extend(analysis.get("painting_snippets", []))
         combined["area_candidates"].extend(analysis.get("area_candidates", []))
-    return build_takeoff_from_analysis(combined)
+    df = build_takeoff_from_analysis(combined)
+    return pd.DataFrame(merge_elevation_box_rows(job, df.to_dict("records")))
 
 
 def _correction_options(job: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -535,6 +559,112 @@ def detect_substrate_from_text(text: str) -> Tuple[str, str, str]:
     if any(k in low for k in ["wall", "blockwork", "plaster", "plasterboard"]):
         return "Internal walls", "Walls", "Internal"
     return "Painting item", "General", "Internal"
+
+
+def substrate_labour(substrate: str) -> Tuple[str, str]:
+    return SUBSTRATE_LABOUR_MAP.get(str(substrate or "").strip(), ("General", "External"))
+
+
+def guess_substrate_from_label(label: str) -> str:
+    low = (label or "").lower()
+    if any(k in low for k in ["soffit", "eave", "ceiling"]):
+        return "Soffits / eaves"
+    if any(k in low for k in ["fascia", "gutter", "trim", "capping"]):
+        return "Fascia / gutters / trim"
+    if any(k in low for k in ["window", "door", "frame"]):
+        return "Windows / doors / frames"
+    if any(k in low for k in ["cladding", "lining", "timber", "fc ", "fibre", "fiber", "weatherboard"]):
+        return "Cladding / external lining"
+    if any(k in low for k in ["floor", "balcony", "deck", "paving"]):
+        return "Floors / balconies"
+    return "External walls / render"
+
+
+def normalise_boxes(boxes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    cleaned: List[Dict[str, Any]] = []
+    for b in boxes or []:
+        x = _to_float(b.get("x")) or 0.0
+        y = _to_float(b.get("y")) or 0.0
+        w = _to_float(b.get("w")) or 0.0
+        h = _to_float(b.get("h")) or 0.0
+        if w <= 0 or h <= 0:
+            continue
+        x = max(0.0, min(100.0, x))
+        y = max(0.0, min(100.0, y))
+        w = max(0.0, min(100.0 - x, w))
+        h = max(0.0, min(100.0 - y, h))
+        qty = _to_float(b.get("qty_m2")) or 0.0
+        cleaned.append({
+            "id": str(b.get("id") or "").strip()[:60],
+            "label": str(b.get("label") or "").strip()[:120],
+            "substrate": str(b.get("substrate") or "").strip()[:120] or "External walls / render",
+            "x": round(x, 4),
+            "y": round(y, 4),
+            "w": round(w, 4),
+            "h": round(h, 4),
+            "progress": normalise_progress(b.get("progress", 0)),
+            "qty_m2": round(max(0.0, qty), 2),
+        })
+    return cleaned
+
+
+def substrate_boxes_from_job(job: Dict[str, Any], img_path: str) -> List[Dict[str, Any]]:
+    state = (job.get("elevation_progress") or {}).get(img_path, {}) or {}
+    zones = list(state.get("zones", []) or [])
+    boxes = []
+    for z in zones:
+        boxes.append({
+            "id": str(z.get("id") or "").strip(),
+            "label": str(z.get("label") or "").strip(),
+            "substrate": str(z.get("substrate") or "").strip()
+            or guess_substrate_from_label(z.get("label") or ""),
+            "x": z.get("x", 0),
+            "y": z.get("y", 0),
+            "w": z.get("w", 0),
+            "h": z.get("h", 0),
+            "progress": z.get("progress", 0),
+            "qty_m2": z.get("qty_m2", 0),
+        })
+    return normalise_boxes(boxes)
+
+
+def save_substrate_boxes(job: Dict[str, Any], img_path: str, boxes: List[Dict[str, Any]]) -> None:
+    job.setdefault("elevation_progress", {})
+    state = job["elevation_progress"].setdefault(img_path, {}) or {}
+    state["zones"] = normalise_boxes(boxes)
+    state["updated_at"] = now_stamp()
+    job["elevation_progress"][img_path] = state
+
+
+def merge_elevation_box_rows(
+    job: Dict[str, Any],
+    rows: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    kept = [r for r in rows if r.get("source_note") != ELEVATION_BOX_SOURCE]
+    for img_path, entry in (job.get("elevation_progress") or {}).items():
+        for b in normalise_boxes(entry.get("zones", [])):
+            qty = float(b.get("qty_m2") or 0.0)
+            if qty <= 0:
+                continue
+            labour, int_ext = substrate_labour(b.get("substrate"))
+            substrate = b.get("substrate") or "External walls / render"
+            location = f"{Path(img_path).stem} · {b.get('label') or substrate}"[:120]
+            kept.append({
+                "internal_external": int_ext,
+                "area_location": location,
+                "substrate": substrate,
+                "labour_category": labour,
+                "qty_m2": round(qty, 2),
+                "lineal_m": 0.0,
+                "count": 0,
+                "coats": 2,
+                "rate_ex_gst": 0.0,
+                "labour_hours": 0.0,
+                "paint_litres": litres_from_area(qty, 2),
+                "source_note": ELEVATION_BOX_SOURCE,
+                "confidence": "Manual elevation box",
+            })
+    return kept
 
 
 def compute_room_takeoff_rows(
@@ -1047,7 +1177,7 @@ def process_uploads_page(job_id: str):
             combined_analysis["rooms"], load_corrections(job_id)
         )
         df = build_takeoff_from_analysis(combined_analysis)
-        job["takeoff_rows"] = df.to_dict("records")
+        job["takeoff_rows"] = merge_elevation_box_rows(job, df.to_dict("records"))
         job["rooms"] = combined_analysis["rooms"]
         opts = elevation_image_options(job)
         if opts:
@@ -1292,7 +1422,7 @@ def progress_page(job_id: str):
     job = load_job(job_id)
     st.markdown("<div class='pb-card'>", unsafe_allow_html=True)
     st.subheader("Elevation progress tracker")
-    st.caption("Rendered external elevations become a visual progress tracker. Mark painted/unpainted zones per elevation (zone positions are stored as exact percentages), then build a progress board for the whole house.")
+    st.caption("Drag a box onto the elevation to mark a painted/unpainted area, tag it with a substrate, set its progress %, and optionally add an m² quantity that flows into the take-off. Positions are stored as exact percentages and drive the progress board.")
     options = elevation_image_options(job)
     if not options:
         st.warning("No elevation drawing images yet. Upload PDF plans and tick 'Convert PDF pages to PNG' (elevation pages are rendered automatically), or upload elevation images directly.")
@@ -1302,56 +1432,56 @@ def progress_page(job_id: str):
     selected = st.selectbox("Elevation", labels, index=0)
     opt = next((o for o in options if o["label"] == selected), options[0])
     img_path = opt["image_path"]
-    state = job.get("elevation_progress", {}).get(img_path, {})
-    zones = list(state.get("zones", []) or [])
+    img_file = Path(img_path)
+    if not img_file.exists():
+        st.warning("Elevation image is missing. Re-upload the plan to regenerate it.")
+        st.markdown("</div>", unsafe_allow_html=True)
+        return
+    state = job.get("elevation_progress", {}).get(img_path, {}) or {}
+    stored = substrate_boxes_from_job(job, img_path)
     overall = float(state.get("progress", 0.0))
-    st.image(img_path, caption=opt["label"], width="stretch")
+    rev_key = f"pr_box_rev_{job_id}_{safe_name(img_path)}"
+    rev = int(st.session_state.get(rev_key, 0))
 
-    st.markdown("#### Zones")
-    st.caption("Zone coords are percentages of the image (0-100, up to 4 decimals). x/y = top-left corner, w/h = width/height. Colours: grey = not started, amber = <50%, orange = <100%, green = done.")
-    zone_df = pd.DataFrame(zones) if zones else pd.DataFrame(columns=["label", "x", "y", "w", "h", "progress"])
-    for col in ["label", "x", "y", "w", "h", "progress"]:
-        if col not in zone_df.columns:
-            zone_df[col] = "" if col == "label" else 0.0
-    edited_zones = st.data_editor(
-        zone_df[["label", "x", "y", "w", "h", "progress"]],
-        width="stretch",
-        num_rows="dynamic",
-        height=200,
-        column_config={
-            "label": st.column_config.TextColumn("Zone label"),
-            "x": st.column_config.NumberColumn("x %", min_value=0.0, max_value=100.0, step=0.1, format="%.4f"),
-            "y": st.column_config.NumberColumn("y %", min_value=0.0, max_value=100.0, step=0.1, format="%.4f"),
-            "w": st.column_config.NumberColumn("w %", min_value=0.0, max_value=100.0, step=0.1, format="%.4f"),
-            "h": st.column_config.NumberColumn("h %", min_value=0.0, max_value=100.0, step=0.1, format="%.4f"),
-            "progress": st.column_config.NumberColumn("Progress %", min_value=0.0, max_value=100.0, step=1.0),
-        },
-        key=f"zones_editor_{job_id}",
+    returned = substrate_box_editor(
+        img_file.read_bytes(),
+        boxes=stored,
+        substrates=SUBSTRATE_OPTIONS,
+        revision=rev,
+        key=f"pr_boxes_{job_id}_{safe_name(img_path)}",
+        height=860,
     )
-    zone_records = edited_zones.where(edited_zones.notna(), None).to_dict("records")
-    zone_records = [z for z in zone_records if (str(z.get("label") or "").strip() or (z.get("w") or 0) > 0)]
-    for z in zone_records:
-        z["progress"] = normalise_progress(z.get("progress", 0))
-        z["label"] = str(z.get("label") or "").strip()[:60]
+    current = normalise_boxes(returned) if returned is not None else stored
+    if returned is not None and current != stored:
+        save_substrate_boxes(job, img_path, current)
+        job["takeoff_rows"] = merge_elevation_box_rows(job, job.get("takeoff_rows", []))
+        save_job(job_id, job)
+        st.session_state[rev_key] = rev + 1
+
+    m2_total = sum(float(b.get("qty_m2") or 0.0) for b in current)
+    st.caption(f"**{len(current)} box(es)** drawn · **{m2_total:g} m²** entered (only boxes with an m² value flow into the take-off).")
+
     c1, c2, c3 = st.columns(3)
     overall_slider = c1.slider("Overall elevation progress %", 0, 100, int(overall), step=1, key=f"pr_overall_{job_id}")
-    if c2.button("Set all zones to overall %", type="secondary"):
-        for z in zone_records:
-            z["progress"] = normalise_progress(overall_slider)
-        job.setdefault("elevation_progress", {})[img_path] = {
+
+    def _persist(boxes: List[Dict[str, Any]]) -> None:
+        job.setdefault("elevation_progress", {})
+        job["elevation_progress"][img_path] = {
             "progress": normalise_progress(overall_slider),
-            "zones": zone_records,
+            "zones": boxes,
             "updated_at": now_stamp(),
         }
         save_job(job_id, job)
+
+    if c2.button("Set all boxes to overall %", type="secondary"):
+        boxes = [dict(b, progress=normalise_progress(overall_slider)) for b in current]
+        _persist(boxes)
+        job["takeoff_rows"] = merge_elevation_box_rows(job, job.get("takeoff_rows", []))
+        save_job(job_id, job)
+        st.session_state[rev_key] = int(st.session_state.get(rev_key, 0)) + 1
         st.rerun()
     if c3.button("Save progress state", type="secondary"):
-        job.setdefault("elevation_progress", {})[img_path] = {
-            "progress": normalise_progress(overall_slider),
-            "zones": zone_records,
-            "updated_at": now_stamp(),
-        }
-        save_job(job_id, job)
+        _persist(current)
         st.success("Elevation progress saved.")
 
     st.markdown("#### Renders")
@@ -1359,10 +1489,10 @@ def progress_page(job_id: str):
     overlay_path = render_dir / f"{safe_name(Path(img_path).stem, 'elevation')}_overlay.png"
     if st.button("Render elevation overlay", type="primary"):
         try:
-            render_elevation_overlay(img_path, zone_records, str(overlay_path), overall_slider)
+            render_elevation_overlay(img_path, current, str(overlay_path), overall_slider)
             job.setdefault("elevation_progress", {})[img_path] = {
                 "progress": normalise_progress(overall_slider),
-                "zones": zone_records,
+                "zones": current,
                 "updated_at": now_stamp(),
             }
             save_job(job_id, job)

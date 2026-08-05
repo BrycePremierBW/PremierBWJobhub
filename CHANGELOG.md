@@ -1,5 +1,20 @@
 # JobHub secured release
 
+## 2026-08-06 - Elevation substrate box editor
+
+- PlanReader's Elevation progress tracker now lets you drag-and-drop boxes
+  directly onto the elevation image instead of typing zone coordinates. Each box
+  can be tagged with a substrate (render, cladding, soffits, fascia/trim,
+  windows/doors, floors) and a progress %. Drawing is drag-to-draw, boxes can be
+  moved and resized with the pointer, and edits save automatically. Positions are
+  stored as exact percentages so the existing overlay renderer and progress board
+  keep working with the new boxes.
+- Each box can optionally carry an m² quantity, which is merged into the
+  take-off table as an External row (substrate mapped to its labour category) and
+  is preserved when room corrections or the room-dimension rows are rebuilt. New
+  custom component `planreader_substrate_component`; pure helpers covered by
+  `tests/test_planreader_substrate_boxes.py`.
+
 ## 2026-08-05 - Plan corrections, build stamps and timesheet review fix
 
 - PlanReader gains a "Verify & Correct" page: the user taps directly on the

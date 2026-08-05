@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>PlanReader substrate box editor</title>
+<style>
+  body { margin: 0; font-family: -apple-system, 'Segoe UI', Roboto, Arial, sans-serif; background: #fff; color: #1f1f1f; }
+  .hint { color: #5f574f; font-size: 13px; line-height: 1.5; }
+  .toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 8px; }
+  .toolbar button, .editor button { padding: 8px 12px; border-radius: 999px; border: 1px solid #8B6F47; background: #fff; cursor: pointer; font-size: 14px; font-weight: 600; }
+  .toolbar button.danger, .editor button.danger { color: #b42318; border-color: #e6b4ae; }
+  .stage { position: relative; display: inline-block; line-height: 0; max-width: 100%; }
+  .stage img.bg { max-width: 100%; height: auto; display: block; cursor: crosshair; border-radius: 8px; }
+  .box { position: absolute; border: 2px solid #808080; border-radius: 4px; box-sizing: border-box; cursor: move; touch-action: none; user-select: none; z-index: 2; }
+  .box.selected { box-shadow: 0 0 0 3px rgba(0,0,0,.45); z-index: 3; }
+  .box.drawing { border-style: dashed; pointer-events: none; z-index: 4; }
+  .box .chip { position: absolute; top: 2px; left: 2px; background: rgba(20,20,20,.85); color: #fff; font-size: 12px; padding: 2px 6px; border-radius: 6px; white-space: nowrap; max-width: calc(100% - 4px); overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
+  .box .resize { position: absolute; right: -6px; bottom: -6px; width: 14px; height: 14px; background: #1f7a4d; border: 2px solid #fff; border-radius: 3px; cursor: nwse-resize; }
+  .editor { margin-top: 10px; max-width: 660px; }
+  .editor-title { font-weight: 700; margin-bottom: 6px; }
+  .editor .grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px 12px; }
+  .editor .grid .full { grid-column: 1 / -1; }
+  .editor label { display: block; font-size: 12px; color: #666; margin-bottom: 2px; }
+  .editor input, .editor select { width: 100%; box-sizing: border-box; font-size: 15px; padding: 6px 8px; border: 1px solid #ccc; border-radius: 8px; }
+  .editor .progress-row { display: flex; align-items: center; gap: 10px; }
+  .editor input[type="range"] { padding: 0; flex: 1 1 auto; }
+  .editor .progress-val { font-weight: 700; min-width: 42px; text-align: right; }
+  .editor .actions { display: flex; gap: 10px; margin-top: 10px; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+(function () {
+  var root = document.getElementById('root');
+  var state = { imageKey: null, revision: -1, substrates: [], boxes: [], selectedId: null, draw: null };
+
+  function post(type, payload) {
+    window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type: type }, payload), '*');
+  }
+  function postValue() {
+    var value = state.boxes.map(function (b) {
+      return { id: b.id, label: b.label, substrate: b.substrate, x: b.x, y: b.y, w: b.w, h: b.h, progress: b.progress, qty_m2: b.qty_m2 };
+    });
+    post('streamlit:setComponentValue', { value: value, dataType: 'json' });
+  }
+  function num(v, fallback) { var n = parseFloat(v); return isNaN(n) ? fallback : n; }
+  function clamp(n) { return Math.max(0, Math.min(1, n)); }
+  function pct(n) { return clamp(n) * 100; }
+  function pctNum(n) { return Math.max(0, Math.min(100, num(n, 0))); }
+
+  function normalize(boxes) {
+    return (boxes || []).map(function (b) {
+      return {
+        id: b.id || 'b' + Math.random().toString(36).slice(2, 10),
+        label: String(b.label || '').trim(),
+        substrate: String(b.substrate || ''),
+        x: pctNum(b.x),
+        y: pctNum(b.y),
+        w: pctNum(b.w),
+        h: pctNum(b.h),
+        progress: pctNum(b.progress),
+        qty_m2: (b.qty_m2 === '' || b.qty_m2 === null || b.qty_m2 === undefined) ? '' : num(b.qty_m2, 0)
+      };
+    });
+  }
+
+  function byId() {
+    for (var i = 0; i < state.boxes.length; i++) if (state.boxes[i].id === state.selectedId) return state.boxes[i];
+    return null;
+  }
+  function boxEl(id) { return document.getElementById('box-' + id); }
+
+  function progressColor(p) {
+    p = clamp(num(p, 0) / 100);
+    if (p === 0) return '#808080';
+    if (p < 0.5) return '#e68c1e';
+    if (p < 1) return '#ffb400';
+    return '#00963c';
+  }
+  function rgba(hex, a) {
+    var r = parseInt(hex.slice(1, 3), 16), g = parseInt(hex.slice(3, 5), 16), b = parseInt(hex.slice(5, 7), 16);
+    return 'rgba(' + r + ',' + g + ',' + b + ',' + a + ')';
+  }
+  function styleRect(el, b) {
+    el.style.left = b.x + '%';
+    el.style.top = b.y + '%';
+    el.style.width = b.w + '%';
+    el.style.height = b.h + '%';
+    var c = progressColor(b.progress);
+    el.style.borderColor = c;
+    el.style.background = rgba(c, 0.25);
+  }
+  function chipText(b) {
+    var label = (b.label || b.substrate || 'Box');
+    var qty = b.qty_m2;
+    return (qty !== '' && qty !== null && qty !== undefined && num(qty, 0) > 0) ? label + ' · ' + qty + ' m²' : label;
+  }
+
+  function stageImg() { return document.getElementById('pr_bg'); }
+  function pointerPos(ev) {
+    var rect = stageImg().getBoundingClientRect();
+    return { x: (ev.clientX - rect.left) / rect.width, y: (ev.clientY - rect.top) / rect.height };
+  }
+
+  window.addEventListener('message', function (event) {
+    var data = event.data;
+    if (!data || data.type !== 'streamlit:render') return;
+    var args = data.args || data;
+    var image = String(args.image || '');
+    var revision = num(args.revision, 0);
+    if (!state.imageKey || image !== state.imageKey || revision !== state.revision) {
+      state.imageKey = image;
+      state.revision = revision;
+      state.substrates = (args.substrates || []).slice();
+      var next = normalize(args.boxes || []);
+      var stillSelected = state.selectedId && next.some(function (b) { return b.id === state.selectedId; });
+      state.selectedId = stillSelected ? state.selectedId : (next.length ? next[0].id : null);
+      state.boxes = next;
+      state.draw = null;
+    }
+    render();
+  });
+
+  window.addEventListener('load', function () {
+    post('streamlit:componentReady', { apiVersion: 1 });
+  });
+
+  function render() {
+    root.innerHTML = '';
+    if (!state.imageKey) {
+      var h0 = document.createElement('div');
+      h0.className = 'hint';
+      h0.textContent = 'Loading elevation image…';
+      root.appendChild(h0);
+      return;
+    }
+    var toolbar = document.createElement('div');
+    toolbar.className = 'toolbar';
+    var hint = document.createElement('div');
+    hint.className = 'hint';
+    hint.textContent = 'Drag on the elevation to draw a substrate box. Click a box to select it — drag to move, drag its green handle to resize. Edits save automatically.';
+    toolbar.appendChild(hint);
+    var clearBtn = document.createElement('button');
+    clearBtn.type = 'button';
+    clearBtn.textContent = 'Clear all boxes';
+    clearBtn.addEventListener('click', function () {
+      state.boxes = [];
+      state.selectedId = null;
+      postValue();
+      render();
+    });
+    toolbar.appendChild(clearBtn);
+    root.appendChild(toolbar);
+
+    var stage = document.createElement('div');
+    stage.className = 'stage';
+    var img = document.createElement('img');
+    img.id = 'pr_bg';
+    img.src = state.imageKey;
+    img.alt = 'Elevation';
+    img.draggable = false;
+    img.className = 'bg';
+    stage.appendChild(img);
+
+    stage.addEventListener('pointerdown', function (ev) {
+      if (ev.target !== img && ev.target !== stage) return;
+      startDraw(ev);
+    });
+    stage.addEventListener('pointermove', function (ev) {
+      if (state.draw) moveDraw(ev);
+    });
+    stage.addEventListener('pointerup', function (ev) {
+      if (state.draw) endDraw(ev);
+    });
+    stage.addEventListener('pointercancel', function () {
+      if (state.draw) { state.draw = null; render(); }
+    });
+
+    if (state.draw) {
+      var dr = document.createElement('div');
+      dr.className = 'box drawing';
+      styleRect(dr, drawRect());
+      stage.appendChild(dr);
+    }
+
+    state.boxes.forEach(function (b) {
+      var el = document.createElement('div');
+      el.id = 'box-' + b.id;
+      el.className = 'box' + (b.id === state.selectedId ? ' selected' : '');
+      styleRect(el, b);
+      el.addEventListener('pointerdown', function (ev) { onBoxDown(ev, b); });
+      var chip = document.createElement('span');
+      chip.className = 'chip';
+      chip.textContent = chipText(b);
+      el.appendChild(chip);
+      if (b.id === state.selectedId) {
+        var handle = document.createElement('div');
+        handle.className = 'resize';
+        handle.addEventListener('pointerdown', function (ev) { onResizeDown(ev, b); });
+        el.appendChild(handle);
+      }
+      stage.appendChild(el);
+    });
+    root.appendChild(stage);
+    renderEditor(root);
+  }
+
+  function drawRect() {
+    var d = state.draw;
+    var x = Math.min(d.sx, d.cx), y = Math.min(d.sy, d.cy);
+    return { x: pct(x), y: pct(y), w: pct(Math.abs(d.cx - d.sx)), h: pct(Math.abs(d.cy - d.sy)), progress: 0 };
+  }
+  function startDraw(ev) {
+    ev.preventDefault();
+    var p = pointerPos(ev);
+    state.draw = { sx: p.x, sy: p.y, cx: p.x, cy: p.y };
+    stage.setPointerCapture(ev.pointerId);
+  }
+  function moveDraw(ev) {
+    var p = pointerPos(ev);
+    state.draw.cx = p.x;
+    state.draw.cy = p.y;
+    var el = root.querySelector('.box.drawing');
+    if (el) styleRect(el, drawRect());
+  }
+  function endDraw(ev) {
+    var p = pointerPos(ev);
+    state.draw.cx = p.x;
+    state.draw.cy = p.y;
+    var r = drawRect();
+    state.draw = null;
+    if (r.w < 1 || r.h < 1) { render(); return; }
+    var box = {
+      id: 'b' + Math.random().toString(36).slice(2, 10),
+      label: '',
+      substrate: state.substrates[0] || 'External walls / render',
+      x: r.x, y: r.y, w: r.w, h: r.h,
+      progress: 0,
+      qty_m2: ''
+    };
+    state.boxes.push(box);
+    state.selectedId = box.id;
+    postValue();
+    render();
+  }
+
+  function attachDrag(el, b, ev, kind) {
+    var start = kind === 'move'
+      ? { x: b.x, y: b.y, px: ev.clientX, py: ev.clientY }
+      : { w: b.w, h: b.h, px: ev.clientX, py: ev.clientY };
+    el.setPointerCapture(ev.pointerId);
+    function onMove(me) {
+      var rect = stageImg().getBoundingClientRect();
+      if (kind === 'move') {
+        b.x = clamp((start.x + (me.clientX - start.px) / rect.width * 100) / 100) * 100;
+        b.y = clamp((start.y + (me.clientY - start.py) / rect.height * 100) / 100) * 100;
+      } else {
+        b.w = clamp((start.w + (me.clientX - start.px) / rect.width * 100) / 100) * 100;
+        b.h = clamp((start.h + (me.clientY - start.py) / rect.height * 100) / 100) * 100;
+        b.w = Math.max(1, Math.min(b.w, 100 - b.x));
+        b.h = Math.max(1, Math.min(b.h, 100 - b.y));
+      }
+      styleRect(el, b);
+    }
+    function onUp() {
+      el.removeEventListener('pointermove', onMove);
+      el.removeEventListener('pointerup', onUp);
+      el.removeEventListener('pointercancel', onUp);
+      postValue();
+    }
+    el.addEventListener('pointermove', onMove);
+    el.addEventListener('pointerup', onUp);
+    el.addEventListener('pointercancel', onUp);
+  }
+
+  function onBoxDown(ev, b) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    if (state.selectedId !== b.id) {
+      state.selectedId = b.id;
+      render();
+      var el = boxEl(b.id);
+      if (el) attachDrag(el, b, ev, 'move');
+    } else {
+      var el2 = boxEl(b.id);
+      if (el2) attachDrag(el2, b, ev, 'move');
+    }
+  }
+
+  function onResizeDown(ev, b) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    var el = boxEl(b.id);
+    if (el) attachDrag(el, b, ev, 'resize');
+  }
+
+  function renderEditor(container) {
+    var panel = document.createElement('div');
+    panel.className = 'editor';
+    var b = byId();
+    if (!b) {
+      var hint = document.createElement('div');
+      hint.className = 'hint';
+      hint.textContent = state.boxes.length
+        ? 'No box selected — click a box on the elevation to edit its substrate, progress and m².'
+        : 'No boxes yet — drag directly on the elevation to draw your first substrate box.';
+      panel.appendChild(hint);
+      container.appendChild(panel);
+      return;
+    }
+    var title = document.createElement('div');
+    title.className = 'editor-title';
+    title.textContent = 'Selected box';
+    panel.appendChild(title);
+
+    var grid = document.createElement('div');
+    grid.className = 'grid';
+
+    var labelBox = document.createElement('div');
+    labelBox.className = 'full';
+    var lLab = document.createElement('label');
+    lLab.textContent = 'Label (e.g. North wall, Front render)';
+    var lInp = document.createElement('input');
+    lInp.type = 'text';
+    lInp.value = b.label;
+    lInp.addEventListener('input', function () {
+      b.label = lInp.value.trim();
+      var el = boxEl(b.id);
+      if (el) {
+        var chip = el.querySelector('.chip');
+        if (chip) chip.textContent = chipText(b);
+      }
+    });
+    lInp.addEventListener('change', function () { b.label = lInp.value.trim(); postValue(); });
+    labelBox.appendChild(lLab);
+    labelBox.appendChild(lInp);
+
+    var subBox = document.createElement('div');
+    var sLab = document.createElement('label');
+    sLab.textContent = 'Substrate';
+    var sInp = document.createElement('select');
+    var subs = state.substrates.slice();
+    if (b.substrate && subs.indexOf(b.substrate) === -1) subs.unshift(b.substrate);
+    if (!subs.length) subs = ['External walls / render'];
+    subs.forEach(function (s) {
+      var o = document.createElement('option');
+      o.value = s;
+      o.textContent = s;
+      if (s === b.substrate) o.selected = true;
+      sInp.appendChild(o);
+    });
+    sInp.addEventListener('change', function () { b.substrate = sInp.value; postValue(); });
+    subBox.appendChild(sLab);
+    subBox.appendChild(sInp);
+
+    var progBox = document.createElement('div');
+    var pLab = document.createElement('label');
+    pLab.textContent = 'Progress %';
+    var pRow = document.createElement('div');
+    pRow.className = 'progress-row';
+    var pInp = document.createElement('input');
+    pInp.type = 'range';
+    pInp.min = 0; pInp.max = 100; pInp.step = 1;
+    pInp.value = b.progress;
+    var pVal = document.createElement('span');
+    pVal.className = 'progress-val';
+    pVal.textContent = Math.round(b.progress) + '%';
+    pInp.addEventListener('input', function () {
+      b.progress = num(pInp.value, 0);
+      pVal.textContent = Math.round(b.progress) + '%';
+      var el = boxEl(b.id);
+      if (el) styleRect(el, b);
+    });
+    pInp.addEventListener('change', function () { postValue(); });
+    pRow.appendChild(pInp);
+    pRow.appendChild(pVal);
+    progBox.appendChild(pLab);
+    progBox.appendChild(pRow);
+
+    var qtyBox = document.createElement('div');
+    var qLab = document.createElement('label');
+    qLab.textContent = 'Area (m²) — optional, flows into take-off';
+    var qInp = document.createElement('input');
+    qInp.type = 'number';
+    qInp.min = 0;
+    qInp.step = 0.1;
+    qInp.placeholder = 'e.g. 42.5';
+    qInp.value = (b.qty_m2 === '' || b.qty_m2 === null || b.qty_m2 === undefined) ? '' : b.qty_m2;
+    qInp.addEventListener('input', function () {
+      b.qty_m2 = qInp.value === '' ? '' : num(qInp.value, 0);
+      var el = boxEl(b.id);
+      if (el) {
+        var chip = el.querySelector('.chip');
+        if (chip) chip.textContent = chipText(b);
+      }
+    });
+    qInp.addEventListener('change', function () {
+      b.qty_m2 = qInp.value === '' ? '' : num(qInp.value, 0);
+      postValue();
+    });
+    qtyBox.appendChild(qLab);
+    qtyBox.appendChild(qInp);
+
+    grid.appendChild(labelBox);
+    grid.appendChild(subBox);
+    grid.appendChild(progBox);
+    grid.appendChild(qtyBox);
+    panel.appendChild(grid);
+
+    var actions = document.createElement('div');
+    actions.className = 'actions';
+    var del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'danger';
+    del.textContent = 'Delete box';
+    del.addEventListener('click', function () {
+      state.boxes = state.boxes.filter(function (x) { return x.id !== b.id; });
+      state.selectedId = state.boxes.length ? state.boxes[0].id : null;
+      postValue();
+      render();
+    });
+    actions.appendChild(del);
+    panel.appendChild(actions);
+
+    container.appendChild(panel);
+  }
+})();
+</script>
+</body>
+</html>
