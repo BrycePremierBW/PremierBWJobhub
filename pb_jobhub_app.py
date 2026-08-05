@@ -17918,6 +17918,7 @@ def render_job_stages_panel(job_id):
                 max_value=100.0,
                 step=1.0,
                 value=0.0,
+                key=f"add_job_stage_percent_{job_id}",
             )
             stage_status = a4.selectbox("Status", JOB_STAGE_STATUS_OPTIONS)
             d1, d2, d3 = st.columns(3)
@@ -18065,6 +18066,7 @@ def render_job_stages_panel(job_id):
             max_value=100.0,
             step=1.0,
             value=float(selected["Job %"] or 0),
+            key=f"edit_job_stage_percent_{stage_id}",
         )
         edit_status = e4.selectbox(
             "Status",
