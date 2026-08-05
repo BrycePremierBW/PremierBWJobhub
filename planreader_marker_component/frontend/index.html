@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>PlanReader marker editor</title>
+<style>
+  body { margin: 0; font-family: -apple-system, 'Segoe UI', Roboto, Arial, sans-serif; background: #fff; color: #1f1f1f; }
+  .stage { position: relative; display: inline-block; line-height: 0; max-width: 100%; }
+  .stage img { max-width: 100%; height: auto; display: block; cursor: crosshair; border-radius: 8px; }
+  .pin {
+    position: absolute; width: 36px; height: 36px; margin-left: -18px; margin-top: -18px;
+    background: #b42318; color: #fff; border: 2px solid #fff; border-radius: 50% 50% 50% 4px;
+    transform: rotate(-45deg); display: flex; align-items: center; justify-content: center;
+    cursor: grab; box-shadow: 0 2px 6px rgba(0,0,0,.35); font-weight: 700; font-size: 13px;
+    touch-action: none; user-select: none; z-index: 2;
+  }
+  .pin span { transform: rotate(45deg); }
+  .pin.selected { background: #1f7a4d; outline: 3px solid rgba(31,122,77,.35); }
+  .panel { margin-top: 10px; max-width: 100%; }
+  .row { display: flex; gap: 8px; align-items: center; padding: 6px 0; border-top: 1px solid #eee; flex-wrap: wrap; }
+  .row input { font-size: 15px; padding: 6px 8px; border: 1px solid #ccc; border-radius: 8px; min-width: 0; }
+  .row .label-input { flex: 1 1 170px; }
+  .row .dim { width: 92px; }
+  .row button { background: transparent; border: none; color: #b42318; font-size: 18px; cursor: pointer; padding: 4px 8px; }
+  .hint { color: #5f574f; font-size: 13px; margin: 8px 0; line-height: 1.4; }
+  .actions { margin-top: 8px; display: flex; gap: 10px; flex-wrap: wrap; }
+  .actions button { padding: 9px 14px; border-radius: 999px; border: 1px solid #8B6F47; background: #fff; cursor: pointer; font-size: 15px; font-weight: 600; }
+  .actions button.primary { background: #1f7a4d; border-color: #1f7a4d; color: #fff; }
+  .saved-tag { color: #1f7a4d; font-size: 13px; font-weight: 600; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+(function () {
+  var root = document.getElementById('root');
+  var state = { imageKey: null, hints: [], markers: null, drag: null };
+
+  function post(type, payload) {
+    window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type: type }, payload), '*');
+  }
+
+  function sendValue() {
+    var value = (state.markers || []).map(function (m) {
+      return { label: m.label, x: m.x, y: m.y, dim1_m: m.dim1_m, dim2_m: m.dim2_m };
+    });
+    post('streamlit:setComponentValue', { value: value, dataType: 'json' });
+  }
+
+  function num(v, fallback) { var n = parseFloat(v); return isNaN(n) ? fallback : n; }
+
+  function normalize(markers) {
+    return (markers || []).map(function (m) {
+      return {
+        id: 'm' + Math.random().toString(36).slice(2, 9),
+        label: String(m.label || '').trim(),
+        x: num(m.x, 0.5),
+        y: num(m.y, 0.5),
+        dim1_m: m.dim1_m === 0 || m.dim1_m === '' || m.dim1_m == null ? '' : m.dim1_m,
+        dim2_m: m.dim2_m === 0 || m.dim2_m === '' || m.dim2_m == null ? '' : m.dim2_m
+      };
+    });
+  }
+
+  window.addEventListener('message', function (event) {
+    var data = event.data;
+    if (!data || data.type !== 'streamlit:render') return;
+    var args = data.args || data;
+    var image = String(args.image || '');
+    if (!state.imageKey) {
+      state.imageKey = image;
+      state.hints = args.hints || [];
+      state.markers = normalize(args.markers || []);
+    } else if (image && image !== state.imageKey) {
+      state.imageKey = image;
+      state.hints = args.hints || [];
+      state.markers = normalize(args.markers || []);
+    }
+    render();
+  });
+
+  window.addEventListener('load', function () {
+    post('streamlit:componentReady', { apiVersion: 1 });
+  });
+
+  function render() {
+    if (!state.imageKey) {
+      root.innerHTML = '<div class="hint">Loading plan page…</div>';
+      return;
+    }
+    root.innerHTML = '';
+    var stage = document.createElement('div');
+    stage.className = 'stage';
+    var img = document.createElement('img');
+    img.src = state.imageKey;
+    img.alt = 'Plan page';
+    img.draggable = false;
+    img.addEventListener('click', function (ev) {
+      var rect = img.getBoundingClientRect();
+      var x = (ev.clientX - rect.left) / rect.width;
+      var y = (ev.clientY - rect.top) / rect.height;
+      addMarker(x, y);
+    });
+    stage.appendChild(img);
+    root.appendChild(stage);
+
+    var panel = document.createElement('div');
+    panel.className = 'panel';
+    root.appendChild(panel);
+    renderList(panel);
+
+    var actions = document.createElement('div');
+    actions.className = 'actions';
+    var done = document.createElement('button');
+    done.type = 'button';
+    done.className = 'primary';
+    done.textContent = 'Save markers';
+    done.addEventListener('click', function () {
+      sendValue();
+      showSaved();
+    });
+    var clear = document.createElement('button');
+    clear.type = 'button';
+    clear.textContent = 'Clear all markers';
+    clear.addEventListener('click', function () {
+      state.markers = [];
+      sendValue();
+      render();
+    });
+    actions.appendChild(done);
+    actions.appendChild(clear);
+    root.appendChild(actions);
+  }
+
+  function addMarker(x, y) {
+    state.markers = (state.markers || []).concat([{
+      id: 'm' + Math.random().toString(36).slice(2, 9),
+      label: '',
+      x: Math.max(0, Math.min(1, x)),
+      y: Math.max(0, Math.min(1, y)),
+      dim1_m: '',
+      dim2_m: ''
+    }]);
+    render();
+    var inputs = root.querySelectorAll('.label-input');
+    if (inputs.length) inputs[inputs.length - 1].focus();
+  }
+
+  function renderList(panel) {
+    panel.innerHTML = '';
+    if (!state.markers.length) {
+      var empty = document.createElement('div');
+      empty.className = 'hint';
+      empty.textContent = 'No markers yet. Click directly on the plan to mark a room.';
+      panel.appendChild(empty);
+      return;
+    }
+    var hint = document.createElement('div');
+    hint.className = 'hint';
+    hint.textContent = state.markers.length + ' room marker(s). Name each one and add its two dimensions in metres — matching a detected room overrides it, new names are added.';
+    panel.appendChild(hint);
+
+    state.markers.forEach(function (m) {
+      var row = document.createElement('div');
+      row.className = 'row';
+
+      var label = document.createElement('input');
+      label.type = 'text';
+      label.className = 'label-input';
+      label.placeholder = 'Room name (e.g. Bedroom 4)';
+      label.value = m.label;
+      label.addEventListener('input', function () {
+        m.label = label.value.trim();
+        var h = findHint(m.label);
+        if (h) {
+          m.dim1_m = h.dim1_m;
+          m.dim2_m = h.dim2_m;
+          d1.value = h.dim1_m;
+          d2.value = h.dim2_m;
+        }
+        renderPins();
+      });
+
+      var d1 = document.createElement('input');
+      d1.type = 'number';
+      d1.className = 'dim';
+      d1.step = '0.1';
+      d1.min = '0';
+      d1.placeholder = 'Dim 1 (m)';
+      d1.value = m.dim1_m;
+      d1.addEventListener('input', function () { m.dim1_m = d1.value; });
+
+      var d2 = document.createElement('input');
+      d2.type = 'number';
+      d2.className = 'dim';
+      d2.step = '0.1';
+      d2.min = '0';
+      d2.placeholder = 'Dim 2 (m)';
+      d2.value = m.dim2_m;
+      d2.addEventListener('input', function () { m.dim2_m = d2.value; });
+
+      var del = document.createElement('button');
+      del.type = 'button';
+      del.title = 'Remove marker';
+      del.textContent = '×';
+      del.addEventListener('click', function () {
+        state.markers = state.markers.filter(function (x) { return x.id !== m.id; });
+        sendValue();
+        render();
+      });
+
+      row.appendChild(label);
+      row.appendChild(d1);
+      row.appendChild(d2);
+      row.appendChild(del);
+      panel.appendChild(row);
+    });
+  }
+
+  function findHint(label) {
+    var key = label.toLowerCase();
+    for (var i = 0; i < state.hints.length; i++) {
+      if (String(state.hints[i].label || '').toLowerCase() === key) {
+        return { dim1_m: state.hints[i].dim1_m, dim2_m: state.hints[i].dim2_m };
+      }
+    }
+    return null;
+  }
+
+  function renderPins() {
+    var img = root.querySelector('img');
+    if (!img) return;
+    var stage = img.parentElement;
+    stage.querySelectorAll('.pin').forEach(function (p) { p.remove(); });
+    (state.markers || []).forEach(function (m, i) {
+      var pin = document.createElement('div');
+      pin.className = 'pin';
+      pin.style.left = (m.x * 100) + '%';
+      pin.style.top = (m.y * 100) + '%';
+      var span = document.createElement('span');
+      span.textContent = String(i + 1);
+      pin.appendChild(span);
+      pin.addEventListener('pointerdown', function (ev) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        state.drag = { id: m.id, startX: ev.clientX, startY: ev.clientY, ox: m.x, oy: m.y };
+        pin.setPointerCapture(ev.pointerId);
+      });
+      pin.addEventListener('pointermove', function (ev) {
+        if (!state.drag || state.drag.id !== m.id) return;
+        var rect = img.getBoundingClientRect();
+        var nx = state.drag.ox + (ev.clientX - state.drag.startX) / rect.width;
+        var ny = state.drag.oy + (ev.clientY - state.drag.startY) / rect.height;
+        m.x = Math.max(0, Math.min(1, nx));
+        m.y = Math.max(0, Math.min(1, ny));
+        pin.style.left = (m.x * 100) + '%';
+        pin.style.top = (m.y * 100) + '%';
+      });
+      pin.addEventListener('pointerup', function () {
+        if (state.drag && state.drag.id === m.id) { state.drag = null; }
+      });
+      stage.appendChild(pin);
+    });
+  }
+
+  function showSaved() {
+    var tag = document.createElement('div');
+    tag.className = 'saved-tag';
+    tag.textContent = 'Markers sent to JobHub — saving…';
+    root.appendChild(tag);
+  }
+})();
+</script>
+</body>
+</html>

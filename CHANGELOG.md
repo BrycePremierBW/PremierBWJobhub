@@ -1,5 +1,20 @@
 # JobHub secured release
 
+## 2026-08-05 - Plan corrections, build stamps and timesheet review fix
+
+- PlanReader gains a "Verify & Correct" page: the user taps directly on the
+  rendered plan page to pin and name rooms, types their two dimensions, and the
+  take-off is rebuilt from the corrected rooms (new rooms are added, matching
+  detected rooms are overridden). Corrections persist per job and are re-applied
+  on re-import, so the app learns from each review. New custom component
+  `planreader_marker_component`; pure helpers covered by
+  `tests/test_planreader_markers.py`.
+- JobHub and PlanReader show a visible build stamp in the sidebar (from
+  `RENDER_GIT_COMMIT`), so staff on a stale cached build can be identified.
+- Fixed production crash on the timesheet pages and job-pack import: the
+  `review_acceptance_checkbox` helper was dropped during the earlier app restore
+  while five pages still called it, causing a `NameError`. The helper is restored.
+
 ## 2026-08-05 - Smart intake accuracy test pack
 
 - Added an accuracy test pack (`tests/test_intake_accuracy.py`) that locks the

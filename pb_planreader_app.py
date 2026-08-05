@@ -13,6 +13,8 @@ import pandas as pd
 import requests
 import streamlit as st
 
+from planreader_marker_component import plan_marker_editor
+
 APP_NAME = "PB PlanReader"
 DEFAULT_COVERAGE_M2_PER_L = 12.0
 DEFAULT_CEILING_HEIGHT_M = 2.7
@@ -123,6 +125,124 @@ def save_job(job_id: str, data: Dict[str, Any]) -> None:
     data["job_id"] = job_id
     data["updated_at"] = now_stamp()
     save_json(meta_path(job_id), data)
+
+
+def _to_float(value: Any) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def corrections_path(job_id: str) -> Path:
+    return job_dir(job_id) / "plan_corrections.json"
+
+
+def load_corrections(job_id: str) -> List[Dict[str, Any]]:
+    return load_json(corrections_path(job_id), [])
+
+
+def save_corrections(job_id: str, markers: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    cleaned: List[Dict[str, Any]] = []
+    seen: set = set()
+    for marker in markers or []:
+        label = str(marker.get("label") or "").strip()[:80]
+        if not label:
+            continue
+        dim1 = _to_float(marker.get("dim1_m"))
+        dim2 = _to_float(marker.get("dim2_m"))
+        key = (label.lower(), round(dim1 or 0, 2), round(dim2 or 0, 2))
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append({
+            "label": label,
+            "x": _to_float(marker.get("x")) or 0.5,
+            "y": _to_float(marker.get("y")) or 0.5,
+            "dim1_m": round(dim1, 2) if dim1 else None,
+            "dim2_m": round(dim2, 2) if dim2 else None,
+            "area_m2": round(dim1 * dim2, 2) if dim1 and dim2 else None,
+            "file": str(marker.get("file") or ""),
+            "page": int(marker.get("page") or 1),
+            "source": "Manual plan marker",
+            "updated_at": now_stamp(),
+        })
+    save_json(corrections_path(job_id), cleaned)
+    return cleaned
+
+
+def apply_room_corrections(
+    rooms: List[Dict[str, Any]],
+    markers: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Merge manually marked rooms into the detected room list.
+
+    A marker with the same label overrides the detected dimensions; a marker
+    that matches no detected room is appended as a new room. Markers without
+    dimensions keep the detected sizes (or are skipped when nothing matches).
+    """
+    if not markers:
+        return rooms or []
+    markers_by_label: Dict[str, Dict[str, Any]] = {}
+    for marker in markers:
+        label = str(marker.get("label") or "").strip()
+        if label:
+            markers_by_label[label.lower()] = marker
+    corrected: List[Dict[str, Any]] = []
+    seen_labels: set = set()
+    for room in rooms or []:
+        label = str(room.get("room") or "").strip()
+        key = label.lower()
+        marker = markers_by_label.get(key)
+        if marker:
+            dim1 = _to_float(marker.get("dim1_m"))
+            dim2 = _to_float(marker.get("dim2_m"))
+            if dim1 and dim2:
+                room = dict(room)
+                room["dim1_m"] = round(dim1, 2)
+                room["dim2_m"] = round(dim2, 2)
+                room["area_m2"] = round(dim1 * dim2, 2)
+                room["source"] = "Corrected via plan marker"
+        corrected.append(room)
+        seen_labels.add(key)
+    for label, marker in markers_by_label.items():
+        if label in seen_labels:
+            continue
+        dim1 = _to_float(marker.get("dim1_m"))
+        dim2 = _to_float(marker.get("dim2_m"))
+        if not dim1 or not dim2:
+            continue
+        corrected.append({
+            "room": str(marker.get("label") or "").strip(),
+            "dim1_m": round(dim1, 2),
+            "dim2_m": round(dim2, 2),
+            "area_m2": round(dim1 * dim2, 2),
+            "source": "Marked on plan",
+        })
+    return corrected
+
+
+def _rebuild_takeoff(job: Dict[str, Any], rooms: List[Dict[str, Any]]) -> pd.DataFrame:
+    combined = {"painting_snippets": [], "area_candidates": [], "rooms": rooms}
+    for analysis in job.get("analyses", []):
+        combined["painting_snippets"].extend(analysis.get("painting_snippets", []))
+        combined["area_candidates"].extend(analysis.get("area_candidates", []))
+    return build_takeoff_from_analysis(combined)
+
+
+def _correction_options(job: Dict[str, Any]) -> List[Dict[str, Any]]:
+    options: List[Dict[str, Any]] = []
+    for analysis in job.get("analyses", []):
+        for page in analysis.get("pages", []):
+            image_path = page.get("image_path")
+            if image_path and Path(image_path).exists():
+                options.append({
+                    "label": f"{analysis.get('file', '')} · page {page.get('page', 1)}",
+                    "file": str(analysis.get("file", "") or ""),
+                    "page": int(page.get("page", 1)),
+                    "image_path": str(image_path),
+                })
+    return options
 
 
 def list_jobs() -> List[Dict[str, Any]]:
@@ -923,6 +1043,9 @@ def process_uploads_page(job_id: str):
             combined_analysis["painting_snippets"].extend(a.get("painting_snippets", []))
             combined_analysis["area_candidates"].extend(a.get("area_candidates", []))
             combined_analysis["rooms"].extend(a.get("rooms", []))
+        combined_analysis["rooms"] = apply_room_corrections(
+            combined_analysis["rooms"], load_corrections(job_id)
+        )
         df = build_takeoff_from_analysis(combined_analysis)
         job["takeoff_rows"] = df.to_dict("records")
         job["rooms"] = combined_analysis["rooms"]
@@ -1107,6 +1230,61 @@ def takeoff_page(job_id: str):
     b.metric("External m²", round(edited.loc[edited["internal_external"].astype(str).str.lower().str.contains("external"), "qty_m2"].sum(), 2))
     c.metric("Paint litres", round(pd.to_numeric(edited["paint_litres"], errors="coerce").fillna(0).sum(), 2))
     d.metric("Value ex GST", money(edited["value_ex_gst"].sum()))
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+def corrections_page(job_id: str):
+    job = load_job(job_id)
+    st.markdown("<div class='pb-card'>", unsafe_allow_html=True)
+    st.subheader("Verify & correct rooms on the plan")
+    st.caption("Tap each room on the rendered plan to place a marker, give it a name and type its two dimensions in metres. Corrections override the auto-detected rooms and rebuild the take-off, so the app learns from your review as you go.")
+    options = _correction_options(job)
+    if not options:
+        st.warning("No converted plan pages yet. Upload a PDF and tick 'Convert PDF pages to PNG' first.")
+        st.markdown("</div>", unsafe_allow_html=True)
+        return
+    labels = [option["label"] for option in options]
+    selected = st.selectbox("Plan page", labels, index=0)
+    option = next((o for o in options if o["label"] == selected), options[0])
+    image_path = Path(option["image_path"])
+    if not image_path.exists():
+        st.warning("Rendered image is missing. Re-upload the plan to regenerate it.")
+        st.markdown("</div>", unsafe_allow_html=True)
+        return
+    file_name = option["file"]
+    page_no = option["page"]
+    saved_markers = [
+        marker for marker in load_corrections(job_id)
+        if marker.get("file") == file_name and int(marker.get("page") or 1) == page_no
+    ]
+    hints = [
+        room for room in job.get("rooms", [])
+        if str(room.get("file") or "") == file_name and int(room.get("page") or 0) == page_no
+    ]
+    initial = [
+        {key: marker.get(key) for key in ("label", "x", "y", "dim1_m", "dim2_m")}
+        for marker in saved_markers
+    ]
+    returned = plan_marker_editor(
+        image_path.read_bytes(),
+        markers=initial,
+        hints=hints,
+        key=f"pr_markers_{job_id}_{safe_name(file_name)}_{page_no}",
+        height=780,
+    )
+    if returned:
+        tagged = []
+        for marker in returned:
+            tagged.append(dict(marker))
+            tagged[-1]["file"] = file_name
+            tagged[-1]["page"] = page_no
+        save_corrections(job_id, tagged)
+        all_markers = load_corrections(job_id)
+        job["rooms"] = apply_room_corrections(job.get("rooms", []), all_markers)
+        job["takeoff_rows"] = _rebuild_takeoff(job, job["rooms"]).to_dict("records")
+        save_job(job_id, job)
+        st.success("Corrections saved. Rooms and take-off rows updated.")
+    st.caption(f"Saved corrections for this page: {len(saved_markers)}. Every edit is saved automatically when you tap Save markers.")
     st.markdown("</div>", unsafe_allow_html=True)
 
 
@@ -1323,6 +1501,11 @@ def main():
     render_logo()
     st.sidebar.title("PB PlanReader")
     st.sidebar.caption("Clean plan import + painting take-off package")
+    try:
+        commit = str(os.getenv("RENDER_GIT_COMMIT", "") or "").strip()
+        st.sidebar.caption(f"Build {commit[:8] if commit else 'dev'} · PlanReader")
+    except Exception:
+        pass
     job_id = create_or_select_job()
     if not job_id:
         st.info("Create a job in the sidebar to start.")
@@ -1332,6 +1515,7 @@ def main():
         [
             "Upload Plans",
             "Extracted Info",
+            "Verify & Correct",
             "Take-off Draft",
             "Progress Tracking",
             "Converted Images",
@@ -1345,6 +1529,8 @@ def main():
         overview_page(job_id)
     elif menu == "Extracted Info":
         overview_page(job_id)
+    elif menu == "Verify & Correct":
+        corrections_page(job_id)
     elif menu == "Take-off Draft":
         takeoff_page(job_id)
     elif menu == "Progress Tracking":

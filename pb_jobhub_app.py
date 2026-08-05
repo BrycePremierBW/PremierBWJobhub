@@ -5692,11 +5692,43 @@ def require_login():
     st.stop()
 
 
+_APP_BUILD_LABEL = "2026-08-05 intake + accuracy"
+_app_build_cached = None
+
+
+def _app_build_stamp() -> str:
+    """Short build stamp so staff on a stale cached page can be identified."""
+    global _app_build_cached
+    if _app_build_cached is not None:
+        return _app_build_cached
+    commit = str(os.getenv("RENDER_GIT_COMMIT", "") or "").strip()
+    if not commit:
+        try:
+            import subprocess
+            commit = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                capture_output=True, text=True, timeout=3, check=False,
+            ).stdout.strip()
+        except Exception:
+            commit = ""
+    short = commit[:8] if commit else "dev"
+    _app_build_cached = f"Build {short} · {_APP_BUILD_LABEL}"
+    return _app_build_cached
+
+
+def _render_build_stamp() -> None:
+    try:
+        st.sidebar.caption(_app_build_stamp())
+    except Exception:
+        pass
+
+
 def logout_button():
     user = get_current_user()
     if user:
         st.sidebar.write(f"Logged in as **{user['username']}**")
         st.sidebar.caption(f"Role: {user['role']}")
+        _render_build_stamp()
         if st.sidebar.button("Logout"):
             token = st.session_state.get("_pb_auth_token") or st.query_params.get("auth")
             if token:
@@ -7443,6 +7475,19 @@ def render_missed_timesheet_catchup(
     if submitted_count:
         pb_success(f"{submitted_count} missed timesheet(s) submitted.")
         pb_rerun()
+
+
+def review_acceptance_checkbox(key_prefix, payload, label):
+    """Reset confirmation whenever any reviewed value changes."""
+    fingerprint = hashlib.sha256(
+        json.dumps(payload, default=str, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    fingerprint_key = f"{key_prefix}_review_fingerprint"
+    accepted_key = f"{key_prefix}_review_accepted"
+    if st.session_state.get(fingerprint_key) != fingerprint:
+        st.session_state[fingerprint_key] = fingerprint
+        st.session_state[accepted_key] = False
+    return st.checkbox(label, key=accepted_key)
 
 
 def save_timesheet_entry(
