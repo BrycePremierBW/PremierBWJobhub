@@ -1051,6 +1051,11 @@ def schedule_grid(assignments: pd.DataFrame, start: date, end: date, staff: pd.D
     days = list(daterange(start, end))
     columns = [d.strftime("%a\n%d %b") for d in days]
     grid = pd.DataFrame(index=staff["name"].tolist(), columns=columns).fillna("")
+    # `staff` comes from active_staff() (excludes inactive/archived employees),
+    # while assignments can still reference employees deactivated after being
+    # booked. Filter those out so grid.loc never raises a KeyError.
+    if "staff" in assignments.columns and not staff.empty:
+        assignments = assignments[assignments["staff"].isin(staff["name"].tolist())]
     for _, row in assignments.iterrows():
         day = to_date(row["schedule_date"])
         column = day.strftime("%a\n%d %b")
@@ -2309,6 +2314,9 @@ def page_schedule(user: dict) -> None:
 def page_leave(user: dict) -> None:
     st.title("Leave Requests")
     staff = active_staff()
+    if staff.empty:
+        st.info("Add staff members before requesting leave.")
+        return
     tab_add, tab_review, tab_register = st.tabs(["Add request", "Approve / reject", "Leave register"])
     with tab_add:
         with st.form("manager_leave_request"):

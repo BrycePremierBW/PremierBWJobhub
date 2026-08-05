@@ -1,5 +1,11 @@
 .env
 .streamlit/secrets.toml
+
+# Live data / PII - never commit
+Contacts.csv
+PB_jobs.csv
+King_Street_Progress_Model_Import_Table.csv
+*.zip
 *.db
 *.db-*
 *.bak

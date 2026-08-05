@@ -5522,10 +5522,6 @@ def require_login():
             if restored_user:
                 st.session_state["user"] = restored_user
                 st.session_state["_pb_auth_token"] = str(token)
-                try:
-                    st.query_params["auth"] = str(token)
-                except Exception:
-                    pass
 
     if st.session_state["user"]:
         if st.session_state["user"].get("must_change_password"):
@@ -5533,10 +5529,12 @@ def require_login():
             st.stop()
         return True
 
-    st.title("Premier Brushworks JobHub")
-    st.subheader("Login")
+    login_slot = st.empty()
+    login_succeeded = False
+    login_slot.title("Premier Brushworks JobHub")
+    login_slot.subheader("Login")
 
-    with st.form("login_form"):
+    with login_slot.form("login_form"):
         username = st.text_input("Username")
         password = st.text_input("Password", type="password")
         submitted = st.form_submit_button("Login")
@@ -5615,14 +5613,14 @@ def require_login():
                     st.session_state["user"] = user_dict
                     st.session_state["_pb_auth_token"] = auth_token
                     _save_user_auth_token(auth_token, user_dict)
-                    try:
-                        st.query_params["auth"] = auth_token
-                    except Exception:
-                        pass
                     st.session_state["unknown_login_failures"] = 0
                     _login_audit(username, True, "success")
-                    pb_success("Logged in.")
-                    pb_rerun()
+                    login_slot.empty()
+                    login_succeeded = True
+
+    if login_succeeded:
+        pb_success("Logged in.")
+        return True
 
     user_count_df = df_query("SELECT COUNT(*) AS c FROM app_users")
     user_count = int(user_count_df.iloc[0]["c"] or 0) if not user_count_df.empty else 0

@@ -10,10 +10,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 os.environ["DATA_DIR"] = tempfile.mkdtemp(prefix="jobhub_material_order_test_")
 
-from jobhub import database, documents, material_orders, security
+from jobhub import database, documents, material_orders
 from jobhub.registry import bind_modules
 
-bind_modules([database, documents, material_orders, security])
+bind_modules([database, documents, material_orders])
 
 database.init_db()
 database.execute("INSERT INTO builders_clients (type, name) VALUES (?, ?)", ("Builder", "Test Builder"))

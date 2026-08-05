@@ -9,7 +9,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-import fitz  # PyMuPDF
 import pandas as pd
 import requests
 import streamlit as st
@@ -237,6 +236,12 @@ def infer_project_info(all_text: str, filenames: List[str]) -> Dict[str, str]:
 
 
 def analyse_pdf(path: Path, render_pages: bool = False, dpi: int = 150) -> Dict[str, Any]:
+    try:
+        import fitz  # PyMuPDF
+    except ImportError:
+        raise ImportError(
+            "PyMuPDF is required to read plan PDFs. Install it with: pip install PyMuPDF"
+        ) from None
     doc = fitz.open(path)
     page_records = []
     all_text_parts = []
