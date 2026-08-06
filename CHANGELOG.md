@@ -1,5 +1,21 @@
 # JobHub secured release
 
+## 2026-08-06 - Automatic external take-off from plan + elevations
+
+- The app now **calculates the external take-off itself** — no manual drawing
+  required. Once the plan scale is known (from room-correction markers with real
+  dimensions), the building's external perimeter is solved from the plan; walls
+  are `perimeter × wall height` minus the window/door areas already measured from
+  elevation boxes; soffits/eaves are `perimeter × eave depth`; fascia is a
+  lineal length. The "Generate external rows from plan + elevations" button on
+  the take-off page adds these rows (marked as Auto external), with the wall
+  height, eave depth and wall thickness adjustable as inputs.
+- If no room-correction markers are positioned yet, the perimeter falls back to
+  an area estimate from the measured room totals so rows can still be generated.
+  Auto rows are replaced wholesale on re-generation (never duplicated), and are
+  dropped if no footprint can be computed. Covered by
+  `tests/test_planreader_external.py`.
+
 ## 2026-08-06 - Elevation scale calibration (measured m²)
 
 - Elevation substrate boxes are now **measured from the drawing** instead of

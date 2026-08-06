@@ -58,6 +58,11 @@ PAGE_TYPES = {
 }
 
 ELEVATION_BOX_SOURCE = "Manual elevation box"
+AUTO_EXTERNAL_SOURCE = "Auto external take-off"
+
+DEFAULT_EXTERNAL_WALL_HEIGHT_M = 2.7
+DEFAULT_EAVE_DEPTH_M = 0.45
+DEFAULT_WALL_THICKNESS_M = 0.15
 
 SUBSTRATE_OPTIONS = [
     "External walls / render",
@@ -252,7 +257,9 @@ def _rebuild_takeoff(job: Dict[str, Any], rooms: List[Dict[str, Any]]) -> pd.Dat
         combined["painting_snippets"].extend(analysis.get("painting_snippets", []))
         combined["area_candidates"].extend(analysis.get("area_candidates", []))
     df = build_takeoff_from_analysis(combined)
-    return pd.DataFrame(merge_elevation_box_rows(job, df.to_dict("records")))
+    rows = merge_elevation_box_rows(job, df.to_dict("records"))
+    rows = merge_auto_external_rows(job, rows)
+    return pd.DataFrame(rows)
 
 
 def _correction_options(job: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -701,6 +708,284 @@ def effective_box_m2(box: Dict[str, Any], mpp: Optional[float] = None, img_w: An
     if measured > 0:
         return measured
     return round(_to_float(box.get("qty_m2")) or 0.0, 2)
+
+
+def _plan_page_image(job: Dict[str, Any], file: str, page: Any):
+    for analysis in job.get("analyses") or []:
+        if str(analysis.get("file") or "") != str(file or ""):
+            continue
+        for p in analysis.get("pages") or []:
+            if int(p.get("page") or 1) == int(page or 1):
+                return Path(str(p.get("image_path") or ""))
+    return None
+
+
+def _solve_plan_scale(
+    markers: List[Dict[str, Any]],
+    aspect_ratio: float,
+    total_area_m2: float,
+):
+    """Find metres-per-fraction scales so the marker rectangles tile a
+    footprint whose area equals the measured total room area.
+
+    Returns ``(m_per_width_fraction, m_per_height_fraction)`` or None when no
+    scale in range reproduces the measured area (markers too few/inconsistent).
+    """
+    xc = [_to_float(m.get("x")) for m in markers]
+    yc = [_to_float(m.get("y")) for m in markers]
+    d1 = [_to_float(m.get("dim1_m")) for m in markers]
+    d2 = [_to_float(m.get("dim2_m")) for m in markers]
+    if any(v is None or v < 0 for v in xc + yc + d1 + d2):
+        return None
+    if total_area_m2 <= 0:
+        return None
+    ar = aspect_ratio or 1.0
+
+    def envelope_area(sh):
+        sw = ar * sh
+        bb_w = max(x + d / (2 * sw) for x, d in zip(xc, d1)) - min(x - d / (2 * sw) for x, d in zip(xc, d1))
+        bb_h = max(y + d / (2 * sh) for y, d in zip(yc, d2)) - min(y - d / (2 * sh) for y, d in zip(yc, d2))
+        if bb_w <= 0 or bb_h <= 0:
+            return None
+        return bb_w * sw * bb_h * sh
+
+    lo, hi = 1e-3, 500.0
+    f_lo = envelope_area(lo)
+    f_hi = envelope_area(hi)
+    if f_lo is None or f_hi is None:
+        return None
+    if not (f_lo <= total_area_m2 <= f_hi):
+        return None
+    for _ in range(90):
+        mid = (lo + hi) / 2
+        f_mid = envelope_area(mid)
+        if f_mid is None:
+            return None
+        if f_mid < total_area_m2:
+            lo = mid
+        else:
+            hi = mid
+    sh = (lo + hi) / 2
+    sw = ar * sh
+    return sw, sh
+
+
+def external_footprint(
+    job: Dict[str, Any],
+    markers: List[Dict[str, Any]],
+    rooms: List[Dict[str, Any]],
+    wall_thickness_m: float = DEFAULT_WALL_THICKNESS_M,
+) -> Dict[str, Any]:
+    """Estimate the building's external perimeter from plan measurements.
+
+    Prefers positioned room markers (tap position + real dimensions): the
+    plan's scale is solved so the marker rectangles tile a footprint matching
+    the measured total floor area, and the envelope gives internal dimensions.
+    Falls back to a rectangle built from total floor area with a 1.5 aspect
+    ratio. Returns a dict with ``perimeter_m``, dimensions, ``method`` and a
+    human-readable note.
+    """
+    t = max(_to_float(wall_thickness_m) or 0.0, 0.0)
+    fallback = {
+        "perimeter_m": 0.0,
+        "envelope_w_m": 0.0,
+        "envelope_h_m": 0.0,
+        "total_area_m2": 0.0,
+        "method": "none",
+        "note": "No room measurements available for an external calculation.",
+    }
+    if not markers and not rooms:
+        return fallback
+
+    positioned = [
+        m for m in markers or []
+        if _to_float(m.get("x")) is not None and _to_float(m.get("y")) is not None
+        and _to_float(m.get("dim1_m")) and _to_float(m.get("dim2_m"))
+    ]
+    if positioned:
+        pages: Dict[Tuple[str, int], List[Dict[str, Any]]] = {}
+        for m in positioned:
+            key = (str(m.get("file") or ""), int(m.get("page") or 1))
+            pages.setdefault(key, []).append(m)
+        best_key, best_markers = max(pages.items(), key=lambda kv: len(kv[1]))
+        image = _plan_page_image(job, *best_key)
+        size = _image_pixel_size(image) if image and image.exists() else None
+        if size:
+            total_area = sum(_to_float(m.get("dim1_m")) * _to_float(m.get("dim2_m")) for m in best_markers)
+            scale = _solve_plan_scale(best_markers, size[0] / size[1], total_area)
+            if scale:
+                sw, sh = scale
+                w_frac = (
+                    max(_to_float(m.get("x")) + _to_float(m.get("dim1_m")) / (2 * sw) for m in best_markers)
+                    - min(_to_float(m.get("x")) - _to_float(m.get("dim1_m")) / (2 * sw) for m in best_markers)
+                )
+                h_frac = (
+                    max(_to_float(m.get("y")) + _to_float(m.get("dim2_m")) / (2 * sh) for m in best_markers)
+                    - min(_to_float(m.get("y")) - _to_float(m.get("dim2_m")) / (2 * sh) for m in best_markers)
+                )
+                w_m = round(max(w_frac * sw, 0.0), 2)
+                h_m = round(max(h_frac * sh, 0.0), 2)
+                p_int = 2 * (w_m + h_m)
+                p_ext = round(p_int + 8 * t, 2)
+                return {
+                    "perimeter_m": p_ext,
+                    "envelope_w_m": w_m,
+                    "envelope_h_m": h_m,
+                    "total_area_m2": round(total_area, 2),
+                    "method": "marker-envelope",
+                    "note": (f"Footprint from {len(best_markers)} positioned room markers: "
+                             f"{w_m:g} x {h_m:g} m envelope (+{t:g} m wall thickness) = {p_ext:g} m perimeter."),
+                }
+
+    rooms_with_area = [
+        r for r in rooms or []
+        if _to_float(r.get("dim1_m")) and _to_float(r.get("dim2_m"))
+    ]
+    if not rooms_with_area:
+        return fallback
+    total_area = sum(_to_float(r.get("dim1_m")) * _to_float(r.get("dim2_m")) for r in rooms_with_area)
+    aspect = 1.5
+    w = math.sqrt(total_area / aspect)
+    h = aspect * w
+    p_int = 2 * (w + h)
+    p_ext = round(p_int + 8 * t, 2)
+    return {
+        "perimeter_m": p_ext,
+        "envelope_w_m": round(w + 2 * t, 2),
+        "envelope_h_m": round(h + 2 * t, 2),
+        "total_area_m2": round(total_area, 2),
+        "method": "area-estimate",
+        "note": (f"No positioned room markers found — footprint estimated from {total_area:g} m² of rooms "
+                 f"as a {aspect:g}:1 rectangle ({w:g} x {h:g} m) + wall thickness = {p_ext:g} m perimeter."),
+    }
+
+
+def elevation_openings_m2(job: Dict[str, Any]) -> float:
+    total = 0.0
+    for img_path, entry in (job.get("elevation_progress") or {}).items():
+        cal = normalise_calibration(entry.get("calibration"))
+        size = _image_pixel_size(img_path)
+        mpp = calibration_mpp(cal, size[0] if size else None, size[1] if size else None) if cal else None
+        for b in normalise_boxes(entry.get("zones", [])):
+            if str(b.get("substrate") or "").strip() != "Windows / doors / frames":
+                continue
+            total += effective_box_m2(b, mpp, size[0] if size else None, size[1] if size else None)
+    return round(total, 2)
+
+
+def compute_external_takeoff_rows(
+    job: Dict[str, Any],
+    wall_height_m: Any = None,
+    eave_depth_m: Any = None,
+    wall_thickness_m: Any = None,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """Build the external painting rows automatically from the plan's room
+    measurements (footprint perimeter) and the elevations (measured window and
+    door openings).
+    """
+    settings = job.get("external_settings") or {}
+    H = _to_float(wall_height_m) or _to_float(settings.get("wall_height_m")) or DEFAULT_EXTERNAL_WALL_HEIGHT_M
+    E = _to_float(eave_depth_m) or _to_float(settings.get("eave_depth_m")) or DEFAULT_EAVE_DEPTH_M
+    T = _to_float(wall_thickness_m) or _to_float(settings.get("wall_thickness_m")) or DEFAULT_WALL_THICKNESS_M
+    markers = load_corrections(job.get("job_id") or "")
+    footprint = external_footprint(job, markers, job.get("rooms") or [], T)
+    P = footprint["perimeter_m"]
+    openings = elevation_openings_m2(job)
+    gross = round(P * H, 2)
+    net = round(max(gross - openings, 0.0), 2)
+    soffits = round(P * E, 2)
+    note = (f"Auto external: {P:g} m perimeter x {H:g} m wall height − {openings:g} m² openings = {net:g} m² walls; "
+            f"soffits {P:g} m x {E:g} m eave = {soffits:g} m².")
+    rows: List[Dict[str, Any]] = []
+    if P > 0:
+        rows.extend([
+            {
+                "internal_external": "External",
+                "area_location": "Whole building",
+                "substrate": "External walls / render",
+                "labour_category": "Exterior",
+                "qty_m2": net,
+                "lineal_m": 0.0,
+                "count": 0,
+                "coats": 2,
+                "rate_ex_gst": 0.0,
+                "labour_hours": 0.0,
+                "paint_litres": litres_from_area(net, 2),
+                "source_note": AUTO_EXTERNAL_SOURCE,
+                "confidence": note,
+            },
+            {
+                "internal_external": "External",
+                "area_location": "Whole building",
+                "substrate": "External soffits / eaves",
+                "labour_category": "Ceilings",
+                "qty_m2": soffits,
+                "lineal_m": 0.0,
+                "count": 0,
+                "coats": 2,
+                "rate_ex_gst": 0.0,
+                "labour_hours": 0.0,
+                "paint_litres": litres_from_area(soffits, 2),
+                "source_note": AUTO_EXTERNAL_SOURCE,
+                "confidence": note,
+            },
+            {
+                "internal_external": "External",
+                "area_location": "Whole building",
+                "substrate": "Fascia / gutters / trim",
+                "labour_category": "Woodwork",
+                "qty_m2": 0.0,
+                "lineal_m": round(P, 2),
+                "count": 0,
+                "coats": 2,
+                "rate_ex_gst": 0.0,
+                "labour_hours": 0.0,
+                "paint_litres": 0.0,
+                "source_note": AUTO_EXTERNAL_SOURCE,
+                "confidence": note,
+            },
+        ])
+        if openings > 0:
+            rows.append({
+                "internal_external": "External",
+                "area_location": "Elevation openings",
+                "substrate": "Windows / doors / frames",
+                "labour_category": "Woodwork",
+                "qty_m2": openings,
+                "lineal_m": 0.0,
+                "count": 0,
+                "coats": 2,
+                "rate_ex_gst": 0.0,
+                "labour_hours": 0.0,
+                "paint_litres": litres_from_area(openings, 2),
+                "source_note": AUTO_EXTERNAL_SOURCE,
+                "confidence": "Measured window/door areas from elevation boxes.",
+            })
+    info = {
+        "perimeter_m": P,
+        "envelope_w_m": footprint["envelope_w_m"],
+        "envelope_h_m": footprint["envelope_h_m"],
+        "total_area_m2": footprint["total_area_m2"],
+        "method": footprint["method"],
+        "footprint_note": footprint["note"],
+        "wall_height_m": round(H, 2),
+        "eave_depth_m": round(E, 2),
+        "wall_thickness_m": round(T, 2),
+        "openings_m2": openings,
+        "gross_walls_m2": gross,
+        "net_walls_m2": net,
+        "soffits_m2": soffits,
+        "fascia_lineal_m": round(P, 2),
+    }
+    return rows, info
+
+
+def merge_auto_external_rows(job: Dict[str, Any], rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    auto, info = compute_external_takeoff_rows(job)
+    kept = [r for r in rows if r.get("source_note") != AUTO_EXTERNAL_SOURCE]
+    if info["perimeter_m"] > 0:
+        kept.extend(auto)
+    return kept
 
 
 def merge_elevation_box_rows(
@@ -1408,6 +1693,33 @@ def takeoff_page(job_id: str):
         save_job(job_id, job)
         st.success(f"Rebuilt {len(computed)} wall/ceiling rows from {len(room_records)} rooms.")
         st.rerun()
+    st.markdown("#### External take-off (auto)")
+    ext_rows, ext_info = compute_external_takeoff_rows(job)
+    st.caption(ext_info["footprint_note"])
+    e1, e2, e3, e4 = st.columns(4)
+    e1.metric("Building perimeter", f"{ext_info['perimeter_m']:g} m")
+    e2.metric("Wall height", f"{ext_info['wall_height_m']:g} m")
+    e3.metric("Openings (measured)", f"{ext_info['openings_m2']:g} m²")
+    e4.metric("Gross external walls", f"{ext_info['gross_walls_m2']:g} m²")
+    h_col, e_col, t_col = st.columns(3)
+    wall_h = h_col.number_input("External wall height (m)", min_value=1.5, max_value=6.0, value=ext_info["wall_height_m"], step=0.1, key=f"pr_ext_h_{job_id}")
+    eave_d = e_col.number_input("Eave depth (m)", min_value=0.0, max_value=2.0, value=ext_info["eave_depth_m"], step=0.05, key=f"pr_ext_eave_{job_id}")
+    wall_t = t_col.number_input("Wall thickness allowance (m)", min_value=0.0, max_value=1.0, value=ext_info["wall_thickness_m"], step=0.05, key=f"pr_ext_t_{job_id}")
+    if st.button("Generate external rows from plan + elevations", type="secondary"):
+        ext_rows, ext_info = compute_external_takeoff_rows(job, wall_height_m=wall_h, eave_depth_m=eave_d, wall_thickness_m=wall_t)
+        job["external_settings"] = {"wall_height_m": wall_h, "eave_depth_m": eave_d, "wall_thickness_m": wall_t}
+        current = edited.to_dict("records")
+        keep = [r for r in current if r.get("source_note") != AUTO_EXTERNAL_SOURCE]
+        if ext_info["perimeter_m"] > 0:
+            keep.extend(ext_rows)
+        job["takeoff_rows"] = keep
+        save_job(job_id, job)
+        st.success(f"External rows generated: {ext_info['net_walls_m2']:g} m² walls, {ext_info['soffits_m2']:g} m² soffits, {ext_info['fascia_lineal_m']:g} m fascia.")
+        st.rerun()
+    if ext_info["perimeter_m"] > 0:
+        st.caption(f"Net walls **{ext_info['net_walls_m2']:g} m²** (gross {ext_info['gross_walls_m2']:g} − {ext_info['openings_m2']:g} openings) · soffits **{ext_info['soffits_m2']:g} m²** · fascia **{ext_info['fascia_lineal_m']:g} m**.")
+    else:
+        st.warning("No room measurements yet — correct the rooms on the plan (Verify & Correct) or build wall/ceiling rows above to enable the automatic external take-off.")
     col1, col2, col3 = st.columns(3)
     with col1:
         if st.button("Recalculate paint litres", type="secondary"):
