@@ -8,8 +8,14 @@
   body { margin: 0; font-family: -apple-system, 'Segoe UI', Roboto, Arial, sans-serif; background: #fff; color: #1f1f1f; }
   .hint { color: #5f574f; font-size: 13px; line-height: 1.5; }
   .toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 8px; }
-  .toolbar button, .editor button { padding: 8px 12px; border-radius: 999px; border: 1px solid #8B6F47; background: #fff; cursor: pointer; font-size: 14px; font-weight: 600; }
+  .toolbar .tb-left { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .toolbar .tb-btns { display: flex; gap: 8px; flex-wrap: wrap; }
+  .toolbar button, .editor button, .cal-panel button { padding: 8px 12px; border-radius: 999px; border: 1px solid #8B6F47; background: #fff; cursor: pointer; font-size: 14px; font-weight: 600; }
   .toolbar button.danger, .editor button.danger { color: #b42318; border-color: #e6b4ae; }
+  .toolbar button.cal-set { color: #1f7a4d; border-color: #1f7a4d; }
+  .toolbar button.active { background: #8B6F47; color: #fff; }
+  .cal-ok { color: #1f7a4d; font-weight: 600; font-size: 13px; }
+  .cal-none { color: #8a8277; font-size: 13px; }
   .stage { position: relative; display: inline-block; line-height: 0; max-width: 100%; }
   .stage img.bg { max-width: 100%; height: auto; display: block; cursor: crosshair; border-radius: 8px; }
   .box { position: absolute; border: 2px solid #808080; border-radius: 4px; box-sizing: border-box; cursor: move; touch-action: none; user-select: none; z-index: 2; }
@@ -17,6 +23,20 @@
   .box.drawing { border-style: dashed; pointer-events: none; z-index: 4; }
   .box .chip { position: absolute; top: 2px; left: 2px; background: rgba(20,20,20,.85); color: #fff; font-size: 12px; padding: 2px 6px; border-radius: 6px; white-space: nowrap; max-width: calc(100% - 4px); overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
   .box .resize { position: absolute; right: -6px; bottom: -6px; width: 14px; height: 14px; background: #1f7a4d; border: 2px solid #fff; border-radius: 3px; cursor: nwse-resize; }
+  .cal-line { position: absolute; height: 2px; background: #b42318; border-radius: 2px; transform-origin: left center; z-index: 5; pointer-events: none; }
+  .cal-line::before, .cal-line::after { content: ''; position: absolute; top: -3px; width: 8px; height: 8px; border-radius: 50%; background: #b42318; }
+  .cal-line::before { left: -4px; }
+  .cal-line::after { right: -4px; }
+  .cal-mark { position: absolute; height: 2px; background: #1f6fb2; border-radius: 2px; transform-origin: left center; z-index: 4; pointer-events: none; opacity: .85; }
+  .cal-mark::before, .cal-mark::after { content: ''; position: absolute; top: -3px; width: 8px; height: 8px; border-radius: 50%; background: #1f6fb2; }
+  .cal-mark::before { left: -4px; }
+  .cal-mark::after { right: -4px; }
+  .cal-panel { margin-top: 12px; max-width: 460px; border: 1px solid #e3d8c6; background: #fffaf2; padding: 12px; border-radius: 10px; }
+  .cal-panel .cp-title { font-weight: 700; margin-bottom: 6px; }
+  .cal-panel label { display: block; font-size: 12px; color: #666; margin-bottom: 4px; }
+  .cal-panel input { width: 100%; box-sizing: border-box; font-size: 15px; padding: 6px 8px; border: 1px solid #ccc; border-radius: 8px; }
+  .cal-panel .actions { display: flex; gap: 10px; margin-top: 10px; }
+  .cal-panel button.primary { background: #8B6F47; color: #fff; border-color: #8B6F47; }
   .editor { margin-top: 10px; max-width: 660px; }
   .editor-title { font-weight: 700; margin-bottom: 6px; }
   .editor .grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px 12px; }
@@ -26,7 +46,9 @@
   .editor .progress-row { display: flex; align-items: center; gap: 10px; }
   .editor input[type="range"] { padding: 0; flex: 1 1 auto; }
   .editor .progress-val { font-weight: 700; min-width: 42px; text-align: right; }
+  .qty-hint { display: block; font-size: 12px; color: #666; margin-top: 2px; }
   .editor .actions { display: flex; gap: 10px; margin-top: 10px; }
+  .editor button.use-measured { color: #1f7a4d; border-color: #1f7a4d; font-size: 13px; padding: 6px 10px; }
 </style>
 </head>
 <body>
@@ -34,18 +56,28 @@
 <script>
 (function () {
   var root = document.getElementById('root');
-  var state = { imageKey: null, revision: -1, substrates: [], boxes: [], selectedId: null, draw: null };
+  var state = {
+    imageKey: null, revision: -1, substrates: [], boxes: [],
+    selectedId: null, draw: null,
+    natW: 0, natH: 0,
+    calibration: null, mpp: null,
+    calMode: false, calLine: null, calPanel: false
+  };
 
   function post(type, payload) {
     window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type: type }, payload), '*');
   }
   function postValue() {
-    var value = state.boxes.map(function (b) {
-      return { id: b.id, label: b.label, substrate: b.substrate, x: b.x, y: b.y, w: b.w, h: b.h, progress: b.progress, qty_m2: b.qty_m2 };
-    });
+    var value = {
+      boxes: state.boxes.map(function (b) {
+        return { id: b.id, label: b.label, substrate: b.substrate, x: b.x, y: b.y, w: b.w, h: b.h, progress: b.progress, qty_m2: b.qty_m2, manual_m2: b.manual_m2 };
+      }),
+      calibration: state.calibration || null
+    };
     post('streamlit:setComponentValue', { value: value, dataType: 'json' });
   }
   function num(v, fallback) { var n = parseFloat(v); return isNaN(n) ? fallback : n; }
+  function r2(n) { return Math.round(num(n, 0) * 100) / 100; }
   function clamp(n) { return Math.max(0, Math.min(1, n)); }
   function pct(n) { return clamp(n) * 100; }
   function pctNum(n) { return Math.max(0, Math.min(100, num(n, 0))); }
@@ -61,7 +93,8 @@
         w: pctNum(b.w),
         h: pctNum(b.h),
         progress: pctNum(b.progress),
-        qty_m2: (b.qty_m2 === '' || b.qty_m2 === null || b.qty_m2 === undefined) ? '' : num(b.qty_m2, 0)
+        qty_m2: (b.qty_m2 === '' || b.qty_m2 === null || b.qty_m2 === undefined) ? '' : num(b.qty_m2, 0),
+        manual_m2: (b.manual_m2 === '' || b.manual_m2 === null || b.manual_m2 === undefined) ? '' : num(b.manual_m2, 0)
       };
     });
   }
@@ -92,16 +125,85 @@
     el.style.borderColor = c;
     el.style.background = rgba(c, 0.25);
   }
+
+  function measuredFor(b) {
+    if (!state.mpp || !state.natW || !state.natH) return 0;
+    var w = pctNum(b.w) / 100 * state.natW;
+    var h = pctNum(b.h) / 100 * state.natH;
+    return w * h * state.mpp * state.mpp;
+  }
+  function fillMeasured(b) {
+    if (b.manual_m2) return;
+    var m = measuredFor(b);
+    b.qty_m2 = m > 0 ? r2(m) : '';
+  }
+  function effectiveQty(b) {
+    if (b.manual_m2) return num(b.manual_m2, 0);
+    if (state.mpp) return r2(measuredFor(b));
+    return (b.qty_m2 === '' || b.qty_m2 === null || b.qty_m2 === undefined) ? 0 : num(b.qty_m2, 0);
+  }
   function chipText(b) {
     var label = (b.label || b.substrate || 'Box');
-    var qty = b.qty_m2;
-    return (qty !== '' && qty !== null && qty !== undefined && num(qty, 0) > 0) ? label + ' · ' + qty + ' m²' : label;
+    var qty = effectiveQty(b);
+    if (qty > 0) {
+      var prefix = b.manual_m2 ? '' : '≈';
+      return label + ' · ' + prefix + r2(qty) + ' m²';
+    }
+    return label;
+  }
+  function recomputeMpp() {
+    var cal = state.calibration;
+    if (!cal || !state.natW || !state.natH) { state.mpp = null; return; }
+    var dx = (cal.x2 - cal.x1) / 100 * state.natW;
+    var dy = (cal.y2 - cal.y1) / 100 * state.natH;
+    var px = Math.hypot(dx, dy);
+    state.mpp = px > 1 ? (cal.len_m / px) : null;
+  }
+  function measuredHint(b) {
+    if (state.mpp) {
+      var m = r2(measuredFor(b));
+      if (b.manual_m2) return 'Measured from scale: ≈' + m + ' m² — a manual override is in use.';
+      return 'Measured from scale: ' + m + ' m² (re-measured as you move/resize the box).';
+    }
+    return 'Type an m² manually, or use Calibrate scale above to measure from the drawing.';
   }
 
   function stageImg() { return document.getElementById('pr_bg'); }
   function pointerPos(ev) {
     var rect = stageImg().getBoundingClientRect();
     return { x: (ev.clientX - rect.left) / rect.width, y: (ev.clientY - rect.top) / rect.height };
+  }
+
+  function calLinePixels() {
+    var rect = stageImg().getBoundingClientRect();
+    var c = state.calLine;
+    var x1 = c.sx / 100 * rect.width, y1 = c.sy / 100 * rect.height;
+    var x2 = c.cx / 100 * rect.width, y2 = c.cy / 100 * rect.height;
+    var dx = x2 - x1, dy = y2 - y1;
+    return { x1: x1, y1: y1, len: Math.hypot(dx, dy), angle: Math.atan2(dy, dx) * 180 / Math.PI };
+  }
+  function calNaturalPx() {
+    var c = state.calLine;
+    var dx = (c.cx - c.sx) / 100 * state.natW;
+    var dy = (c.cy - c.sy) / 100 * state.natH;
+    return Math.hypot(dx, dy);
+  }
+  function applyCalibration(lenM) {
+    var len = num(lenM, 0);
+    if (!(len > 0)) { alert('Enter a real-world length greater than zero.'); return; }
+    var px = calNaturalPx();
+    if (!(px > 1)) { alert('Reference line is too short — drag a longer line (use a scale bar or a dimensioned feature).'); return; }
+    var c = state.calLine;
+    state.calibration = {
+      x1: r2(c.sx), y1: r2(c.sy), x2: r2(c.cx), y2: r2(c.cy), len_m: r2(len)
+    };
+    recomputeMpp();
+    state.boxes.forEach(fillMeasured);
+    state.calMode = false;
+    state.calLine = null;
+    state.calPanel = false;
+    postValue();
+    render();
   }
 
   window.addEventListener('message', function (event) {
@@ -114,11 +216,16 @@
       state.imageKey = image;
       state.revision = revision;
       state.substrates = (args.substrates || []).slice();
+      state.calibration = args.calibration || null;
+      recomputeMpp();
       var next = normalize(args.boxes || []);
       var stillSelected = state.selectedId && next.some(function (b) { return b.id === state.selectedId; });
       state.selectedId = stillSelected ? state.selectedId : (next.length ? next[0].id : null);
       state.boxes = next;
       state.draw = null;
+      state.calMode = false;
+      state.calLine = null;
+      state.calPanel = false;
     }
     render();
   });
@@ -138,20 +245,49 @@
     }
     var toolbar = document.createElement('div');
     toolbar.className = 'toolbar';
+    var tbLeft = document.createElement('div');
+    tbLeft.className = 'tb-left';
     var hint = document.createElement('div');
     hint.className = 'hint';
-    hint.textContent = 'Drag on the elevation to draw a substrate box. Click a box to select it — drag to move, drag its green handle to resize. Edits save automatically.';
-    toolbar.appendChild(hint);
+    if (state.calMode) {
+      hint.textContent = 'Calibrating — drag one known-length line on the elevation (a scale bar or a dimensioned feature), then enter its real-world length.';
+    } else {
+      hint.textContent = 'Drag on the elevation to draw a substrate box. Click a box to select it — drag to move, drag its green handle to resize. Box areas are measured from the drawing when the scale is calibrated.';
+    }
+    tbLeft.appendChild(hint);
+    var scaleInfo = document.createElement('span');
+    scaleInfo.className = state.mpp ? 'cal-ok' : 'cal-none';
+    scaleInfo.textContent = state.mpp ? ('Scale set · 1 px ≈ ' + (Math.round(state.mpp * 10000) / 10000) + ' m') : 'Scale not calibrated';
+    tbLeft.appendChild(scaleInfo);
+    toolbar.appendChild(tbLeft);
+
+    var btns = document.createElement('div');
+    btns.className = 'tb-btns';
+    var calBtn = document.createElement('button');
+    calBtn.type = 'button';
+    calBtn.textContent = state.calMode ? 'Cancel calibrate' : (state.calibration ? 'Recalibrate scale' : 'Calibrate scale');
+    calBtn.className = state.calMode ? 'active' : (state.calibration ? 'cal-set' : '');
+    calBtn.addEventListener('click', function () {
+      state.calMode = !state.calMode;
+      state.calLine = null;
+      state.calPanel = false;
+      render();
+    });
+    btns.appendChild(calBtn);
     var clearBtn = document.createElement('button');
     clearBtn.type = 'button';
+    clearBtn.className = 'danger';
     clearBtn.textContent = 'Clear all boxes';
     clearBtn.addEventListener('click', function () {
+      if (!state.boxes.length) return;
+      if (!confirm('Remove all drawn boxes on this elevation?')) return;
       state.boxes = [];
       state.selectedId = null;
       postValue();
       render();
     });
-    toolbar.appendChild(clearBtn);
+    btns.appendChild(clearBtn);
+    toolbar.appendChild(btns);
     root.appendChild(toolbar);
 
     var stage = document.createElement('div');
@@ -162,21 +298,52 @@
     img.alt = 'Elevation';
     img.draggable = false;
     img.className = 'bg';
+    img.onload = function () {
+      state.natW = img.naturalWidth || 0;
+      state.natH = img.naturalHeight || 0;
+      recomputeMpp();
+      updateChips();
+    };
     stage.appendChild(img);
 
     stage.addEventListener('pointerdown', function (ev) {
       if (ev.target !== img && ev.target !== stage) return;
-      startDraw(ev);
+      if (state.calMode) startCalLine(ev); else startDraw(ev);
     });
     stage.addEventListener('pointermove', function (ev) {
-      if (state.draw) moveDraw(ev);
+      if (state.calMode) { if (state.calLine) moveCalLine(ev); }
+      else if (state.draw) moveDraw(ev);
     });
     stage.addEventListener('pointerup', function (ev) {
-      if (state.draw) endDraw(ev);
+      if (state.calMode) { if (state.calLine) endCalLine(ev); }
+      else if (state.draw) endDraw(ev);
     });
     stage.addEventListener('pointercancel', function () {
-      if (state.draw) { state.draw = null; render(); }
+      if (state.calMode) { state.calLine = null; render(); }
+      else if (state.draw) { state.draw = null; render(); }
     });
+
+    if (state.calLine) {
+      var lp = calLinePixels();
+      var line = document.createElement('div');
+      line.className = 'cal-line';
+      line.style.left = lp.x1 + 'px';
+      line.style.top = lp.y1 + 'px';
+      line.style.width = lp.len + 'px';
+      line.style.transform = 'rotate(' + lp.angle + 'deg)';
+      stage.appendChild(line);
+    } else if (state.calibration) {
+      var mp = storedCalPixels();
+      if (mp) {
+        var mark = document.createElement('div');
+        mark.className = 'cal-mark';
+        mark.style.left = mp.x1 + 'px';
+        mark.style.top = mp.y1 + 'px';
+        mark.style.width = mp.len + 'px';
+        mark.style.transform = 'rotate(' + mp.angle + 'deg)';
+        stage.appendChild(mark);
+      }
+    }
 
     if (state.draw) {
       var dr = document.createElement('div');
@@ -204,7 +371,33 @@
       stage.appendChild(el);
     });
     root.appendChild(stage);
+
+    if (state.calPanel) {
+      root.appendChild(calPanel());
+    }
     renderEditor(root);
+  }
+
+  function updateChips() {
+    state.boxes.forEach(function (b) {
+      var el = boxEl(b.id);
+      if (!el) return;
+      var chip = el.querySelector('.chip');
+      if (chip) chip.textContent = chipText(b);
+    });
+    var hintEl = document.getElementById('pr_qty_hint');
+    var b = byId();
+    if (hintEl && b) hintEl.textContent = measuredHint(b);
+  }
+
+  function storedCalPixels() {
+    var cal = state.calibration;
+    if (!cal || !state.natW || !state.natH) return null;
+    var rect = stageImg().getBoundingClientRect();
+    var x1 = cal.x1 / 100 * rect.width, y1 = cal.y1 / 100 * rect.height;
+    var x2 = cal.x2 / 100 * rect.width, y2 = cal.y2 / 100 * rect.height;
+    var dx = x2 - x1, dy = y2 - y1;
+    return { x1: x1, y1: y1, len: Math.hypot(dx, dy), angle: Math.atan2(dy, dx) * 180 / Math.PI };
   }
 
   function drawRect() {
@@ -238,12 +431,75 @@
       substrate: state.substrates[0] || 'External walls / render',
       x: r.x, y: r.y, w: r.w, h: r.h,
       progress: 0,
-      qty_m2: ''
+      qty_m2: '',
+      manual_m2: ''
     };
+    fillMeasured(box);
     state.boxes.push(box);
     state.selectedId = box.id;
     postValue();
     render();
+  }
+
+  function startCalLine(ev) {
+    ev.preventDefault();
+    var p = pointerPos(ev);
+    state.calLine = { sx: p.x, sy: p.y, cx: p.x, cy: p.y };
+    stage.setPointerCapture(ev.pointerId);
+  }
+  function moveCalLine(ev) {
+    var p = pointerPos(ev);
+    state.calLine.cx = p.x;
+    state.calLine.cy = p.y;
+    render();
+  }
+  function endCalLine(ev) {
+    var p = pointerPos(ev);
+    state.calLine.cx = p.x;
+    state.calLine.cy = p.y;
+    var lp = calLinePixels();
+    if (lp.len < 4) { state.calLine = null; render(); return; }
+    state.calPanel = true;
+    render();
+  }
+
+  function calPanel() {
+    var panel = document.createElement('div');
+    panel.className = 'cal-panel';
+    var title = document.createElement('div');
+    title.className = 'cp-title';
+    title.textContent = 'Set drawing scale';
+    panel.appendChild(title);
+    var lab = document.createElement('label');
+    lab.textContent = 'Real-world length of the line you just drew (metres)';
+    panel.appendChild(lab);
+    var inp = document.createElement('input');
+    inp.type = 'number';
+    inp.min = 0.01;
+    inp.step = 0.01;
+    inp.value = '1';
+    inp.id = 'pr_cal_len';
+    panel.appendChild(inp);
+    var actions = document.createElement('div');
+    actions.className = 'actions';
+    var ok = document.createElement('button');
+    ok.type = 'button';
+    ok.className = 'primary';
+    ok.textContent = 'Set scale';
+    ok.addEventListener('click', function () { applyCalibration(inp.value); });
+    actions.appendChild(ok);
+    var cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.textContent = 'Cancel';
+    cancel.addEventListener('click', function () {
+      state.calPanel = false;
+      state.calLine = null;
+      state.calMode = false;
+      render();
+    });
+    actions.appendChild(cancel);
+    panel.appendChild(actions);
+    return panel;
   }
 
   function attachDrag(el, b, ev, kind) {
@@ -268,7 +524,9 @@
       el.removeEventListener('pointermove', onMove);
       el.removeEventListener('pointerup', onUp);
       el.removeEventListener('pointercancel', onUp);
+      fillMeasured(b);
       postValue();
+      updateChips();
     }
     el.addEventListener('pointermove', onMove);
     el.addEventListener('pointerup', onUp);
@@ -381,27 +639,50 @@
 
     var qtyBox = document.createElement('div');
     var qLab = document.createElement('label');
-    qLab.textContent = 'Area (m²) — optional, flows into take-off';
+    qLab.textContent = 'Area (m²)';
+    var qHint = document.createElement('span');
+    qHint.id = 'pr_qty_hint';
+    qHint.className = 'qty-hint';
+    qHint.textContent = measuredHint(b);
     var qInp = document.createElement('input');
     qInp.type = 'number';
     qInp.min = 0;
     qInp.step = 0.1;
-    qInp.placeholder = 'e.g. 42.5';
-    qInp.value = (b.qty_m2 === '' || b.qty_m2 === null || b.qty_m2 === undefined) ? '' : b.qty_m2;
+    qInp.placeholder = state.mpp ? 'auto from scale' : 'e.g. 42.5';
+    qInp.value = (b.manual_m2) ? b.manual_m2 : (b.qty_m2 === '' || b.qty_m2 === null || b.qty_m2 === undefined ? '' : b.qty_m2);
     qInp.addEventListener('input', function () {
-      b.qty_m2 = qInp.value === '' ? '' : num(qInp.value, 0);
+      if (qInp.value === '') {
+        b.manual_m2 = '';
+        b.qty_m2 = '';
+      } else {
+        var v = num(qInp.value, 0);
+        b.manual_m2 = v;
+        b.qty_m2 = v;
+      }
+      qHint.textContent = measuredHint(b);
       var el = boxEl(b.id);
       if (el) {
         var chip = el.querySelector('.chip');
         if (chip) chip.textContent = chipText(b);
       }
     });
-    qInp.addEventListener('change', function () {
-      b.qty_m2 = qInp.value === '' ? '' : num(qInp.value, 0);
-      postValue();
-    });
+    qInp.addEventListener('change', function () { postValue(); });
     qtyBox.appendChild(qLab);
     qtyBox.appendChild(qInp);
+    qtyBox.appendChild(qHint);
+    if (b.manual_m2 && state.mpp) {
+      var useM = document.createElement('button');
+      useM.type = 'button';
+      useM.className = 'use-measured';
+      useM.textContent = 'Use measured area';
+      useM.addEventListener('click', function () {
+        b.manual_m2 = '';
+        fillMeasured(b);
+        postValue();
+        render();
+      });
+      qtyBox.appendChild(useM);
+    }
 
     grid.appendChild(labelBox);
     grid.appendChild(subBox);

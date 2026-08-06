@@ -1,13 +1,14 @@
 import base64
 import io
 import json
+import math
 import os
 import re
 import shutil
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 import requests
@@ -604,6 +605,7 @@ def normalise_boxes(boxes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             "h": round(h, 4),
             "progress": normalise_progress(b.get("progress", 0)),
             "qty_m2": round(max(0.0, qty), 2),
+            "manual_m2": round(max(0.0, _to_float(b.get("manual_m2")) or 0.0), 2),
         })
     return cleaned
 
@@ -624,6 +626,7 @@ def substrate_boxes_from_job(job: Dict[str, Any], img_path: str) -> List[Dict[st
             "h": z.get("h", 0),
             "progress": z.get("progress", 0),
             "qty_m2": z.get("qty_m2", 0),
+            "manual_m2": z.get("manual_m2", 0),
         })
     return normalise_boxes(boxes)
 
@@ -636,14 +639,83 @@ def save_substrate_boxes(job: Dict[str, Any], img_path: str, boxes: List[Dict[st
     job["elevation_progress"][img_path] = state
 
 
+def _image_pixel_size(path: Any):
+    try:
+        from PIL import Image as _PILImage
+        with _PILImage.open(str(path)) as im:
+            return im.size
+    except Exception:
+        return None
+
+
+def normalise_calibration(cal: Any) -> Optional[Dict[str, Any]]:
+    if not cal or not isinstance(cal, dict):
+        return None
+    x1 = _to_float(cal.get("x1"))
+    y1 = _to_float(cal.get("y1"))
+    x2 = _to_float(cal.get("x2"))
+    y2 = _to_float(cal.get("y2"))
+    len_m = _to_float(cal.get("len_m"))
+    if None in (x1, y1, x2, y2) or len_m is None or len_m <= 0:
+        return None
+    def _clamp(v: float) -> float:
+        return round(max(0.0, min(100.0, v)), 4)
+    return {
+        "x1": _clamp(x1),
+        "y1": _clamp(y1),
+        "x2": _clamp(x2),
+        "y2": _clamp(y2),
+        "len_m": round(len_m, 4),
+    }
+
+
+def calibration_mpp(cal: Any, img_w: Any, img_h: Any) -> Optional[float]:
+    cal = normalise_calibration(cal)
+    w = _to_float(img_w)
+    h = _to_float(img_h)
+    if not cal or not w or w <= 0 or not h or h <= 0:
+        return None
+    dx = (cal["x2"] - cal["x1"]) / 100.0 * w
+    dy = (cal["y2"] - cal["y1"]) / 100.0 * h
+    px = math.hypot(dx, dy)
+    if px <= 1e-6:
+        return None
+    return cal["len_m"] / px
+
+
+def measured_box_m2(box: Dict[str, Any], mpp: Optional[float], img_w: Any, img_h: Any) -> float:
+    w = _to_float(box.get("w"))
+    h = _to_float(box.get("h"))
+    iw = _to_float(img_w)
+    ih = _to_float(img_h)
+    if mpp is None or not w or w <= 0 or not h or h <= 0 or not iw or iw <= 0 or not ih or ih <= 0:
+        return 0.0
+    return round((w / 100.0 * iw) * (h / 100.0 * ih) * mpp * mpp, 2)
+
+
+def effective_box_m2(box: Dict[str, Any], mpp: Optional[float] = None, img_w: Any = None, img_h: Any = None) -> float:
+    manual = _to_float(box.get("manual_m2")) or 0.0
+    if manual > 0:
+        return round(manual, 2)
+    measured = measured_box_m2(box, mpp, img_w, img_h)
+    if measured > 0:
+        return measured
+    return round(_to_float(box.get("qty_m2")) or 0.0, 2)
+
+
 def merge_elevation_box_rows(
     job: Dict[str, Any],
     rows: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
     kept = [r for r in rows if r.get("source_note") != ELEVATION_BOX_SOURCE]
     for img_path, entry in (job.get("elevation_progress") or {}).items():
+        cal = normalise_calibration(entry.get("calibration"))
+        size = _image_pixel_size(img_path)
+        img_w = size[0] if size else None
+        img_h = size[1] if size else None
+        mpp = calibration_mpp(cal, img_w, img_h) if cal else None
         for b in normalise_boxes(entry.get("zones", [])):
-            qty = float(b.get("qty_m2") or 0.0)
+            qty = effective_box_m2(b, mpp, img_w, img_h)
             if qty <= 0:
                 continue
             labour, int_ext = substrate_labour(b.get("substrate"))
@@ -1439,6 +1511,7 @@ def progress_page(job_id: str):
         return
     state = job.get("elevation_progress", {}).get(img_path, {}) or {}
     stored = substrate_boxes_from_job(job, img_path)
+    stored_cal = normalise_calibration(state.get("calibration"))
     overall = float(state.get("progress", 0.0))
     rev_key = f"pr_box_rev_{job_id}_{safe_name(img_path)}"
     rev = int(st.session_state.get(rev_key, 0))
@@ -1447,19 +1520,52 @@ def progress_page(job_id: str):
         img_file.read_bytes(),
         boxes=stored,
         substrates=SUBSTRATE_OPTIONS,
+        calibration=stored_cal,
         revision=rev,
         key=f"pr_boxes_{job_id}_{safe_name(img_path)}",
         height=860,
     )
-    current = normalise_boxes(returned) if returned is not None else stored
-    if returned is not None and current != stored:
-        save_substrate_boxes(job, img_path, current)
-        job["takeoff_rows"] = merge_elevation_box_rows(job, job.get("takeoff_rows", []))
-        save_job(job_id, job)
-        st.session_state[rev_key] = rev + 1
+    current = stored
+    cal = stored_cal
+    if returned is not None:
+        payload = returned if isinstance(returned, dict) else {}
+        next_boxes = normalise_boxes(payload.get("boxes"))
+        next_cal = normalise_calibration(payload.get("calibration"))
+        if next_boxes != stored or next_cal != stored_cal:
+            current = next_boxes
+            cal = next_cal
+            job.setdefault("elevation_progress", {})
+            job["elevation_progress"][img_path] = {
+                "progress": normalise_progress(overall),
+                "zones": current,
+                "calibration": cal,
+                "updated_at": now_stamp(),
+            }
+            job["takeoff_rows"] = merge_elevation_box_rows(job, job.get("takeoff_rows", []))
+            save_job(job_id, job)
+            st.session_state[rev_key] = rev + 1
 
-    m2_total = sum(float(b.get("qty_m2") or 0.0) for b in current)
-    st.caption(f"**{len(current)} box(es)** drawn · **{m2_total:g} m²** entered (only boxes with an m² value flow into the take-off).")
+    size = _image_pixel_size(img_path)
+    img_w = size[0] if size else None
+    img_h = size[1] if size else None
+    mpp = calibration_mpp(cal, img_w, img_h) if cal else None
+    m2_total = sum(effective_box_m2(b, mpp, img_w, img_h) for b in current)
+    st.caption(f"**{len(current)} box(es)** drawn · **{m2_total:g} m²** in the take-off (only boxes with an m² value flow in).")
+
+    if cal:
+        st.caption(f"Scale calibrated — {cal['len_m']:g} m reference line, so box areas are **measured from the drawing** automatically.")
+        if st.button("Clear calibration", type="secondary"):
+            job.setdefault("elevation_progress", {})
+            job["elevation_progress"][img_path] = {
+                "progress": normalise_progress(overall),
+                "zones": current,
+                "updated_at": now_stamp(),
+            }
+            save_job(job_id, job)
+            st.session_state[rev_key] = rev + 1
+            st.rerun()
+    else:
+        st.caption("Not calibrated — draw a box, then use **Calibrate scale** above to set the drawing scale so m² are measured from the drawing (or type an m² manually).")
 
     c1, c2, c3 = st.columns(3)
     overall_slider = c1.slider("Overall elevation progress %", 0, 100, int(overall), step=1, key=f"pr_overall_{job_id}")
@@ -1469,6 +1575,7 @@ def progress_page(job_id: str):
         job["elevation_progress"][img_path] = {
             "progress": normalise_progress(overall_slider),
             "zones": boxes,
+            "calibration": cal,
             "updated_at": now_stamp(),
         }
         save_job(job_id, job)
@@ -1493,6 +1600,7 @@ def progress_page(job_id: str):
             job.setdefault("elevation_progress", {})[img_path] = {
                 "progress": normalise_progress(overall_slider),
                 "zones": current,
+                "calibration": cal,
                 "updated_at": now_stamp(),
             }
             save_job(job_id, job)
@@ -1600,6 +1708,7 @@ def export_page(job_id: str):
                 "image_path": img_path,
                 "progress": entry.get("progress", 0),
                 "zones": json.dumps(entry.get("zones", [])),
+                "calibration": json.dumps(entry.get("calibration") or {}),
                 "updated_at": entry.get("updated_at", ""),
             }
             for img_path, entry in (job.get("elevation_progress", {}) or {}).items()

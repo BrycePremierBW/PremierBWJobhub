@@ -23,6 +23,7 @@ def substrate_box_editor(
     image_bytes,
     boxes=None,
     substrates=None,
+    calibration=None,
     revision=0,
     key=None,
     height=860,
@@ -31,17 +32,21 @@ def substrate_box_editor(
 
     ``image_bytes`` is the PNG bytes of the elevation image. ``boxes`` is the
     current list of box dicts (x/y/w/h in percent, label, substrate, progress,
-    qty_m2). ``substrates`` lists the substrate choices for the dropdown.
+    qty_m2, manual_m2). ``substrates`` lists the substrate choices for the
+    dropdown. ``calibration`` is the drawing's scale calibration (a reference
+    line in percent coordinates plus its real-world length in metres) used to
+    auto-measure each box's m²; pass ``None`` when the drawing has no scale.
     ``revision`` is bumped whenever Python changes the boxes so the component
     adopts the new set.
 
-    Returns the current boxes (or None if untouched).
+    Returns ``{boxes: [...], calibration: {...} | null}`` or None if untouched.
     """
     image_data_uri = "data:image/png;base64," + base64.b64encode(image_bytes).decode("ascii")
     return _substrate_box_component(
         image=image_data_uri,
         boxes=list(boxes or []),
         substrates=list(substrates or []),
+        calibration=calibration or None,
         revision=int(revision or 0),
         default=None,
         key=key,

@@ -1,5 +1,23 @@
 # JobHub secured release
 
+## 2026-08-06 - Elevation scale calibration (measured m²)
+
+- Elevation substrate boxes are now **measured from the drawing** instead of
+  trusting a typed number. A "Calibrate scale" step in the box editor lets you
+  drag one known-length reference line (a scale bar or a dimensioned feature)
+  and enter its real-world length in metres. Every box's m² is then computed
+  from its drawn dimensions at that scale, and re-measured as you move or resize
+  it. The reference line is drawn faintly on the elevation so the calibration is
+  visible and can be redone or cleared.
+- A typed m² value is kept as an explicit manual override (shown without the
+  "≈" that marks measured values), so nothing you already entered is lost. The
+  take-off uses the same precedence (manual override → measured → stored value)
+  so the elevation sheet and take-off can never disagree.
+- Calibration is stored per elevation in the job file and exported in the
+  Elevation Progress sheet. Covered by
+  `tests/test_planreader_substrate_boxes.py` (calibration math, precedence and
+  take-off integration).
+
 ## 2026-08-06 - Elevation substrate box editor
 
 - PlanReader's Elevation progress tracker now lets you drag-and-drop boxes
