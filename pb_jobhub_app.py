@@ -5918,6 +5918,9 @@ def employee_portal():
             """, (selected_job_id,))
             st.dataframe(equipment_df, width="stretch", hide_index=True)
 
+            st.markdown("### Colour Schedule / Colour Markup")
+            render_colour_schedule_documents(selected_job_id)
+
     with tab_photos:
         job_photos_page(employee_restricted=True)
     with tab_forms:
@@ -17174,6 +17177,99 @@ def render_recent_uploads_panel(limit=8, key_prefix="recent_uploads"):
             st.divider()
 
 
+def colour_schedule_documents_frame(job_id):
+    """Job documents that are (or look like) colour schedules / colour markup."""
+    return safe_df_query(
+        """
+        SELECT id,
+               document_type,
+               file_name,
+               file_path,
+               notes,
+               created_at AS 'Created At',
+               COALESCE(mime_type, 'application/octet-stream') AS 'Mime Type'
+        FROM job_documents
+        WHERE job_id = ?
+          AND (LOWER(COALESCE(document_type, '')) LIKE '%colour%'
+               OR LOWER(COALESCE(file_name, '')) LIKE '%colour%')
+        ORDER BY id DESC
+        """,
+        (int(job_id),),
+    )
+
+
+def render_colour_schedule_documents(job_id):
+    """Show a job's colour schedule: markup images inline, schedules as tables or downloads."""
+    docs = colour_schedule_documents_frame(job_id)
+    if docs.empty:
+        st.info(
+            "No colour schedule documents are attached to this job yet. Generate the "
+            "schedule in PB PlanReader, then upload it here as a 'Colour Schedule' "
+            "document (PNG markup, Excel or PDF) and it will appear for the crew."
+        )
+        return
+    for _, doc in docs.iterrows():
+        file_path = str(doc["file_path"] or "")
+        file_name = str(doc["file_name"] or "")
+        doc_type = str(doc["document_type"] or "Colour Schedule")
+        mime = str(doc["Mime Type"] or "application/octet-stream")
+        with st.container(border=True):
+            st.markdown(f"**{doc_type}** — {file_name}")
+            if str(doc["Created At"] or "").strip():
+                st.caption(f"Created: {doc['Created At']}")
+            if str(doc["notes"] or "").strip():
+                st.caption(str(doc["notes"]))
+            if not os.path.exists(file_path):
+                st.warning("File not found on disk.")
+                continue
+            low = file_name.lower()
+            if mime.startswith("image/") or low.endswith((".png", ".jpg", ".jpeg", ".webp")):
+                st.image(file_path, caption=file_name, width="stretch")
+            elif low.endswith((".xlsx", ".xls")):
+                try:
+                    st.dataframe(pd.read_excel(file_path, sheet_name=0), width="stretch", hide_index=True)
+                except Exception:
+                    st.warning("Could not read the spreadsheet — download it instead.")
+            elif low.endswith(".csv"):
+                try:
+                    st.dataframe(pd.read_csv(file_path), width="stretch", hide_index=True)
+                except Exception:
+                    st.warning("Could not read the CSV — download it instead.")
+            with open(file_path, "rb") as f:
+                st.download_button("Download", f.read(), file_name=file_name, mime=mime, key=f"colour_schedule_dl_{doc['id']}")
+
+
+def colour_schedule_page():
+    role = current_role()
+    st.header("Colour Schedule")
+    st.caption("View the colour brief and colour markup for any job. Schedules are generated in PB PlanReader and attached to the job as Colour Schedule documents.")
+    selected_job_id = None
+    if role == "employee":
+        user = get_current_user() or {}
+        job_options = get_employee_job_options(user.get("employee_id"))
+        if not job_options:
+            st.info("No jobs available for your account.")
+            return
+        selected_label = st.selectbox("Select Job", list(job_options.keys()), key="colour_schedule_employee_job")
+        selected_job_id = job_options[selected_label]
+    else:
+        include_archived = st.checkbox("Include archived jobs", value=False, key="colour_schedule_include_archived")
+        jobs_df = job_lookup_dataframe(include_archived=include_archived)
+        if jobs_df.empty:
+            st.info("No jobs found.")
+            return
+        selected_job_id = select_job_from_dataframe(
+            jobs_df,
+            "Select Job",
+            key="colour_schedule_job",
+            default_job_id=st.session_state.get("linked_view_selected_job_id"),
+        )
+        if not selected_job_id:
+            return
+    st.divider()
+    render_colour_schedule_documents(int(selected_job_id))
+
+
 OPERATING_SETTING_DEFAULTS = {
     "overhead_wages": ("Wage overhead", "Monthly overhead", 16000.0, "$ / month", 1),
     "overhead_vehicles": ("Cars / vehicles", "Monthly overhead", 600.0, "$ / month", 2),
@@ -20638,7 +20734,7 @@ render_sidebar_notifications()
 role = current_role()
 
 if role == "employee":
-    main_menu_options = ["Field Mode", "Employee Portal"]
+    main_menu_options = ["Field Mode", "Employee Portal", "Colour Schedule"]
     management_menu_map = {}
     estimating_menu_map = {}
     site_operations_menu_map = {}
@@ -20652,6 +20748,7 @@ elif role == "manager":
         "Job Folders",
         "Upload PO",
         "Estimating",
+        "Colour Schedule",
         "Site Operations",
         "Reports",
         "Management",
@@ -20692,6 +20789,7 @@ else:
         "Job Folders",
         "Upload PO",
         "Estimating",
+        "Colour Schedule",
         "Site Operations",
         "Reports",
         "Management",
@@ -21047,6 +21145,9 @@ if menu == "Field Mode":
 
 elif menu == "Employee Portal":
     employee_portal()
+
+elif menu == "Colour Schedule":
+    colour_schedule_page()
 
 elif menu == "Operations Hub":
     render_operations_hub(jobhub_enterprise_context())

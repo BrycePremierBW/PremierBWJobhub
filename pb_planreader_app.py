@@ -311,6 +311,385 @@ def takeoff_report_pdf_bytes(job: Dict[str, Any], summary: List[Dict[str, Any]],
     return buf.getvalue()
 
 
+COLOUR_SCHEDULE_COLUMNS = ["area_location", "surface", "colour", "finish", "product", "notes", "hex"]
+
+DEFAULT_FINISH_BY_SURFACE = {
+    "Walls": "Low Sheen",
+    "Ceiling": "Flat / Matt",
+    "Trim / Woodwork": "Semi Gloss",
+    "Doors": "Semi Gloss",
+    "Skirting": "Semi Gloss",
+    "External walls": "Weathershield Low Sheen",
+    "Fascia": "Gloss",
+    "Gutter": "Gloss",
+    "Soffit": "Low Sheen",
+    "Floor coating": "Floor enamel",
+    "Fence / Deck": "Exterior gloss",
+}
+
+
+def _surface_label_from_substrate(substrate: Any) -> str:
+    low = str(substrate or "").lower()
+    for key, label in [
+        ("ceiling", "Ceiling"),
+        ("trim", "Trim / Woodwork"),
+        ("woodwork", "Trim / Woodwork"),
+        ("skirt", "Skirting"),
+        ("door", "Doors"),
+        ("external", "External walls"),
+        ("fascia", "Fascia"),
+        ("gutter", "Gutter"),
+        ("soffit", "Soffit"),
+        ("floor", "Floor coating"),
+        ("fence", "Fence / Deck"),
+        ("deck", "Fence / Deck"),
+        ("wall", "Walls"),
+    ]:
+        if key in low:
+            return label
+    return str(substrate or "Walls").strip() or "Walls"
+
+
+def default_colour_finish(surface: Any) -> str:
+    return DEFAULT_FINISH_BY_SURFACE.get(str(surface or "").strip(), "Low Sheen")
+
+
+def normalise_colour_schedule(rows: Any) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    seen: set = set()
+    for row in rows or []:
+        area = str(row.get("area_location") or row.get("room") or "").strip()
+        surface = str(row.get("surface") or row.get("substrate") or "").strip() or "Walls"
+        key = (area.casefold(), surface.casefold())
+        if key in seen:
+            continue
+        seen.add(key)
+        finish = str(row.get("finish") or "").strip() or default_colour_finish(surface)
+        out.append({
+            "area_location": area or "Whole job",
+            "surface": surface,
+            "colour": str(row.get("colour") or "").strip(),
+            "finish": finish,
+            "product": str(row.get("product") or "").strip(),
+            "notes": str(row.get("notes") or "").strip(),
+            "hex": str(row.get("hex") or "").strip(),
+        })
+    out.sort(key=lambda r: (r["area_location"].casefold(), r["surface"].casefold()))
+    return out
+
+
+def seed_colour_schedule(job: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Build a colour schedule draft from the take-off rows and detected rooms."""
+    rows: List[Dict[str, Any]] = []
+    for r in job.get("takeoff_rows", []) or []:
+        area = str(r.get("area_location") or "").strip()
+        if not area:
+            continue
+        surface = _surface_label_from_substrate(r.get("substrate"))
+        rows.append({"area_location": area, "surface": surface})
+    covered: set = set()
+    for r in rows:
+        covered.add((str(r.get("area_location", "")).casefold(), str(r.get("surface", "")).casefold()))
+    for room in job.get("rooms", []) or []:
+        area = str(room.get("room") or room.get("area_location") or "").strip()
+        if not area:
+            continue
+        if (area.casefold(), "walls") not in covered:
+            rows.append({"area_location": area, "surface": "Walls"})
+            covered.add((area.casefold(), "walls"))
+    return normalise_colour_schedule(rows)
+
+
+def resolve_colour_hex(colour: Any) -> str:
+    """Best-effort hex for a common colour name; None when unknown."""
+    text = str(colour or "").strip()
+    if not text:
+        return ""
+    if text.startswith("#") and len(text) in (4, 7):
+        return text
+    low = text.casefold()
+    for key, hexv in sorted({
+        "white": "#FFFFFF",
+        "off white": "#F5F3EC",
+        "offwhite": "#F5F3EC",
+        "natural white": "#F2EFE7",
+        "antique white": "#F0E6D2",
+        "oat": "#E9DFCC",
+        "grecian": "#D9D5CE",
+        "alabaster": "#EDEAE4",
+        "snow": "#F4F6F5",
+        "quarter": "#F1EDE4",
+        "half": "#E8E3D8",
+        "black": "#1A1A1A",
+        "charcoal": "#3B3B3B",
+        "graphite": "#4A4A48",
+        "beige": "#E3D5B6",
+        "cream": "#F4EBDD",
+        "greige": "#CFC4B6",
+    }.items(), key=lambda kv: len(kv[0]), reverse=True):
+        if key in low:
+            return hexv
+    return ""
+
+
+def colour_schedule_df(job: Dict[str, Any]) -> pd.DataFrame:
+    rows = normalise_colour_schedule(job.get("colour_schedule", []))
+    if not rows:
+        rows = seed_colour_schedule(job)
+    return pd.DataFrame(rows, columns=COLOUR_SCHEDULE_COLUMNS)
+
+
+def colour_schedule_excel_bytes(job: Dict[str, Any]) -> bytes:
+    schedule = colour_schedule_df(job)
+    by_colour = schedule.groupby(["colour", "finish"], dropna=False).agg(
+        Areas=("area_location", lambda v: ", ".join(sorted({str(x) for x in v})))
+    ).reset_index()
+    by_colour = by_colour[["colour", "finish", "Areas"]]
+    return df_to_excel_bytes({
+        "Colour Schedule": schedule,
+        "Colours Used": by_colour,
+        "Takeoff Reference": pd.DataFrame(job.get("takeoff_rows", [])),
+    })
+
+
+def colour_schedule_pdf_bytes(job: Dict[str, Any]) -> bytes:
+    """A paint-ready colour schedule (per-room surfaces) plus a colours-used summary."""
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
+    schedule = colour_schedule_df(job)
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=20, rightMargin=20, topMargin=20, bottomMargin=20)
+    styles = getSampleStyleSheet()
+    story = [
+        Paragraph(f"<b>{safe_name(str(job.get('job_name') or 'Painting job'))}</b> — Colour Schedule", styles["Title"]),
+        Paragraph(
+            f"Job: {job.get('job_no','') or '-'} &nbsp;·&nbsp; {job.get('site_address','') or '-'} &nbsp;·&nbsp; "
+            f"Generated {now_stamp()}",
+            styles["Normal"],
+        ),
+        Spacer(1, 10),
+    ]
+    if schedule.empty:
+        story.append(Paragraph("<i>No colour schedule lines yet.</i>", styles["Normal"]))
+        doc.build(story)
+        return buf.getvalue()
+    head = ["Area / Room", "Surface", "Colour", "Finish", "Product / Code", "Notes"]
+    data = [[
+        str(r["area_location"]),
+        str(r["surface"]),
+        str(r["colour"] or "—"),
+        str(r["finish"]),
+        str(r["product"] or "—"),
+        str(r["notes"] or "—"),
+    ] for r in schedule.to_dict("records")]
+    t = Table([head] + data, repeatRows=1, colWidths=[95, 75, 95, 70, 80, 70])
+    t.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1f3a5f")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("GRID", (0, 0), (-1, -1), 0.4, colors.grey),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#eef2f7")]),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+    ]))
+    story.append(t)
+    story.append(Spacer(1, 12))
+    by_colour = schedule.groupby(["colour", "finish"], dropna=False)["area_location"].apply(
+        lambda v: ", ".join(sorted({str(x) for x in v}))
+    ).reset_index()
+    by_colour.columns = ["Colour", "Finish", "Areas / Rooms"]
+    story.append(Paragraph("<b>Colours Used</b>", styles["Heading3"]))
+    story.append(Table([[str(x) for x in by_colour.columns]] + by_colour.astype(str).values.tolist(), repeatRows=1))
+    doc.build(story)
+    return buf.getvalue()
+
+
+def markup_plan_image_bytes(option: Dict[str, Any], schedule_rows: List[Dict[str, Any]], markers: List[Dict[str, Any]]) -> bytes:
+    """Overlay a colour chip card onto each room marker on a plan page image."""
+    from PIL import Image, ImageDraw, ImageFont
+
+    img = Image.open(option["image_path"]).convert("RGB")
+    draw = ImageDraw.Draw(img)
+    width, height = img.size
+    scale = width / 1400.0
+    base = max(14, int(14 * scale))
+    title_font = None
+    body_font = None
+    for font_path in (r"C:\Windows\Fonts\arialbd.ttf", r"C:\Windows\Fonts\segoeuib.ttf"):
+        try:
+            title_font = ImageFont.truetype(font_path, int(base * 1.2))
+            break
+        except Exception:
+            title_font = None
+    for font_path in (r"C:\Windows\Fonts\arial.ttf", r"C:\Windows\Fonts\segoeui.ttf"):
+        try:
+            body_font = ImageFont.truetype(font_path, base)
+            break
+        except Exception:
+            body_font = None
+    if title_font is None or body_font is None:
+        body_font = ImageFont.load_default()
+
+    rows_by_area: Dict[str, List[Dict[str, Any]]] = {}
+    for row in schedule_rows:
+        rows_by_area.setdefault(str(row.get("area_location") or "").casefold(), []).append(row)
+    colours_used: set = set()
+
+    def draw_card(px, py, area, lines):
+        pad = int(8 * scale)
+        line_h = int((base + 6) * scale)
+        card_w = min(width - 20, int(240 * scale))
+        card_h = int((len(lines) + 2) * line_h) + pad
+        x0 = px + int(14 * scale)
+        y0 = py + int(14 * scale)
+        if x0 + card_w > width - 8:
+            x0 = px - card_w - int(14 * scale)
+        if y0 + card_h > height - 8:
+            y0 = py - card_h - int(14 * scale)
+        x0 = max(4, min(x0, width - card_w - 4))
+        y0 = max(4, min(y0, height - card_h - 4))
+        fill = resolve_colour_hex(rows_by_area.get(area, [{}])[0].get("colour")) or "#EEEEEE"
+        draw.rounded_rectangle([x0, y0, x0 + card_w, y0 + card_h], radius=int(6 * scale), fill="#FFFFFF", outline="#222222", width=2)
+        draw.rectangle([x0, y0, x0 + card_w, y0 + int(6 * scale)], fill=fill)
+        ty = y0 + pad
+        draw.text((x0 + pad, ty), str(area or "").title(), fill="#111111", font=title_font or body_font)
+        ty += line_h
+        for line in lines:
+            dot = resolve_colour_hex(line.get("colour")) or "#999999"
+            draw.ellipse([x0 + pad, ty + line_h * 0.3, x0 + pad + line_h * 0.6, ty + line_h * 0.9], fill=dot, outline="#000000")
+            label = f"{line.get('surface','')}: {line.get('colour') or 'TBC'}"
+            if line.get("finish"):
+                label += f" ({line['finish']})"
+            draw.text((x0 + pad + int(line_h * 0.9), ty), label, fill="#222222", font=body_font)
+            ty += line_h
+
+    for marker in markers or []:
+        mx = _to_float(marker.get("x"))
+        my = _to_float(marker.get("y"))
+        if not mx or not my:
+            continue
+        area = str(marker.get("label") or "").strip()
+        lines = rows_by_area.get(area.casefold(), [])
+        px = int(mx * width)
+        py = int(my * height)
+        draw.ellipse([px - int(5 * scale), py - int(5 * scale), px + int(5 * scale), py + int(5 * scale)], fill="#C8102E", outline="#FFFFFF", width=2)
+        for line in lines:
+            if line.get("colour"):
+                colours_used.add((str(line["colour"]).strip(), resolve_colour_hex(line.get("colour")) or "#999999"))
+        if lines:
+            draw_card(px, py, area, lines)
+
+    if colours_used:
+        legend = "Colours: " + "  ·  ".join(f"{name}" for name, _ in sorted(colours_used))
+        lh = base + 8
+        draw.rectangle([0, height - lh - 12, width, height], fill="#FFFFFF", outline="#999999")
+        draw.text((8, height - lh - 6), legend, fill="#111111", font=body_font)
+        lx = 8
+        for name, hexv in sorted(colours_used):
+            w = len(name) * base
+            draw.rectangle([lx, height - lh - 12, lx + 12, height - lh], fill=hexv, outline="#333333")
+            lx += 18 + int(draw.textlength(name, font=body_font)) + 14
+    out = io.BytesIO()
+    img.save(out, format="PNG")
+    return out.getvalue()
+
+
+def generate_colour_markup_images(job_id: str, job: Dict[str, Any]) -> List[Path]:
+    """Render a colour-markup PNG for every plan page that has room markers."""
+    markers = load_corrections(job_id)
+    if not markers:
+        return []
+    schedule_rows = normalise_colour_schedule(job.get("colour_schedule", []))
+    if not schedule_rows:
+        schedule_rows = seed_colour_schedule(job)
+    out_dir = job_dir(job_id) / "colour_schedules"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    created: List[Path] = []
+    for option in _correction_options(job):
+        page_markers = [
+            m for m in markers
+            if str(m.get("file") or "") == option["file"] and int(m.get("page") or 1) == option["page"]
+        ]
+        if not page_markers:
+            continue
+        name = f"colour_markup_{safe_name(option['file'])}_{option['page']:03d}.png"
+        path = out_dir / name
+        path.write_bytes(markup_plan_image_bytes(option, schedule_rows, page_markers))
+        created.append(path)
+    return created
+
+
+def colour_schedule_page(job_id: str):
+    job = load_job(job_id)
+    st.markdown("<div class='pb-card'>", unsafe_allow_html=True)
+    st.subheader("Colour schedule")
+    st.caption("Assign a colour (name, finish, product/code and optional hex swatch) to every room surface. The schedule, markup images and print-ready exports give painters the full colour brief.")
+    existing = normalise_colour_schedule(job.get("colour_schedule", []))
+    if not existing:
+        existing = seed_colour_schedule(job)
+    if not existing:
+        st.warning("No rooms or take-off rows yet. Correct the rooms on the plan or build wall/ceiling rows first.")
+        st.markdown("</div>", unsafe_allow_html=True)
+        return
+
+    df = pd.DataFrame(existing, columns=COLOUR_SCHEDULE_COLUMNS)
+    editor = st.data_editor(
+        df,
+        hide_index=True,
+        num_rows="dynamic",
+        width="stretch",
+        key=f"pr_colour_schedule_{job_id}",
+        column_config={
+            "area_location": st.column_config.SelectboxColumn("Area / Room", options=sorted({str(r.get("room") or "") for r in job.get("rooms", [])} | {str(r.get("area_location") or "") for r in job.get("takeoff_rows", [])} | {str(v) for v in df["area_location"].dropna().unique()} | {"Whole job"})),
+            "surface": st.column_config.SelectboxColumn("Surface", options=sorted(DEFAULT_FINISH_BY_SURFACE.keys()) + ["Other"]),
+            "finish": st.column_config.SelectboxColumn("Finish", options=["Flat / Matt", "Low Sheen", "Satin", "Semi Gloss", "Gloss", "Floor enamel", "Weathershield Low Sheen", "Exterior gloss", "Other"]),
+            "hex": st.column_config.TextColumn("Hex swatch", placeholder="e.g. #F0E6D2"),
+        },
+    )
+    c1, c2 = st.columns(2)
+    if c1.button("Save colour schedule", type="primary"):
+        job["colour_schedule"] = normalise_colour_schedule(editor.to_dict("records"))
+        save_job(job_id, job)
+        st.success(f"Saved {len(job['colour_schedule'])} colour schedule lines.")
+        st.rerun()
+    if c2.button("Generate colour markup images for plan pages"):
+        created = generate_colour_markup_images(job_id, job)
+        if not created:
+            st.warning("No plan pages with room markers found. Tap rooms in Verify & Correct first, then save colours.")
+        else:
+            job_files = job.get("files", [])
+            existing_paths = {f.get("path") for f in job_files}
+            for path in created:
+                if str(path) not in existing_paths:
+                    job_files.append(file_record(path, "png", "Colour markup"))
+            job["files"] = job_files
+            save_job(job_id, job)
+            st.success(f"Generated {len(created)} colour markup image(s).")
+            st.rerun()
+
+    st.markdown("### Export")
+    schedule_excel = colour_schedule_excel_bytes(job)
+    schedule_pdf = colour_schedule_pdf_bytes(job)
+    c3, c4 = st.columns(2)
+    c3.download_button("Download colour schedule (Excel)", schedule_excel, file_name=f"{safe_name(job.get('job_name','job'))}_colour_schedule.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    c4.download_button("Download colour schedule (PDF)", schedule_pdf, file_name=f"{safe_name(job.get('job_name','job'))}_colour_schedule.pdf", mime="application/pdf")
+
+    st.markdown("### Colour markup previews")
+    markup_files = [f for f in job.get("files", []) if f.get("category") == "Colour markup"]
+    if not markup_files:
+        st.info("Generate colour markup images above to see the colour brief overlaid on the plan.")
+    else:
+        for f in markup_files:
+            p = Path(f.get("path") or "")
+            if p.exists():
+                st.image(str(p), caption=f.get("name", ""), width="stretch")
+                st.download_button("Download this markup", p.read_bytes(), file_name=p.name, mime="image/png", key=f"dl_markup_{p.name}_{int(time.time())}")
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
 def job_id_from_name(job_no: str, job_name: str) -> str:
     base = safe_name(f"{job_no}_{job_name}", "job").lower().replace(" ", "_")
     return base or f"job_{int(time.time())}"
@@ -2757,6 +3136,7 @@ def main():
             "Upload Plans",
             "Extracted Info",
             "Verify & Correct",
+            "Colour Schedule",
             "Take-off Draft",
             "Progress Tracking",
             "Converted Images",
@@ -2772,6 +3152,8 @@ def main():
         overview_page(job_id)
     elif menu == "Verify & Correct":
         corrections_page(job_id)
+    elif menu == "Colour Schedule":
+        colour_schedule_page(job_id)
     elif menu == "Take-off Draft":
         takeoff_page(job_id)
     elif menu == "Progress Tracking":
