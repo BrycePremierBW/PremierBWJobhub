@@ -114,6 +114,203 @@ def litres_from_area(
         return 0.0
 
 
+DEFAULT_WASTE_PCT = 5.0
+DEFAULT_LABOUR_HOURS_PER_M2 = {
+    "Walls": 0.12,
+    "Ceilings": 0.10,
+    "Exterior": 0.14,
+    "Woodwork": 0.16,
+    "Floor coating": 0.09,
+    "General": 0.12,
+}
+
+
+def labour_hours_for(area_m2: float, labour_category: Any, waste_pct: float = DEFAULT_WASTE_PCT) -> float:
+    try:
+        work = float(area_m2) * (1 + max(float(waste_pct or 0.0), 0.0) / 100.0)
+        rate = DEFAULT_LABOUR_HOURS_PER_M2.get(str(labour_category or ""), DEFAULT_LABOUR_HOURS_PER_M2["Walls"])
+        return round(work * rate, 2)
+    except Exception:
+        return 0.0
+
+
+def recalculate_takeoff_values(
+    rows: List[Dict[str, Any]],
+    coverage_m2_per_l: float = DEFAULT_COVERAGE_M2_PER_L,
+    waste_pct: float = DEFAULT_WASTE_PCT,
+) -> List[Dict[str, Any]]:
+    """Apply coats/coverage/waste consistently to every take-off row.
+
+    Paint litres come from the measured m² (with waste) and coat count;
+    labour hours come from a per-category hours-per-m² rate (with waste).
+    The measured quantity itself is left untouched.
+    """
+    out = []
+    waste = max(float(waste_pct or 0.0), 0.0) / 100.0
+    for r in rows or []:
+        qty = max(float(r.get("qty_m2") or 0.0), 0.0)
+        lineal = max(float(r.get("lineal_m") or 0.0), 0.0)
+        coats = max(float(r.get("coats") or 0.0), 0.0)
+        work = max(qty, lineal) * (1 + waste)
+        row = dict(r)
+        row["paint_litres"] = litres_from_area(qty * (1 + waste), coats, coverage_m2_per_l)
+        row["labour_hours"] = labour_hours_for(max(qty, lineal), row.get("labour_category"), waste_pct)
+        out.append(row)
+    return out
+
+
+def validate_measurements(job: Dict[str, Any]) -> List[str]:
+    """Cross-check the different measurement signals and flag inconsistencies."""
+    warnings: List[str] = []
+    rooms = job.get("rooms", [])
+    rooms_with_area = [
+        r for r in rooms
+        if _to_float(r.get("dim1_m")) and _to_float(r.get("dim2_m"))
+    ]
+    room_area = sum(_to_float(r["dim1_m"]) * _to_float(r["dim2_m"]) for r in rooms_with_area)
+    markers = load_corrections(job.get("job_id") or "")
+    footprint = external_footprint(job, markers, rooms)
+    env_area = footprint["envelope_w_m"] * footprint["envelope_h_m"]
+    if footprint["method"] == "vector-wall":
+        if room_area > 0 and env_area > 0:
+            ratio = env_area / room_area
+            if ratio > 1.6 or ratio < 0.65:
+                warnings.append(
+                    f"Envelope from PDF wall geometry ({env_area:g} m²) disagrees with the measured rooms "
+                    f"({room_area:g} m²) — check the plan scale or correct the room sizes."
+                )
+    elif footprint["method"] == "area-estimate":
+        warnings.append(
+            "No scale source found yet — external quantities are an area-based estimate, not measured. "
+            "Upload a vector PDF with dimensions, or position room markers, for exact measurement."
+        )
+    elif footprint["method"] == "marker-envelope":
+        if room_area > 0 and env_area > 0:
+            ratio = env_area / room_area
+            if ratio > 1.6 or ratio < 0.65:
+                warnings.append(
+                    f"Marker envelope ({env_area:g} m²) disagrees with the measured rooms ({room_area:g} m²) "
+                    f"— move the room markers or correct their sizes."
+                )
+    return warnings
+
+
+def build_takeoff_summary(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    by_key: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for r in rows or []:
+        substrate = str(r.get("substrate") or "Other")
+        int_ext = str(r.get("internal_external") or "")
+        key = (int_ext, substrate)
+        e = by_key.setdefault(key, {
+            "internal_external": int_ext,
+            "substrate": substrate,
+            "qty_m2": 0.0,
+            "lineal_m": 0.0,
+            "count": 0.0,
+            "coats": 0.0,
+            "labour_hours": 0.0,
+            "paint_litres": 0.0,
+        })
+        e["qty_m2"] += float(r.get("qty_m2") or 0.0)
+        e["lineal_m"] += float(r.get("lineal_m") or 0.0)
+        e["count"] += float(r.get("count") or 0.0)
+        e["coats"] = max(e["coats"], float(r.get("coats") or 0.0))
+        e["labour_hours"] += float(r.get("labour_hours") or 0.0)
+        e["paint_litres"] += float(r.get("paint_litres") or 0.0)
+    summary = []
+    for e in by_key.values():
+        e["qty_m2"] = round(e["qty_m2"], 2)
+        e["lineal_m"] = round(e["lineal_m"], 2)
+        e["count"] = round(e["count"], 1)
+        e["coats"] = round(e["coats"], 1)
+        e["labour_hours"] = round(e["labour_hours"], 2)
+        e["paint_litres"] = round(e["paint_litres"], 2)
+        summary.append(e)
+    summary.sort(key=lambda e: (str(e["internal_external"]), str(e["substrate"])))
+    return summary
+
+
+def takeoff_report_pdf_bytes(job: Dict[str, Any], summary: List[Dict[str, Any]], rows: List[Dict[str, Any]]) -> bytes:
+    """A one-page painting take-off report (summary + detail) as PDF bytes."""
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import landscape, A4
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=landscape(A4), leftMargin=20, rightMargin=20, topMargin=20, bottomMargin=20)
+    styles = getSampleStyleSheet()
+    title = str(job.get("job_name") or job.get("project_name") or "Painting take-off")
+    story = [
+        Paragraph(f"<b>{safe_name(title)}</b> — Painting take-off", styles["Title"]),
+        Paragraph(
+            f"Job: {job.get('job_no','') or '-'} &nbsp;·&nbsp; {job.get('site_address','') or '-'} &nbsp;·&nbsp; "
+            f"Generated {now_stamp()}",
+            styles["Normal"],
+        ),
+        Spacer(1, 10),
+    ]
+    if summary:
+        head = ["Internal/External", "Substrate", "m²", "Lineal m", "Count", "Coats", "Labour hrs", "Litres"]
+        data = [[s["internal_external"], s["substrate"], s["qty_m2"], s["lineal_m"], s["count"], s["coats"], s["labour_hours"], s["paint_litres"]] for s in summary]
+        total = [
+            "Total", "",
+            round(sum(float(s["qty_m2"]) for s in summary), 2),
+            round(sum(float(s["lineal_m"]) for s in summary), 2),
+            round(sum(float(s["count"]) for s in summary), 1),
+            "",
+            round(sum(float(s["labour_hours"]) for s in summary), 2),
+            round(sum(float(s["paint_litres"]) for s in summary), 2),
+        ]
+        data.append(total)
+        t = Table([head] + data, repeatRows=1)
+        t.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1f3a5f")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("GRID", (0, 0), (-1, -1), 0.4, colors.grey),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -2), [colors.white, colors.HexColor("#eef2f7")]),
+            ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#d9e2f0")),
+            ("ALIGN", (2, 0), (-1, -1), "RIGHT"),
+        ]))
+        story.append(t)
+        story.append(Spacer(1, 12))
+    detail_head = ["Location", "Substrate", "Int/Ext", "m²", "Lineal m", "Coats", "Labour hrs", "Litres", "Rate", "Value ex GST"]
+    detail_rows = []
+    for r in rows:
+        qty = float(r.get("qty_m2") or 0.0)
+        lineal = float(r.get("lineal_m") or 0.0)
+        rate = float(r.get("rate_ex_gst") or 0.0)
+        value = (qty + lineal) * rate
+        detail_rows.append([
+            str(r.get("area_location") or "")[:42],
+            str(r.get("substrate") or ""),
+            str(r.get("internal_external") or ""),
+            round(qty, 2),
+            round(lineal, 2),
+            float(r.get("coats") or 0.0),
+            float(r.get("labour_hours") or 0.0),
+            float(r.get("paint_litres") or 0.0),
+            round(rate, 2),
+            round(value, 2),
+        ])
+    if detail_rows:
+        d = Table([detail_head] + detail_rows, repeatRows=1, colWidths=[150, 120, 60, 50, 55, 45, 55, 55, 50, 60])
+        d.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1f3a5f")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("GRID", (0, 0), (-1, -1), 0.4, colors.grey),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f4f6fa")]),
+            ("ALIGN", (3, 0), (-1, -1), "RIGHT"),
+        ]))
+        story.append(Paragraph("<b>Detail</b>", styles["Heading3"]))
+        story.append(d)
+    doc.build(story)
+    return buf.getvalue()
+
+
 def job_id_from_name(job_no: str, job_name: str) -> str:
     base = safe_name(f"{job_no}_{job_name}", "job").lower().replace(" ", "_")
     return base or f"job_{int(time.time())}"
@@ -2099,10 +2296,11 @@ def takeoff_page(job_id: str):
         },
         key=f"rooms_editor_{job_id}",
     )
-    c_h, c_o, c_cov = st.columns(3)
+    c_h, c_o, c_cov, c_waste = st.columns(4)
     ceiling_height = c_h.number_input("Ceiling height (m)", min_value=2.1, max_value=4.5, value=DEFAULT_CEILING_HEIGHT_M, step=0.1, key=f"pr_ceiling_{job_id}")
     opening_allowance = c_o.number_input("Door/window opening allowance per room (m²)", min_value=0.0, max_value=20.0, value=DEFAULT_OPENINGS_ALLOWANCE_M2, step=0.5, key=f"pr_openings_{job_id}")
     coverage = c_cov.number_input("Paint coverage (m²/L)", min_value=6.0, max_value=20.0, value=DEFAULT_COVERAGE_M2_PER_L, step=0.5, key=f"pr_coverage_{job_id}")
+    waste_pct = c_waste.number_input("Waste %", min_value=0.0, max_value=25.0, value=DEFAULT_WASTE_PCT, step=1.0, key=f"pr_waste_{job_id}")
     if st.button("Build wall / ceiling rows from rooms", type="secondary"):
         room_records = edited_rooms.to_dict("records")
         computed = compute_room_takeoff_rows(room_records, ceiling_height=ceiling_height, openings_allowance_m2=opening_allowance)
@@ -2156,11 +2354,11 @@ def takeoff_page(job_id: str):
         st.warning("No room measurements yet — correct the rooms on the plan (Verify & Correct) or build wall/ceiling rows above to enable the automatic external take-off.")
     col1, col2, col3 = st.columns(3)
     with col1:
-        if st.button("Recalculate paint litres", type="secondary"):
-            edited["paint_litres"] = edited.apply(lambda r: litres_from_area(r.get("qty_m2", 0), r.get("coats", 2), coverage), axis=1)
-            job["takeoff_rows"] = edited.to_dict("records")
+        if st.button("Recalculate litres + labour", type="secondary"):
+            recalculated = recalculate_takeoff_values(edited.to_dict("records"), coverage_m2_per_l=coverage, waste_pct=waste_pct)
+            job["takeoff_rows"] = recalculated
             save_job(job_id, job)
-            st.success("Paint litres recalculated.")
+            st.success(f"Paint litres and labour hours recalculated (coverage {coverage:g} m²/L, {waste_pct:g}% waste).")
             st.rerun()
     with col2:
         if st.button("Save take-off", type="primary"):
@@ -2169,8 +2367,9 @@ def takeoff_page(job_id: str):
             st.success("Take-off saved.")
     with col3:
         edited["value_ex_gst"] = pd.to_numeric(edited["qty_m2"], errors="coerce").fillna(0) * pd.to_numeric(edited["rate_ex_gst"], errors="coerce").fillna(0)
-        excel = df_to_excel_bytes({"Takeoff": edited, "Files": pd.DataFrame(job.get("files", []))})
+        excel = df_to_excel_bytes({"Summary": pd.DataFrame(build_takeoff_summary(edited.to_dict("records"))), "Takeoff": edited, "Files": pd.DataFrame(job.get("files", []))})
         st.download_button("Download Excel", excel, file_name=f"{safe_name(job.get('job_name','takeoff'))}_takeoff.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
     edited["value_ex_gst"] = pd.to_numeric(edited["qty_m2"], errors="coerce").fillna(0) * pd.to_numeric(edited["rate_ex_gst"], errors="coerce").fillna(0)
     st.markdown("### Totals")
     a, b, c, d = st.columns(4)
@@ -2178,6 +2377,22 @@ def takeoff_page(job_id: str):
     b.metric("External m²", round(edited.loc[edited["internal_external"].astype(str).str.lower().str.contains("external"), "qty_m2"].sum(), 2))
     c.metric("Paint litres", round(pd.to_numeric(edited["paint_litres"], errors="coerce").fillna(0).sum(), 2))
     d.metric("Value ex GST", money(edited["value_ex_gst"].sum()))
+
+    warnings = validate_measurements(job)
+    if warnings:
+        for w in warnings:
+            st.warning(w)
+    else:
+        st.caption("Measurement checks passed — room areas and building envelope agree.")
+
+    report_pdf = takeoff_report_pdf_bytes(job, build_takeoff_summary(edited.to_dict("records")), edited.to_dict("records"))
+    st.download_button(
+        "Download estimate report (PDF)",
+        report_pdf,
+        file_name=f"{safe_name(job.get('job_name','takeoff'))}_estimate_report.pdf",
+        mime="application/pdf",
+        type="secondary",
+    )
     st.markdown("</div>", unsafe_allow_html=True)
 
 

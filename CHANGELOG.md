@@ -1,5 +1,22 @@
 # JobHub secured release
 
+## 2026-08-06 - Take-off rules engine, measurement validation + estimate report (plan reader)
+
+- **Rules engine**: litres and labour hours are recalculated consistently across
+  every take-off row from the measured m² (or lineal m) with configurable
+  **waste %**, coats, coverage and a per-category labour rate (Walls, Ceilings,
+  Exterior, Woodwork, …). The measured quantity itself is never overwritten by
+  the recalculation.
+- **Measurement validation**: the app now cross-checks the signals — PDF
+  vector envelope, room-marker envelope and the sum of measured rooms — and
+  flags a mismatch (e.g. envelope vs rooms disagreeing by >60%) or the use of
+  an area-estimate fallback, so an uncalibrated take-off can't go unnoticed.
+- **Professional export**: the Excel download gains a per-substrate Summary
+  sheet, and a one-page PDF **estimate report** (job header, summary table and
+  detail rows with rates and values) can be downloaded from the take-off page.
+- **Totals and checks**: the take-off page shows live pass/fail for the
+  measurement checks under the totals.
+
 ## 2026-08-06 - Exact PDF vector measurement + auto scale (plan reader)
 
 - The plan reader now measures from the PDF's **embedded vector geometry**
