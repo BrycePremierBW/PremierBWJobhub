@@ -540,6 +540,10 @@ def analyse_pdf(path: Path, render_pages: bool = False, dpi: int = 150) -> Dict[
             pix.save(str(img_path))
             converted.append(str(img_path))
             rec["image_path"] = str(img_path)
+            rec["render_dpi"] = dpi
+        vs = _page_vector_scale(page)
+        rec["vector_scale"] = vs["meta"]
+        rec["vector_wall_lines"] = vs["wall_lines"][:1500]
     doc.close()
     return {
         "file": path.name,
@@ -710,6 +714,400 @@ def effective_box_m2(box: Dict[str, Any], mpp: Optional[float] = None, img_w: An
     return round(_to_float(box.get("qty_m2")) or 0.0, 2)
 
 
+def _seg_len_pt(x1: float, y1: float, x2: float, y2: float) -> float:
+    return math.hypot(x2 - x1, y2 - y1)
+
+
+def _line_angle_deg(x1: float, y1: float, x2: float, y2: float) -> float:
+    return math.degrees(math.atan2(y2 - y1, x2 - x1))
+
+
+def _rotate_xy(x: float, y: float, cx: float, cy: float, angle_deg: float):
+    rad = math.radians(angle_deg)
+    dx = x - cx
+    dy = y - cy
+    return (
+        cx + dx * math.cos(rad) - dy * math.sin(rad),
+        cy + dx * math.sin(rad) + dy * math.cos(rad),
+    )
+
+
+def _dedupe_lines(lines: List[Tuple[float, float, float, float]], snap: float = 0.5, min_len_pt: float = 1.0):
+    seen = set()
+    out = []
+    for (x1, y1, x2, y2) in lines:
+        if _seg_len_pt(x1, y1, x2, y2) < min_len_pt:
+            continue
+        a = (round(x1 / snap) * snap, round(y1 / snap) * snap)
+        b = (round(x2 / snap) * snap, round(y2 / snap) * snap)
+        key = (a, b) if a <= b else (b, a)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append((a[0], a[1], b[0], b[1]))
+    return out
+
+
+def _page_words(page, max_words: int = 4000) -> List[Dict[str, Any]]:
+    words = []
+    try:
+        raw = page.get_text("words")
+    except Exception:
+        return words
+    for w in (raw or [])[:max_words]:
+        if len(w) >= 5:
+            words.append({"text": w[4], "bbox": [float(w[0]), float(w[1]), float(w[2]), float(w[3])]})
+    return words
+
+
+def extract_page_vectors(page, max_lines: int = 2000) -> Dict[str, Any]:
+    """Extract line geometry and text tokens from a PDF page (PDF points).
+
+    Uses PyMuPDF's vector operators so measurements come from the drawing's
+    exact coordinates instead of rendered pixels. Returns the page size in
+    PDF points, deduplicated line segments, and word tokens for
+    dimension-text detection.
+    """
+    lines: List[Tuple[float, float, float, float]] = []
+    try:
+        items = page.get_drawings()
+    except Exception:
+        items = []
+    for d in items or []:
+        for it in d.get("items") or []:
+            op = it[0]
+            try:
+                if op == "l" and len(it) >= 3:
+                    p1, p2 = it[1], it[2]
+                    lines.append((float(p1.x), float(p1.y), float(p2.x), float(p2.y)))
+                elif op == "re" and len(it) >= 2:
+                    r = it[1]
+                    x0, y0, x1, y1 = float(r.x0), float(r.y0), float(r.x1), float(r.y1)
+                    lines.extend([
+                        (x0, y0, x1, y0), (x1, y0, x1, y1),
+                        (x1, y1, x0, y1), (x0, y1, x0, y0),
+                    ])
+                elif op == "qu" and len(it) >= 2:
+                    q = it[1]
+                    for i in range(4):
+                        a, b = q[i], q[(i + 1) % 4]
+                        lines.append((float(a.x), float(a.y), float(b.x), float(b.y)))
+                elif op == "c" and len(it) >= 4:
+                    p1, p3 = it[1], it[3]
+                    lines.append((float(p1.x), float(p1.y), float(p3.x), float(p3.y)))
+            except (TypeError, AttributeError, IndexError, ValueError):
+                continue
+    dedup = _dedupe_lines(lines)
+    words = _page_words(page)
+    pr = page.rect
+    return {
+        "page_w_pt": float(pr.width),
+        "page_h_pt": float(pr.height),
+        "lines": dedup[:max_lines],
+        "words": words,
+    }
+
+
+def parse_dimension_value(text: str) -> Optional[float]:
+    """Parse a dimension label into a real-world length in metres.
+
+    Handles ``3500`` / ``3,500`` (mm), ``12.5m``, ``4.8`` (metres) and
+    ``2500mm``. Returns None for non-dimension text (areas, labels, notes).
+    """
+    t = (text or "").strip()
+    if not t:
+        return None
+    low = t.lower()
+    if "²" in t or "sq" in low or "m2" in low or "/" in low or "x" in low:
+        return None
+    m = re.match(r"^\s*([0-9]+(?:[.,][0-9]+)?)\s*mm\s*$", t, re.I)
+    if m:
+        v = _to_float(m.group(1).replace(",", "."))
+        return round(v / 1000.0, 4) if v else None
+    m = re.match(r"^\s*([0-9]+(?:[.,][0-9]+)?)\s*m\s*$", t, re.I)
+    if m:
+        v = _to_float(m.group(1).replace(",", "."))
+        return v
+    m = re.match(r"^\s*([0-9]+(?:[.,][0-9]+)?)\s*$", t)
+    if m:
+        v = _to_float(m.group(1).replace(",", "."))
+        if v is None:
+            return None
+        if v >= 100:
+            return round(v / 1000.0, 4)
+        if 0.1 <= v < 100:
+            return round(v, 4)
+    return None
+
+
+def detect_dimension_texts(words: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    dims = []
+    for w in words or []:
+        v = parse_dimension_value(w.get("text"))
+        if v is None or v <= 0.0 or v > 60.0:
+            continue
+        dims.append({"value_m": v, "text": w.get("text"), "bbox": list(w.get("bbox") or [0.0, 0.0, 0.0, 0.0])})
+    return dims
+
+
+def _near_horizontal(line, tol: float = 2.0) -> bool:
+    a = _line_angle_deg(*line) % 180
+    return a <= tol or a >= 180 - tol
+
+
+def detect_scale_bar(lines: List[Tuple[float, float, float, float]], dims: List[Dict[str, Any]]):
+    """Find a drawn scale bar: a long horizontal line labelled with its length."""
+    if not lines or not dims:
+        return None
+    candidates = []
+    for i, (x1, y1, x2, y2) in enumerate(lines):
+        if not _near_horizontal((x1, y1, x2, y2)):
+            continue
+        L = _seg_len_pt(x1, y1, x2, y2)
+        if L < 20 or L > 400:
+            continue
+        yc = (y1 + y2) / 2.0
+        xmin, xmax = min(x1, x2), max(x1, x2)
+        for d in dims:
+            bx0, by0, bx1, by1 = d["bbox"]
+            bcx = (bx0 + bx1) / 2.0
+            bcy = (by0 + by1) / 2.0
+            if abs(bcy - yc) > 25:
+                continue
+            if bcx < xmin - L * 0.5 or bcx > xmax + L * 0.5:
+                continue
+            scale = d["value_m"] / L
+            if 0.0005 <= scale <= 0.05:
+                candidates.append({"scale": scale, "line_i": i, "value_m": d["value_m"], "len_pt": L})
+    if not candidates:
+        return None
+    candidates.sort(key=lambda c: (-c["len_pt"], c["value_m"]))
+    best = candidates[0]
+    return {
+        "m_per_pt": best["scale"],
+        "source": "scale-bar",
+        "line_len_pt": best["len_pt"],
+        "value_m": best["value_m"],
+    }
+
+
+def _match_dimension_line(lines: List[Tuple[float, float, float, float]], dim: Dict[str, Any], tol: float = 16.0):
+    """Find the line a dimension label belongs to (parallel + nearest + longest)."""
+    bx0, by0, bx1, by1 = dim["bbox"]
+    bcx = (bx0 + bx1) / 2.0
+    bcy = (by0 + by1) / 2.0
+    bw = max(bx1 - bx0, 1e-3)
+    best = None
+    for i, (x1, y1, x2, y2) in enumerate(lines):
+        L = _seg_len_pt(x1, y1, x2, y2)
+        if L < 6:
+            continue
+        xmin, xmax = min(x1, x2), max(x1, x2)
+        ymin, ymax = min(y1, y2), max(y1, y2)
+        a = _line_angle_deg(x1, y1, x2, y2) % 180
+        if a <= 25 or a >= 155:
+            if abs(bcy - (y1 + y2) / 2.0) > tol:
+                continue
+            overlap = min(xmax, bx1) - max(xmin, bx0)
+            if overlap < 0.4 * min(bw, L):
+                continue
+        else:
+            if abs(bcx - (x1 + x2) / 2.0) > tol:
+                continue
+            overlap = min(ymax, by1) - max(ymin, by0)
+            if overlap < 0.4 * min((by1 - by0), L):
+                continue
+        if best is None or L > best[0]:
+            best = (L, i)
+    return best[1] if best is not None else None
+
+
+def solve_vector_scale(lines, dims, page_w_pt: float = 1.0, page_h_pt: float = 1.0):
+    """Solve the plan scale (metres per PDF point) from the drawing itself.
+
+    Prefers a drawn scale bar; otherwise matches dimension labels to the
+    wall/dimension lines they annotate and takes the median ratio. Returns a
+    dict or None when no reliable scale can be derived.
+    """
+    bar = detect_scale_bar(lines, dims)
+    if bar:
+        return {
+            "m_per_pt": round(bar["m_per_pt"], 6),
+            "source": "scale-bar",
+            "reliability": 1,
+            "dims_used": 1,
+            "scale_detail": f"Scale bar {bar['value_m']:g} m over {bar['line_len_pt']:g} pt",
+        }
+    scales = []
+    used = set()
+    for d in dims:
+        i = _match_dimension_line(lines, d)
+        if i is None or i in used:
+            continue
+        x1, y1, x2, y2 = lines[i]
+        L = _seg_len_pt(x1, y1, x2, y2)
+        if L <= 0:
+            continue
+        s = d["value_m"] / L
+        if 0.0005 <= s <= 0.05:
+            scales.append(s)
+            used.add(i)
+    if not scales:
+        return None
+    scales.sort()
+    med = scales[len(scales) // 2]
+    return {
+        "m_per_pt": round(med, 6),
+        "source": "dimension-text",
+        "reliability": len(scales),
+        "dims_used": len(scales),
+        "scale_detail": f"{len(scales)} dimension labels matched (median {med:g} m/pt)",
+    }
+
+
+def estimate_plan_rotation(lines: List[Tuple[float, float, float, float]], min_len_pt: float = 15.0) -> float:
+    """Dominant rotation of the drawing from its near-axis wall lines (degrees)."""
+    bins: Dict[float, float] = {}
+    for (x1, y1, x2, y2) in lines:
+        L = _seg_len_pt(x1, y1, x2, y2)
+        if L < min_len_pt:
+            continue
+        r = _line_angle_deg(x1, y1, x2, y2) % 180
+        if r > 90:
+            r = 180 - r
+        if r > 45:
+            r = 90 - r
+        b = round(r * 2) / 2.0
+        if abs(b) <= 6:
+            bins[b] = bins.get(b, 0.0) + L
+    if not bins:
+        return 0.0
+    best = max(bins.items(), key=lambda kv: kv[1])[0]
+    return round(best, 2)
+
+
+def building_wall_lines(lines, dims, min_len_pt: float = 8.0, page_w_pt: Optional[float] = None, page_h_pt: Optional[float] = None):
+    """Wall-like lines: strips dimension lines and near-page-size frames."""
+    excluded = set()
+    for d in dims:
+        i = _match_dimension_line(lines, d)
+        if i is not None:
+            excluded.add(i)
+    max_span = 0.0
+    if page_w_pt or page_h_pt:
+        max_span = 0.98 * max(float(page_w_pt or 0), float(page_h_pt or 0))
+    out = []
+    for i, (x1, y1, x2, y2) in enumerate(lines):
+        if i in excluded:
+            continue
+        L = _seg_len_pt(x1, y1, x2, y2)
+        if L < min_len_pt:
+            continue
+        if max_span and L > max_span:
+            continue
+        out.append((x1, y1, x2, y2))
+    return out
+
+
+def vector_envelope_perimeter(
+    wall_lines,
+    m_per_pt: float,
+    angle_deg: float = 0.0,
+    page_w_pt: float = 1.0,
+    page_h_pt: float = 1.0,
+):
+    """Outer envelope of the (deskewed) wall lines, converted to real metres."""
+    cx = float(page_w_pt) / 2.0
+    cy = float(page_h_pt) / 2.0
+    xs = []
+    ys = []
+    for (x1, y1, x2, y2) in wall_lines or []:
+        if angle_deg:
+            a = _rotate_xy(x1, y1, cx, cy, -angle_deg)
+            b = _rotate_xy(x2, y2, cx, cy, -angle_deg)
+            xs.extend([a[0], b[0]])
+            ys.extend([a[1], b[1]])
+        else:
+            xs.extend([x1, x2])
+            ys.extend([y1, y2])
+    if not xs:
+        return None
+    w_pt = max(xs) - min(xs)
+    h_pt = max(ys) - min(ys)
+    if w_pt <= 0 or h_pt <= 0:
+        return None
+    w_m = w_pt * m_per_pt
+    h_m = h_pt * m_per_pt
+    return {
+        "perimeter_m": round(2 * (w_m + h_m), 2),
+        "envelope_w_m": round(w_m, 2),
+        "envelope_h_m": round(h_m, 2),
+        "method": "vector-wall",
+        "wall_line_count": len(wall_lines),
+    }
+
+
+def _page_vector_scale(page) -> Dict[str, Any]:
+    """Analyse one PDF page: vector geometry, auto scale, rotation."""
+    vec = extract_page_vectors(page)
+    dims = detect_dimension_texts(vec["words"])
+    scale = solve_vector_scale(vec["lines"], dims, vec["page_w_pt"], vec["page_h_pt"])
+    angle = estimate_plan_rotation(vec["lines"])
+    wall_lines = building_wall_lines(vec["lines"], dims, page_w_pt=vec["page_w_pt"], page_h_pt=vec["page_h_pt"])
+    meta = {
+        "page_w_pt": round(vec["page_w_pt"], 3),
+        "page_h_pt": round(vec["page_h_pt"], 3),
+        "m_per_pt": scale["m_per_pt"] if scale else None,
+        "source": scale["source"] if scale else None,
+        "scale_detail": scale["scale_detail"] if scale else None,
+        "dims_used": scale["dims_used"] if scale else 0,
+        "angle_deg": angle,
+        "line_count": len(vec["lines"]),
+        "wall_line_count": len(wall_lines),
+    }
+    return {"meta": meta, "wall_lines": [[round(c, 2) for c in l] for l in wall_lines]}
+
+
+def _plan_vector_page(job: Dict[str, Any]):
+    """Best plan page for vector measurement (floor plans preferred)."""
+    best = None
+    best_score = -1
+    for a in job.get("analyses") or []:
+        for p in a.get("pages") or []:
+            vs = p.get("vector_scale") or {}
+            if not vs.get("m_per_pt"):
+                continue
+            ptype = str(p.get("page_type") or "")
+            ptype_bonus = 3 if "plan" in ptype else (1 if ptype else 0)
+            score = ptype_bonus * 100000 + (vs.get("wall_line_count") or 0)
+            if score > best_score:
+                best_score = score
+                best = p
+    return best
+
+
+def plan_auto_scale(job: Dict[str, Any], file: str, page: Any, dpi: int = 150):
+    """Automatic drawing scale for one rendered page, as metres per pixel."""
+    for analysis in job.get("analyses") or []:
+        if str(analysis.get("file") or "") != str(file or ""):
+            continue
+        for p in analysis.get("pages") or []:
+            if int(p.get("page") or 1) != int(page or 1):
+                continue
+            vs = p.get("vector_scale") or {}
+            mpt = vs.get("m_per_pt")
+            if not mpt:
+                return None
+            return {
+                "m_per_px": round(float(mpt) * 72.0 / max(float(dpi), 1), 8),
+                "m_per_pt": float(mpt),
+                "source": vs.get("source"),
+                "scale_detail": vs.get("scale_detail"),
+                "angle_deg": vs.get("angle_deg") or 0.0,
+            }
+    return None
+
+
 def _plan_page_image(job: Dict[str, Any], file: str, page: Any):
     for analysis in job.get("analyses") or []:
         if str(analysis.get("file") or "") != str(file or ""):
@@ -794,6 +1192,32 @@ def external_footprint(
         "method": "none",
         "note": "No room measurements available for an external calculation.",
     }
+
+    vpage = _plan_vector_page(job)
+    if vpage is not None:
+        vs = vpage.get("vector_scale") or {}
+        wall_lines = vpage.get("vector_wall_lines") or []
+        if wall_lines and vs.get("m_per_pt"):
+            env = vector_envelope_perimeter(
+                wall_lines,
+                vs["m_per_pt"],
+                vs.get("angle_deg") or 0.0,
+                vs.get("page_w_pt") or 1.0,
+                vs.get("page_h_pt") or 1.0,
+            )
+            if env and env["perimeter_m"] > 0:
+                return {
+                    "perimeter_m": env["perimeter_m"],
+                    "envelope_w_m": env["envelope_w_m"],
+                    "envelope_h_m": env["envelope_h_m"],
+                    "total_area_m2": round(env["envelope_w_m"] * env["envelope_h_m"], 2),
+                    "method": "vector-wall",
+                    "note": (f"Measured from PDF wall geometry on page {vpage.get('page')} "
+                             f"({vpage.get('title') or 'plan'}): {env['envelope_w_m']:g} x {env['envelope_h_m']:g} m "
+                             f"envelope from {env['wall_line_count']} wall lines. Scale from "
+                             f"{vs.get('source') or 'n/a'}."),
+                }
+
     if not markers and not rooms:
         return fallback
 
@@ -1378,6 +1802,9 @@ def elevation_image_options(job: Dict[str, Any]) -> List[Dict[str, str]]:
             out.append({
                 "label": f"{a.get('file','')} - {p.get('title') or 'Elevation'} (p{p.get('page')})",
                 "image_path": ip,
+                "file": a.get("file", ""),
+                "page": p.get("page", 1),
+                "render_dpi": p.get("render_dpi") or 150,
             })
     for f in job.get("files", []):
         if f.get("category") != "Drawing image":
@@ -1696,6 +2123,13 @@ def takeoff_page(job_id: str):
     st.markdown("#### External take-off (auto)")
     ext_rows, ext_info = compute_external_takeoff_rows(job)
     st.caption(ext_info["footprint_note"])
+    method_label = {
+        "vector-wall": "PDF wall geometry",
+        "marker-envelope": "Room markers",
+        "area-estimate": "Area estimate",
+        "none": "No measurements",
+    }.get(ext_info["method"], ext_info["method"])
+    st.caption(f"Measurement method: **{method_label}**.")
     e1, e2, e3, e4 = st.columns(4)
     e1.metric("Building perimeter", f"{ext_info['perimeter_m']:g} m")
     e2.metric("Wall height", f"{ext_info['wall_height_m']:g} m")
@@ -1827,22 +2261,40 @@ def progress_page(job_id: str):
     overall = float(state.get("progress", 0.0))
     rev_key = f"pr_box_rev_{job_id}_{safe_name(img_path)}"
     rev = int(st.session_state.get(rev_key, 0))
+    size = _image_pixel_size(img_path)
+    img_w = size[0] if size else None
+    img_h = size[1] if size else None
+
+    auto_cal = None
+    auto_scale_note = ""
+    if stored_cal is None and opt.get("file") and opt.get("page") and img_w:
+        auto = plan_auto_scale(job, opt["file"], opt["page"], dpi=opt.get("render_dpi") or 150)
+        if auto and auto["m_per_px"]:
+            auto_cal = {
+                "x1": 0.0, "y1": 0.0, "x2": 100.0, "y2": 0.0,
+                "len_m": round(img_w * auto["m_per_px"], 4),
+            }
+            auto_scale_note = (f"Scale auto-detected from the PDF ({auto.get('source') or 'vector scale'}) — "
+                               f"areas are measured automatically.")
 
     returned = substrate_box_editor(
         img_file.read_bytes(),
         boxes=stored,
         substrates=SUBSTRATE_OPTIONS,
-        calibration=stored_cal,
+        calibration=stored_cal or auto_cal,
         revision=rev,
         key=f"pr_boxes_{job_id}_{safe_name(img_path)}",
         height=860,
     )
     current = stored
     cal = stored_cal
+    auto_cal_n = normalise_calibration(auto_cal)
     if returned is not None:
         payload = returned if isinstance(returned, dict) else {}
         next_boxes = normalise_boxes(payload.get("boxes"))
         next_cal = normalise_calibration(payload.get("calibration"))
+        if next_cal == auto_cal_n:
+            next_cal = None
         if next_boxes != stored or next_cal != stored_cal:
             current = next_boxes
             cal = next_cal
@@ -1857,10 +2309,7 @@ def progress_page(job_id: str):
             save_job(job_id, job)
             st.session_state[rev_key] = rev + 1
 
-    size = _image_pixel_size(img_path)
-    img_w = size[0] if size else None
-    img_h = size[1] if size else None
-    mpp = calibration_mpp(cal, img_w, img_h) if cal else None
+    mpp = calibration_mpp(cal or auto_cal, img_w, img_h) if (cal or auto_cal) else None
     m2_total = sum(effective_box_m2(b, mpp, img_w, img_h) for b in current)
     st.caption(f"**{len(current)} box(es)** drawn · **{m2_total:g} m²** in the take-off (only boxes with an m² value flow in).")
 
@@ -1876,6 +2325,8 @@ def progress_page(job_id: str):
             save_job(job_id, job)
             st.session_state[rev_key] = rev + 1
             st.rerun()
+    elif auto_cal:
+        st.caption(f"{auto_scale_note} Draw a box and its m² will be measured without manual calibration. Use **Calibrate scale** to override with a drawn reference line.")
     else:
         st.caption("Not calibrated — draw a box, then use **Calibrate scale** above to set the drawing scale so m² are measured from the drawing (or type an m² manually).")
 

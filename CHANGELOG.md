@@ -1,5 +1,26 @@
 # JobHub secured release
 
+## 2026-08-06 - Exact PDF vector measurement + auto scale (plan reader)
+
+- The plan reader now measures from the PDF's **embedded vector geometry**
+  (wall lines, rectangles and curves extracted via PyMuPDF) instead of relying
+  only on rendered pixels. Each page stores its auto-detected scale and wall
+  lines in the job, so measurements are exact and reproducible.
+- **Automatic scale detection**: a drawn scale bar (a long labelled line) or
+  dimension labels such as ``3500``, ``4.8``, ``10m`` / ``8m`` are matched to
+  the dimension lines they annotate, giving metres-per-PDF-point with no manual
+  calibration. Elevation pages inherit this scale too, so substrate boxes are
+  measured automatically when the source PDF carries dimensions.
+- **Deskew**: the dominant rotation of the drawing is estimated from its
+  near-axis wall lines and the wall-lines envelope is measured on the
+  straightened geometry, so a crooked scan no longer inflates perimeter and
+  areas.
+- The external take-off now prefers a **vector-wall** footprint: the building
+  envelope (and therefore perimeter, walls, soffits and fascia) is measured
+  directly from the plan's wall lines. The take-off page reports the method
+  used (PDF wall geometry / room markers / area estimate). Covered by
+  `tests/test_planreader_vectors.py`.
+
 ## 2026-08-06 - Automatic external take-off from plan + elevations
 
 - The app now **calculates the external take-off itself** — no manual drawing
