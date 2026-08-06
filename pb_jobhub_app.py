@@ -2853,6 +2853,29 @@ def apply_schema_migrations():
                 (simple_pricing_migration_id, now),
             )
 
+        job_comments_migration_id = "20260806_job_comments_v1"
+        if job_comments_migration_id not in applied:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS job_comments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id INTEGER NOT NULL,
+                    author_name TEXT NOT NULL,
+                    author_role TEXT,
+                    comment TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(job_id) REFERENCES jobs(id)
+                )
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_job_comments_job_created
+                ON job_comments (job_id, created_at)
+            """)
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            cur.execute(
+                "INSERT INTO schema_migrations (migration_id, applied_at) VALUES (?, ?)",
+                (job_comments_migration_id, now),
+            )
+
         conn.commit()
         return True
     except Exception:
@@ -5884,6 +5907,9 @@ def employee_portal():
                     else:
                         st.warning("File path not found on disk.")
 
+            st.markdown("### Job Notes")
+            render_job_comments_section(selected_job_id, key_prefix="employee_portal_job_notes")
+
     with tab_requests:
         render_employee_requests(employee_id)
 
@@ -5920,6 +5946,7 @@ def employee_portal():
 
             st.markdown("### Colour Schedule / Colour Markup")
             render_colour_schedule_documents(selected_job_id)
+            render_live_planreader_colour(selected_job_id)
 
     with tab_photos:
         job_photos_page(employee_restricted=True)
@@ -17268,6 +17295,258 @@ def colour_schedule_page():
             return
     st.divider()
     render_colour_schedule_documents(int(selected_job_id))
+    render_live_planreader_colour(int(selected_job_id))
+
+
+# =============================
+# JOB NOTES / COMMENTS
+# =============================
+def job_comments_frame(job_id):
+    """All notes left on a job folder, oldest first, as a clean thread."""
+    return safe_df_query(
+        """
+        SELECT id AS "Comment ID",
+               author_name AS "Author",
+               author_role AS "Role",
+               comment AS "Comment",
+               created_at AS "Posted"
+        FROM job_comments
+        WHERE job_id = ?
+        ORDER BY created_at ASC, id ASC
+        """,
+        (int(job_id),),
+    )
+
+
+def add_job_comment(job_id, author_name, author_role, comment):
+    comment = str(comment or "").strip()
+    if not comment:
+        return False
+    execute(
+        """
+        INSERT INTO job_comments (job_id, author_name, author_role, comment, created_at)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            int(job_id),
+            str(author_name or "JobHub"),
+            str(author_role or ""),
+            comment,
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        ),
+    )
+    return True
+
+
+def delete_job_comment(comment_id):
+    execute("DELETE FROM job_comments WHERE id = ?", (int(comment_id),))
+
+
+def render_job_comments_section(job_id, key_prefix="job_comments"):
+    """Shared notes thread so admin can leave notes for employees and vice versa."""
+    job_id = int(job_id)
+    st.markdown("### Job Notes & Comments")
+    st.caption(
+        "Admin, managers and employees can leave notes on this job folder. "
+        "Posts appear here for everyone working on the job."
+    )
+    user = get_current_user() or {}
+    author_name = str(user.get("employee_name") or user.get("username") or "JobHub")
+    author_role = current_role()
+
+    with st.form(f"{key_prefix}_add_comment_form"):
+        new_comment = st.text_area(
+            "Write a note",
+            key=f"{key_prefix}_comment_text",
+            max_chars=2000,
+            placeholder="e.g. Site access is via the rear gate, code 4821. Paint should be delivered by Friday.",
+        )
+        submitted = st.form_submit_button("Post Comment", type="primary")
+    if submitted:
+        if add_job_comment(job_id, author_name, author_role, new_comment):
+            pb_success("Comment posted.")
+            pb_rerun()
+        else:
+            pb_error("Write a note before posting.")
+
+    comments = job_comments_frame(job_id)
+    if comments.empty:
+        st.info("No notes yet. Post the first note for this job.")
+        return
+
+    can_delete = current_role() == "admin"
+    for _, row in comments.iterrows():
+        comment_id = int(row["Comment ID"])
+        role_label = str(row["Role"] or "").capitalize()
+        st.markdown(
+            f"**{row['Author']}**" + (f" · {role_label}" if role_label else "")
+            + f" · {row['Posted']}"
+        )
+        st.write(str(row["Comment"]))
+        if can_delete:
+            if st.button("Delete", key=f"{key_prefix}_del_{comment_id}"):
+                delete_job_comment(comment_id)
+                pb_success("Comment deleted.")
+                pb_rerun()
+        st.divider()
+
+
+# =============================
+# PLANREADER <-> JOBHUB BRIDGE
+# =============================
+def _load_planreader_bridge():
+    """Load the self-contained bridge module by file path (no JobHub guards)."""
+    try:
+        import importlib.util
+
+        bridge_path = os.path.join(os.path.dirname(__file__), "jobhub", "planreader_bridge.py")
+        spec = importlib.util.spec_from_file_location("planreader_bridge", bridge_path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    except Exception:
+        return None
+
+
+PLANREADER_BRIDGE = _load_planreader_bridge()
+
+
+def planreader_synced_takeoff(job_id):
+    if not PLANREADER_BRIDGE:
+        return pd.DataFrame()
+    try:
+        return PLANREADER_BRIDGE.job_takeoff_frame(job_id)
+    except Exception:
+        return pd.DataFrame()
+
+
+def planreader_synced_colours(job_id):
+    if not PLANREADER_BRIDGE:
+        return pd.DataFrame()
+    try:
+        return PLANREADER_BRIDGE.job_colour_schedule_frame(job_id)
+    except Exception:
+        return pd.DataFrame()
+
+
+def planreader_synced_blobs(job_id):
+    if not PLANREADER_BRIDGE:
+        return pd.DataFrame()
+    try:
+        return PLANREADER_BRIDGE.job_document_blobs_frame(job_id)
+    except Exception:
+        return pd.DataFrame()
+
+
+def render_planreader_synced_documents(job_id):
+    """Show colour markup images / schedule exports pushed from PlanReader."""
+    docs = planreader_synced_blobs(job_id)
+    if docs.empty:
+        st.info(
+            "No PlanReader documents have been pushed to this job yet. Generate them in "
+            "PB PlanReader > JobHub Sync and they will appear here automatically."
+        )
+        return
+    for _, doc in docs.iterrows():
+        doc_type = str(doc["Doc Type"] or "PlanReader")
+        file_name = str(doc["File Name"] or "")
+        mime = str(doc["Mime Type"] or "application/octet-stream")
+        try:
+            blob = PLANREADER_BRIDGE.decode_document_blob(doc.to_dict())
+        except Exception:
+            blob = b""
+        with st.container(border=True):
+            st.markdown(f"**{doc_type}** — {file_name}")
+            if str(doc["Created At"] or "").strip():
+                st.caption(f"Synced: {doc['Created At']}")
+            if str(doc["Notes"] or "").strip():
+                st.caption(str(doc["Notes"]))
+            low = file_name.lower()
+            if mime.startswith("image/") or low.endswith((".png", ".jpg", ".jpeg", ".webp")):
+                st.image(blob, caption=file_name, width="stretch")
+            elif low.endswith(".csv"):
+                try:
+                    st.dataframe(pd.read_csv(BytesIO(blob)), width="stretch", hide_index=True)
+                except Exception:
+                    pass
+            elif low.endswith((".xlsx", ".xls")):
+                try:
+                    st.dataframe(pd.read_excel(BytesIO(blob)), width="stretch", hide_index=True)
+                except Exception:
+                    pass
+            if blob:
+                st.download_button(
+                    "Download",
+                    blob,
+                    file_name=file_name,
+                    mime=mime,
+                    key=f"planreader_blob_dl_{doc['ID']}",
+                )
+
+
+def render_live_planreader_colour(job_id):
+    """Live colour schedule + documents pushed from PlanReader for a job."""
+    st.markdown("### Colour brief (live from PlanReader)")
+    st.caption("Pushed straight from PB PlanReader > JobHub Sync. Edits in PlanReader appear here on the next refresh.")
+    colours = planreader_synced_colours(job_id)
+    if colours.empty:
+        st.info("No colour schedule has been pushed to this job yet.")
+    else:
+        st.dataframe(colours, width="stretch", hide_index=True)
+    render_planreader_synced_documents(job_id)
+
+
+def planreader_sync_page():
+    st.header("PlanReader Sync")
+    st.caption("Live take-off rows, colour schedules and documents pushed from PB PlanReader. JobHub and PlanReader share one database, so edits in either app appear in the other on the next refresh.")
+    if not PLANREADER_BRIDGE:
+        st.error("The PlanReader bridge is not available in this environment.")
+        return
+    try:
+        PLANREADER_BRIDGE.ensure_bridge_schema()
+    except Exception as exc:
+        st.error(f"Could not connect to the shared database: {exc}")
+        st.caption("Check that DATA_DIR / DATABASE_URL point at the same storage PlanReader uses.")
+        return
+    st.caption(PLANREADER_BRIDGE.connection_status())
+
+    try:
+        synced = PLANREADER_BRIDGE.jobs_with_sync_frame()
+    except Exception:
+        synced = pd.DataFrame()
+    if synced.empty:
+        st.info(
+            "No jobs have been synced from PlanReader yet. Open a job in PB PlanReader, "
+            "go to JobHub Sync, link the job, then push the take-off and colour schedule."
+        )
+        return
+
+    job_map = {
+        f"{row['Job No']} - {row['Job Name']} | {row['Status']}": int(row["Job ID"])
+        for _, row in synced.iterrows()
+    }
+    selected_label = st.selectbox("Select Job", list(job_map.keys()), key="planreader_sync_job")
+    selected_job_id = job_map[selected_label]
+    st.session_state["linked_view_selected_job_id"] = selected_job_id
+
+    tab1, tab2, tab3 = st.tabs(["Take-off", "Colour Schedule", "Documents"])
+    with tab1:
+        st.markdown("### Take-off rows (from PlanReader)")
+        takeoff = planreader_synced_takeoff(selected_job_id)
+        if takeoff.empty:
+            st.info("No take-off rows have been pushed to this job yet.")
+        else:
+            st.dataframe(takeoff, width="stretch", hide_index=True)
+    with tab2:
+        st.markdown("### Colour schedule (from PlanReader)")
+        colours = planreader_synced_colours(selected_job_id)
+        if colours.empty:
+            st.info("No colour schedule has been pushed to this job yet.")
+        else:
+            st.dataframe(colours, width="stretch", hide_index=True)
+    with tab3:
+        st.markdown("### Documents (from PlanReader)")
+        render_planreader_synced_documents(selected_job_id)
 
 
 OPERATING_SETTING_DEFAULTS = {
@@ -20084,7 +20363,7 @@ def render_job_linked_info(job_id, expanded=True):
     m4.metric("Wages", f"${wage_total:,.2f}")
     m5.metric("Basic Position", f"${gross_position:,.2f}")
 
-    tab_summary, tab_stages, tab_costs, tab_materials, tab_wages, tab_equipment, tab_control, tab_photos = st.tabs([
+    tab_summary, tab_stages, tab_costs, tab_materials, tab_wages, tab_equipment, tab_control, tab_photos, tab_notes = st.tabs([
         "Summary",
         "Stages / POs",
         "Costs & Estimates",
@@ -20093,6 +20372,7 @@ def render_job_linked_info(job_id, expanded=True):
         "Equipment",
         "Control / Claims",
         "Photos",
+        "Notes",
     ])
 
     with tab_summary:
@@ -20361,6 +20641,8 @@ def render_job_linked_info(job_id, expanded=True):
                         st.warning("Could not display photo.")
                     st.caption(f"Uploaded: {photo_row['uploaded_at']} by {photo_row['uploaded_by']}")
 
+    with tab_notes:
+        render_job_comments_section(job_id, key_prefix=f"job_folder_notes_{job_id}")
 
 
 def job_lookup_links_page():
@@ -20671,6 +20953,12 @@ def initialise_jobhub_runtime(database_url, data_dir):
     init_linked_schema()
     seed_data()
     seed_app_users()
+    if PLANREADER_BRIDGE:
+        try:
+            PLANREADER_BRIDGE.ensure_bridge_schema()
+        except Exception:
+            # A failed PlanReader bridge must never block JobHub startup.
+            pass
     push_status = current_phone_push_provider_status()
     print(
         "JobHub OneSignal provider check: "
@@ -20749,6 +21037,7 @@ elif role == "manager":
         "Upload PO",
         "Estimating",
         "Colour Schedule",
+        "PlanReader",
         "Site Operations",
         "Reports",
         "Management",
@@ -20790,6 +21079,7 @@ else:
         "Upload PO",
         "Estimating",
         "Colour Schedule",
+        "PlanReader",
         "Site Operations",
         "Reports",
         "Management",
@@ -21148,6 +21438,9 @@ elif menu == "Employee Portal":
 
 elif menu == "Colour Schedule":
     colour_schedule_page()
+
+elif menu == "PlanReader":
+    planreader_sync_page()
 
 elif menu == "Operations Hub":
     render_operations_hub(jobhub_enterprise_context())

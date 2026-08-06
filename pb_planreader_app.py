@@ -39,6 +39,24 @@ DATA_DIR = RENDER_DATA_DIR if RENDER_DATA_DIR.exists() and os.access(str(RENDER_
 JOBS_DIR = DATA_DIR / "jobs"
 JOBS_DIR.mkdir(parents=True, exist_ok=True)
 
+
+def _load_planreader_bridge():
+    """Load the JobHub bridge by file path so the JobHub startup guards never run here."""
+    try:
+        import importlib.util
+
+        bridge_path = ROOT / "jobhub" / "planreader_bridge.py"
+        spec = importlib.util.spec_from_file_location("planreader_bridge", str(bridge_path))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    except Exception:
+        return None
+
+
+PLANREADER_BRIDGE = _load_planreader_bridge()
+PLANREADER_BRIDGE_AVAILABLE = PLANREADER_BRIDGE is not None
+
 PAINT_KEYWORDS = [
     "paint", "painting", "painter", "coating", "coatings", "primer", "sealer", "undercoat",
     "topcoat", "dulux", "haymes", "taubmans", "resene", "wattyl", "colorbond", "colourbond",
@@ -686,6 +704,128 @@ def colour_schedule_page(job_id: str):
             if p.exists():
                 st.image(str(p), caption=f.get("name", ""), width="stretch")
                 st.download_button("Download this markup", p.read_bytes(), file_name=p.name, mime="image/png", key=f"dl_markup_{p.name}_{int(time.time())}")
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+def jobhub_sync_page(job_id: str):
+    st.markdown("<div class='pb-card'>", unsafe_allow_html=True)
+    st.subheader("JobHub sync")
+    st.caption("Push this job's take-off rows, colour schedule and colour markup straight into JobHub. PlanReader and JobHub share one database, so anything you send appears in JobHub on its next refresh — and JobHub edits to the same tables flow straight back.")
+    if not PLANREADER_BRIDGE_AVAILABLE:
+        st.error("The JobHub bridge module could not be loaded in this environment.")
+        st.markdown("</div>", unsafe_allow_html=True)
+        return
+    bridge = PLANREADER_BRIDGE
+    try:
+        bridge.ensure_bridge_schema()
+    except Exception as exc:
+        st.error(f"Could not connect to the shared JobHub database: {exc}")
+        st.caption("Check that DATA_DIR / DATABASE_URL point at the same storage JobHub uses.")
+        st.markdown("</div>", unsafe_allow_html=True)
+        return
+    try:
+        st.caption(bridge.connection_status())
+    except Exception:
+        pass
+
+    job = load_job(job_id)
+    job_no = str(job.get("job_no") or job.get("job_id") or job_id)
+    job_name = str(job.get("job_name") or "")
+
+    linked_id = bridge.link_job_by_no(job_no)
+    if linked_id is None:
+        st.info(f"Job `{job_no}` is not in JobHub yet. Create it now to start sharing data.")
+        if st.button("Create this job in JobHub", type="primary", key=f"pr_link_create_{job_id}"):
+            linked_id = bridge.create_linked_job(
+                job_no,
+                job_name=job_name,
+                site_address=str(job.get("site_address") or ""),
+                status=str(job.get("status") or "Active"),
+            )
+            if linked_id is None:
+                st.error("Could not create the JobHub job.")
+                st.markdown("</div>", unsafe_allow_html=True)
+                return
+            st.success(f"Created JobHub job #{linked_id} for {job_no}.")
+            st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
+        return
+    st.success(f"Linked to JobHub job #{linked_id} — {job_no} {job_name}".rstrip())
+
+    takeoff_rows = job.get("takeoff_rows", [])
+    schedule = normalise_colour_schedule(job.get("colour_schedule", [])) or seed_colour_schedule(job)
+
+    st.markdown("### Ready to send")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Take-off rows", len(takeoff_rows))
+    c2.metric("Colour schedule lines", len(schedule))
+    markup_count = len([f for f in job.get("files", []) if f.get("category") == "Colour markup"])
+    c3.metric("Colour markup images", markup_count)
+
+    col1, col2 = st.columns(2)
+    if col1.button("Push take-off rows to JobHub", key=f"pr_sync_takeoff_{job_id}"):
+        n = bridge.sync_takeoff_rows(linked_id, takeoff_rows)
+        st.success(f"Sent {n} take-off row(s) to JobHub.")
+        st.rerun()
+    if col2.button("Push colour schedule to JobHub", key=f"pr_sync_schedule_{job_id}"):
+        n = bridge.sync_colour_schedule(linked_id, schedule)
+        st.success(f"Sent {n} colour schedule line(s) to JobHub.")
+        st.rerun()
+
+    if st.button("Upload colour markup + schedule exports to JobHub", type="primary", key=f"pr_sync_docs_{job_id}"):
+        uploaded = 0
+        created = generate_colour_markup_images(job_id, job)
+        for path in created:
+            try:
+                if bridge.upsert_document_blob(
+                    linked_id,
+                    path.name,
+                    path.read_bytes(),
+                    mime_type="image/png",
+                    doc_type="Colour markup",
+                    notes=f"Colour markup for {job_no}",
+                ):
+                    uploaded += 1
+            except Exception:
+                pass
+        xlsx_name = f"{safe_name(job_name or job_no)}_colour_schedule.xlsx"
+        if bridge.upsert_document_blob(
+            linked_id,
+            xlsx_name,
+            colour_schedule_excel_bytes(job),
+            mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            doc_type="Colour Schedule",
+            notes=f"Colour schedule export for {job_no}",
+        ):
+            uploaded += 1
+        pdf_name = f"{safe_name(job_name or job_no)}_colour_schedule.pdf"
+        if bridge.upsert_document_blob(
+            linked_id,
+            pdf_name,
+            colour_schedule_pdf_bytes(job),
+            mime_type="application/pdf",
+            doc_type="Colour Schedule",
+            notes=f"Colour schedule export for {job_no}",
+        ):
+            uploaded += 1
+        st.success(f"Uploaded {uploaded} file(s) to the JobHub job.")
+        st.rerun()
+
+    st.markdown("### What JobHub has for this job")
+    try:
+        takeoff_now = bridge.job_takeoff_frame(linked_id)
+        schedule_now = bridge.job_colour_schedule_frame(linked_id)
+        docs_now = bridge.job_document_blobs_frame(linked_id)
+        st.caption(
+            f"Take-off rows in JobHub: {len(takeoff_now)} · "
+            f"colour schedule lines: {len(schedule_now)} · "
+            f"files: {len(docs_now)}"
+        )
+        if not docs_now.empty:
+            st.dataframe(docs_now.drop(columns=["blob_data"]), width="stretch", hide_index=True)
+    except Exception as exc:
+        st.caption(f"Could not preview JobHub state: {exc}")
 
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -3137,6 +3277,7 @@ def main():
             "Extracted Info",
             "Verify & Correct",
             "Colour Schedule",
+            "JobHub Sync",
             "Take-off Draft",
             "Progress Tracking",
             "Converted Images",
@@ -3154,6 +3295,8 @@ def main():
         corrections_page(job_id)
     elif menu == "Colour Schedule":
         colour_schedule_page(job_id)
+    elif menu == "JobHub Sync":
+        jobhub_sync_page(job_id)
     elif menu == "Take-off Draft":
         takeoff_page(job_id)
     elif menu == "Progress Tracking":

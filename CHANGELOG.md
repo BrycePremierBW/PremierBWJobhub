@@ -1,5 +1,28 @@
 # JobHub secured release
 
+## 2026-08-06 - PlanReader <-> JobHub share one database + job notes
+
+- **JobHub and PB PlanReader now talk to each other**: both apps use the same
+  database (local `DATA_DIR/jobhub.db`, or Supabase/Postgres via
+  `DATABASE_URL`), so data pushed in one app appears in the other on the next
+  refresh.
+- **PB PlanReader gains a JobHub Sync page**: link the current job to its
+  JobHub job (or create it), then one-click push the take-off rows, colour
+  schedule, colour markup images and colour schedule exports straight into
+  JobHub.
+- **JobHub gains a PlanReader Sync section** (managers/admins): pick a synced
+  job and see its live take-off rows, colour schedule and documents.
+- **Live colour brief**: the JobHub Colour Schedule section and the Employee
+  Portal "My Job Info" tab now also show the colour schedule and markup
+  documents pushed from PlanReader, so edits in PlanReader flow straight to
+  the crew.
+- **Job notes / comments**: every job folder now has a Notes tab where admin,
+  managers and employees can leave notes for each other, and employees can
+  read and reply from the Employee Portal "My Job Info" tab. Admins can delete
+  any comment.
+- Existing JobHub tables already re-read from the shared database on every
+  rerun, so edits update the related tables immediately.
+
 ## 2026-08-06 - Colour schedule produced by PlanReader + employee view in JobHub
 
 - **PlanReader** gains a **Colour Schedule** step: it auto-builds a per-room /
