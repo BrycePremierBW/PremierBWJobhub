@@ -1438,11 +1438,74 @@ def render_compliance(ctx: dict[str, Any]) -> None:
         selected = st.selectbox("Open form", list(labels), key="enterprise_form_register")
         form_id = labels[selected]
         row = forms[forms["id"].astype(int) == form_id].iloc[0]
+        form_type = str(row["Form Type"])
         try:
             answers = json.loads(row["answers_json"] or "{}")
         except Exception:
-            answers = {"record": row["answers_json"]}
-        st.json(answers)
+            answers = {}
+        if not isinstance(answers, dict):
+            answers = {"record": answers}
+
+        if _management(ctx):
+            editable_fields = _form_fields(form_type)
+            with st.form(f"enterprise_form_edit_{form_id}"):
+                st.caption(
+                    f"Edit the {form_type} answers before approving. Dropdown fields use "
+                    "fixed choices; free-text fields can be corrected as needed."
+                )
+                edited_answers: dict[str, str] = {}
+                for field_key, label, options in editable_fields:
+                    current = str(answers.get(field_key, "") or "")
+                    if options:
+                        options_for_field = (
+                            list(options)
+                            if current in options
+                            else [current] + list(options)
+                        )
+                        edited_answers[field_key] = st.selectbox(
+                            label,
+                            options_for_field,
+                            index=0,
+                            key=f"enterprise_form_answer_{form_id}_{field_key}",
+                        )
+                    else:
+                        edited_answers[field_key] = st.text_area(
+                            label,
+                            value=current,
+                            key=f"enterprise_form_answer_{form_id}_{field_key}",
+                        )
+                save_answers = st.form_submit_button("Save Answers", width="stretch")
+            if save_answers:
+                user = _user(ctx)
+                cleaned_answers = {
+                    k: str(v or "").strip() for k, v in edited_answers.items()
+                }
+                try:
+                    _execute(
+                        ctx,
+                        """
+                        UPDATE field_forms
+                        SET answers_json = ?
+                        WHERE id = ?
+                        """,
+                        (json.dumps(cleaned_answers, sort_keys=True), form_id),
+                    )
+                except Exception as exc:
+                    log_error(ctx["connect"], user.get("username", ""), "field_form_answer_update", exc, {"form_id": form_id})
+                    ctx["pb_error"](f"Answers were not saved: {exc}")
+                else:
+                    _audit(
+                        ctx,
+                        "field_form_answers_updated",
+                        "field_form",
+                        form_id,
+                        {"form_type": form_type, "edited_by": user.get("username", "")},
+                    )
+                    ctx["pb_success"](f"{form_type} answers were updated.")
+                    ctx["pb_rerun"]()
+        else:
+            st.json(answers)
+
         if _management(ctx):
             status = st.selectbox("Approval status", ["Submitted", "Approved", "Requires Action", "Closed"], key=f"enterprise_form_status_{form_id}")
             if st.button("Save Form Status", key=f"enterprise_form_status_save_{form_id}", width="stretch"):
@@ -1459,6 +1522,147 @@ def render_compliance(ctx: dict[str, Any]) -> None:
                 _audit(ctx, "field_form_status_updated", "field_form", form_id, {"status": status})
                 ctx["pb_success"]("Form status was updated.")
                 ctx["pb_rerun"]()
+
+
+def render_job_field_forms_panel(ctx: dict[str, Any], job_id: int) -> None:
+    """Show every digital form submitted against one job, editable for management.
+
+    Mirrors the Form Register / Approval view but scoped to a single job so the
+    Job Folder and the approval register stay in sync on the same records.
+    """
+    st.markdown("### Site Safety & Quality Forms")
+    st.caption(
+        "Digital pre-starts, hazard reports, quality inspections and completion "
+        "records for this job. Approvals are managed in the Operations Hub."
+    )
+    forms = _query(
+        ctx,
+        """
+        SELECT f.id, f.form_type AS "Form Type",
+               f.form_date AS "Date",
+               COALESCE(e.name, f.signature_name, f.created_by) AS "Submitted By",
+               f.status AS "Status", f.approved_by AS "Approved By",
+               f.approved_at AS "Approved At",
+               f.answers_json
+        FROM field_forms f
+        LEFT JOIN employees e ON e.id = f.employee_id
+        WHERE f.job_id = ?
+        ORDER BY f.id DESC
+        """,
+        (int(job_id),),
+    )
+    if forms.empty:
+        st.info("No digital forms have been submitted for this job yet.")
+        return
+
+    management = _management(ctx)
+    for _, row in forms.iterrows():
+        form_id = int(row["id"])
+        header = f"#{form_id} — {row['Form Type']} — {row['Date']} — {row['Status']}"
+        with st.expander(header):
+            try:
+                answers = json.loads(row["answers_json"] or "{}")
+            except Exception:
+                answers = {}
+            if not isinstance(answers, dict):
+                answers = {"record": answers}
+            st.caption(f"Submitted by {row['Submitted By']}")
+
+            if not management:
+                st.json(answers)
+                continue
+
+            try:
+                editable_fields = _form_fields(str(row["Form Type"]))
+            except KeyError:
+                editable_fields = [
+                    (key, key, None)
+                    for key in (answers or {})
+                ] or [("record", "Record", None)]
+
+            with st.form(f"job_folder_form_edit_{form_id}"):
+                st.caption(
+                    "Edit answers before approving. Dropdown fields use fixed "
+                    "choices; free-text fields can be corrected as needed."
+                )
+                edited_answers: dict[str, str] = {}
+                for field_key, label, options in editable_fields:
+                    current = str(answers.get(field_key, "") or "")
+                    if options:
+                        options_for_field = (
+                            list(options)
+                            if current in options
+                            else [current] + list(options)
+                        )
+                        edited_answers[field_key] = st.selectbox(
+                            label,
+                            options_for_field,
+                            index=0,
+                            key=f"job_folder_form_answer_{form_id}_{field_key}",
+                        )
+                    else:
+                        edited_answers[field_key] = st.text_area(
+                            label,
+                            value=current,
+                            key=f"job_folder_form_answer_{form_id}_{field_key}",
+                        )
+                save_answers = st.form_submit_button("Save Answers", width="stretch")
+            if save_answers:
+                user = _user(ctx)
+                cleaned_answers = {
+                    k: str(v or "").strip() for k, v in edited_answers.items()
+                }
+                try:
+                    _execute(
+                        ctx,
+                        """
+                        UPDATE field_forms
+                        SET answers_json = ?
+                        WHERE id = ?
+                        """,
+                        (json.dumps(cleaned_answers, sort_keys=True), form_id),
+                    )
+                except Exception as exc:
+                    log_error(ctx["connect"], user.get("username", ""), "field_form_answer_update", exc, {"form_id": form_id})
+                    ctx["pb_error"](f"Answers were not saved: {exc}")
+                else:
+                    _audit(
+                        ctx,
+                        "field_form_answers_updated",
+                        "field_form",
+                        form_id,
+                        {"form_type": str(row["Form Type"]), "edited_by": user.get("username", "")},
+                    )
+                    ctx["pb_success"](f"Form #{form_id} answers were updated.")
+                    ctx["pb_rerun"]()
+
+            if management:
+                status = st.selectbox(
+                    "Approval status",
+                    ["Submitted", "Approved", "Requires Action", "Closed"],
+                    index=["Submitted", "Approved", "Requires Action", "Closed"].index(str(row["Status"]))
+                    if str(row["Status"]) in ["Submitted", "Approved", "Requires Action", "Closed"]
+                    else 0,
+                    key=f"job_folder_form_status_{form_id}",
+                )
+                if st.button(
+                    "Save Form Status",
+                    key=f"job_folder_form_status_save_{form_id}",
+                    width="stretch",
+                ):
+                    user = _user(ctx)
+                    _execute(
+                        ctx,
+                        """
+                        UPDATE field_forms
+                        SET status = ?, approved_by = ?, approved_at = ?
+                        WHERE id = ?
+                        """,
+                        (status, user.get("username", ""), _now(), form_id),
+                    )
+                    _audit(ctx, "field_form_status_updated", "field_form", form_id, {"status": status})
+                    ctx["pb_success"]("Form status was updated.")
+                    ctx["pb_rerun"]()
 
 
 def _active_clock(ctx: dict[str, Any], employee_id: int) -> pd.DataFrame:

@@ -39,6 +39,7 @@ from jobhub_enterprise import (
     ensure_enterprise_schema,
     ensure_daily_backup,
     render_field_mode,
+    render_job_field_forms_panel,
     render_operations_hub,
 )
 from jobhub_v2.schema import ensure_v2_schema
@@ -2876,6 +2877,20 @@ def apply_schema_migrations():
                 (job_comments_migration_id, now),
             )
 
+        document_viewer_migration_id = "20260807_job_document_viewer_scope_v1"
+        if document_viewer_migration_id not in applied:
+            _migration_ensure_column(
+                cur,
+                "job_documents",
+                "viewer_scope",
+                "TEXT DEFAULT 'crew'",
+            )
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            cur.execute(
+                "INSERT INTO schema_migrations (migration_id, applied_at) VALUES (?, ?)",
+                (document_viewer_migration_id, now),
+            )
+
         conn.commit()
         return True
     except Exception:
@@ -4940,6 +4955,143 @@ def attach_document_to_job(job_id, document_type, file_path, notes="Generated fr
     ))
 
 
+JOB_DOCUMENT_VIEWER_SCOPE_OPTIONS = {
+    "Crew (everyone on this job)": "crew",
+    "Managers only": "managers",
+    "Admin only": "admin",
+}
+
+VIEWER_SCOPE_LABELS = {
+    value: label
+    for label, value in JOB_DOCUMENT_VIEWER_SCOPE_OPTIONS.items()
+}
+
+
+def document_visible_to_role(viewer_scope, role):
+    """Whether a document with a given viewer scope can be seen by a role.
+
+    Missing scope is treated as 'crew' so documents created before this feature
+    stay visible to the crew exactly as before.
+    """
+    scope = str(viewer_scope or "").strip().lower() or "crew"
+    role = str(role or "").strip().lower()
+    if scope == "crew":
+        return True
+    if scope == "managers":
+        return role in ("admin", "manager")
+    if scope == "admin":
+        return role == "admin"
+    return True
+
+
+def employee_visible_job_documents(job_id):
+    """Documents a crew member may see (crew-visible scope only)."""
+    return df_query("""
+        SELECT id,
+               document_type AS 'Document Type',
+               file_name AS 'File Name',
+               file_path,
+               created_at AS 'Created At',
+               notes AS 'Notes',
+               COALESCE(mime_type, 'application/octet-stream') AS 'Mime Type'
+        FROM job_documents
+        WHERE job_id = ?
+          AND (COALESCE(viewer_scope, '') = ''
+               OR LOWER(COALESCE(viewer_scope, '')) = 'crew')
+        ORDER BY id DESC
+    """, (int(job_id),))
+
+
+def job_documents_frame(job_id):
+    """Every document on a job, including its viewer scope."""
+    return df_query("""
+        SELECT id,
+               document_type AS 'Document Type',
+               file_name AS 'File Name',
+               file_path,
+               created_at AS 'Created At',
+               notes AS 'Notes',
+               COALESCE(mime_type, 'application/octet-stream') AS 'Mime Type',
+               COALESCE(viewer_scope, 'crew') AS 'Viewer Scope'
+        FROM job_documents
+        WHERE job_id = ?
+        ORDER BY id DESC
+    """, (int(job_id),))
+
+
+def upload_job_document(job_id, uploaded_file, document_type, notes="", viewer_scope="crew"):
+    """Save an uploaded file into the job folder and attach it to the job."""
+    job_id = int(job_id)
+    job_no_df = df_query("SELECT job_no FROM jobs WHERE id = ?", (job_id,))
+    if job_no_df.empty:
+        raise ValueError("Job not found.")
+    job_no = str(job_no_df.iloc[0]["job_no"])
+    job_folder = get_job_folder(job_no)
+    safe_name = safe_file_name(uploaded_file.name or "document")
+    destination = os.path.join(job_folder, safe_name)
+    base, ext = os.path.splitext(safe_name)
+    counter = 1
+    while os.path.exists(destination):
+        destination = os.path.join(job_folder, f"{base}_{counter}{ext}")
+        counter += 1
+    with open(destination, "wb") as f:
+        f.write(uploaded_file.getvalue())
+    mime = uploaded_file.type or mimetypes.guess_type(safe_name)[0] or "application/octet-stream"
+    file_name = os.path.basename(destination)
+    conn = connect()
+    try:
+        cur = conn.cursor()
+        insert_sql = """
+            INSERT INTO job_documents
+            (job_id, document_type, file_name, file_path, created_at, notes, mime_type, viewer_scope)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        if USE_POSTGRES:
+            insert_sql += " RETURNING id"
+        cur.execute(insert_sql, (
+            job_id,
+            str(document_type or "Document"),
+            file_name,
+            destination,
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            str(notes or ""),
+            mime,
+            str(viewer_scope or "crew"),
+        ))
+        document_id = int(cur.fetchone()[0]) if USE_POSTGRES else int(cur.lastrowid)
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+    record_audit_event(
+        "job_document_uploaded",
+        "job_document",
+        document_id,
+        {"job_id": job_id, "file_name": file_name, "viewer_scope": str(viewer_scope or "crew")},
+    )
+    return document_id
+
+
+def set_job_document_viewer_scope(document_id, viewer_scope):
+    """Restrict which roles can see a job document in the employee portal."""
+    document_id = int(document_id)
+    scope = str(viewer_scope or "crew").strip().lower()
+    if scope not in {"crew", "managers", "admin"}:
+        raise ValueError("Unsupported viewer scope.")
+    execute("UPDATE job_documents SET viewer_scope = ? WHERE id = ?", (scope, document_id))
+    record_audit_event(
+        "job_document_viewer_scope_changed",
+        "job_document",
+        document_id,
+        {"viewer_scope": scope},
+    )
+
+
 def generate_equipment_checklist_pdf(job_id):
     job = get_job_details_for_pdf(job_id)
 
@@ -5779,14 +5931,14 @@ def employee_portal():
         st.warning("This login is not linked to an employee record. Ask admin to link it in User Access.")
         return
 
-    tab_jobs, tab_requests, tab_hours, tab_equipment, tab_forms, tab_photos, tab_password = st.tabs([
-        "My Job Info",
+    tab_jobs, tab_timesheet, tab_requests, tab_equipment, tab_forms, tab_photos, tab_password = st.tabs([
+        "My Jobs",
+        "Timesheet",
         "Requests",
-        "Submit Timesheet",
-        "View Equipment",
-        "Generate Forms",
-        "Upload Photos",
-        "Change Password",
+        "Equipment",
+        "Forms",
+        "Photos",
+        "Password",
     ])
 
     job_options = get_employee_job_options(employee_id)
@@ -5817,6 +5969,11 @@ def employee_portal():
                 WHERE j.id = ?
             """, (selected_job_id,))
             st.dataframe(job_df, width="stretch", hide_index=True)
+
+            st.markdown("### Site Colour Schedule")
+            st.caption("The colour brief for this job. Generated in PB PlanReader or attached to the job, it appears here so the crew always paints the right colours.")
+            render_live_planreader_colour(selected_job_id)
+            render_colour_schedule_documents(selected_job_id)
 
             st.markdown("### Job Schedule")
             employee_schedule_df = df_query("""
@@ -5872,18 +6029,7 @@ def employee_portal():
                     st.dataframe(employee_imported_materials_df, width="stretch", hide_index=True)
 
             st.markdown("### Job Documents / Plans / Specs")
-            employee_documents_df = df_query("""
-                SELECT id,
-                       document_type AS 'Document Type',
-                       file_name AS 'File Name',
-                       file_path,
-                       created_at AS 'Created At',
-                       notes AS 'Notes',
-                       COALESCE(mime_type, 'application/octet-stream') AS 'Mime Type'
-                FROM job_documents
-                WHERE job_id = ?
-                ORDER BY id DESC
-            """, (selected_job_id,))
+            employee_documents_df = employee_visible_job_documents(selected_job_id)
             if employee_documents_df.empty:
                 st.info("No job documents, plans or specs have been attached to this job yet.")
             else:
@@ -5913,7 +6059,7 @@ def employee_portal():
     with tab_requests:
         render_employee_requests(employee_id)
 
-    with tab_hours:
+    with tab_timesheet:
         timesheets_page(employee_restricted=True)
 
     with tab_equipment:
@@ -5943,10 +6089,6 @@ def employee_portal():
                 ORDER BY i.category, i.item_name
             """, (selected_job_id,))
             st.dataframe(equipment_df, width="stretch", hide_index=True)
-
-            st.markdown("### Colour Schedule / Colour Markup")
-            render_colour_schedule_documents(selected_job_id)
-            render_live_planreader_colour(selected_job_id)
 
     with tab_photos:
         job_photos_page(employee_restricted=True)
@@ -7371,12 +7513,14 @@ def render_missed_timesheet_catchup(
     employee_id,
     key_prefix="missed_timesheet",
     include_name_header=True,
+    manual_entry=False,
 ):
     """Quick catch-up for scheduled shifts with no timesheet yet.
 
-    Pre-fills the roster's start/finish and job/stage, lets the employee (or an
-    admin on their behalf) adjust the shift details, and submits each missed day
-    through the normal ``save_timesheet_entry`` path.
+    By default (admin view) the roster's start/finish and job/stage are pre-filled
+    so an admin can generate a shift on an employee's behalf. In ``manual_entry``
+    mode (employee view) nothing is auto-populated: the employee chooses the job
+    and the hours themselves, so the entry is entirely their selection.
     """
     if not employee_id:
         st.info("Select an employee to see missed timesheets.")
@@ -7399,12 +7543,32 @@ def render_missed_timesheet_catchup(
             employee_name = str(name_df.iloc[0]["name"])
         st.markdown(f"#### Generate missed timesheets for {employee_name}")
 
-    st.caption(
-        f"{len(missed)} scheduled shift(s) in the last 21 days have no timesheet. "
-        "Shifts shown use the rostered start/finish and can be adjusted before submitting."
-    )
+    if manual_entry:
+        st.caption(
+            f"{len(missed)} scheduled shift(s) in the last 21 days have no timesheet. "
+            "Choose the job and the hours you actually worked for each day below."
+        )
+    else:
+        st.caption(
+            f"{len(missed)} scheduled shift(s) in the last 21 days have no timesheet. "
+            "Shifts shown use the rostered start/finish and can be adjusted before submitting."
+        )
 
     work_type_options = ["Painting", "Prep", "Spraying", "Touch-ups", "Travel", "Site Setup", "Other"]
+
+    job_stage_options = {}
+    if manual_entry:
+        job_stage_options = get_job_stage_options(get_employee_job_options(employee_id))
+        existing_job_ids = {int(choice["job_id"]) for choice in job_stage_options.values()}
+        for item in missed:
+            missed_job_id = int(item["job_id"] or 0)
+            if missed_job_id and missed_job_id not in existing_job_ids:
+                job_label = f"{item['job_no']} - {item['job_name']}".strip(" -")
+                job_stage_options.update(
+                    get_job_stage_options({job_label: missed_job_id})
+                )
+                existing_job_ids.add(missed_job_id)
+
     submitted_count = 0
     for index, item in enumerate(missed):
         row_key = f"{key_prefix}_{index}"
@@ -7416,14 +7580,35 @@ def render_missed_timesheet_catchup(
                 header_line += f" — {item['site_role']}"
             st.markdown(f"**{header_line}**")
 
-            try:
-                default_start = datetime.strptime(item["start_time"], "%H:%M").time()
-            except ValueError:
+            selected_choice = None
+            if manual_entry:
+                # All user selection: no job, stage or hours are pre-filled.
+                if not job_stage_options:
+                    st.info("No assigned jobs are available to record this day against.")
+                    continue
+                select_labels = ["Select job / stage..."] + list(job_stage_options.keys())
+                selected_job_stage = st.selectbox(
+                    "Job / Stage",
+                    select_labels,
+                    index=0,
+                    key=f"{row_key}_job_stage",
+                )
+                selected_choice = (
+                    job_stage_options[selected_job_stage]
+                    if selected_job_stage != "Select job / stage..."
+                    else None
+                )
                 default_start = time(7, 0)
-            try:
-                default_finish = datetime.strptime(item["finish_time"], "%H:%M").time()
-            except ValueError:
                 default_finish = time(15, 0)
+            else:
+                try:
+                    default_start = datetime.strptime(item["start_time"], "%H:%M").time()
+                except ValueError:
+                    default_start = time(7, 0)
+                try:
+                    default_finish = datetime.strptime(item["finish_time"], "%H:%M").time()
+                except ValueError:
+                    default_finish = time(15, 0)
 
             start_col, finish_col, break_col = st.columns(3)
             start_value = start_col.time_input(
@@ -7447,19 +7632,31 @@ def render_missed_timesheet_catchup(
                 key=f"{row_key}_break",
             ))
             type_col, notes_col = st.columns([1, 2])
-            selected_work_type = type_col.selectbox(
-                "Work Type",
-                work_type_options,
-                index=work_type_options.index(item["site_role"])
-                if item["site_role"] in work_type_options
-                else 0,
-                key=f"{row_key}_work_type",
-            )
-            selected_notes = notes_col.text_area(
-                "Notes",
-                value="Missed timesheet (auto-generated).",
-                key=f"{row_key}_notes",
-            )
+            if manual_entry:
+                selected_work_type = type_col.selectbox(
+                    "Work Type",
+                    work_type_options,
+                    index=0,
+                    key=f"{row_key}_work_type",
+                )
+                selected_notes = notes_col.text_area(
+                    "Notes",
+                    key=f"{row_key}_notes",
+                )
+            else:
+                selected_work_type = type_col.selectbox(
+                    "Work Type",
+                    work_type_options,
+                    index=work_type_options.index(item["site_role"])
+                    if item["site_role"] in work_type_options
+                    else 0,
+                    key=f"{row_key}_work_type",
+                )
+                selected_notes = notes_col.text_area(
+                    "Notes",
+                    value="Missed timesheet (auto-generated).",
+                    key=f"{row_key}_notes",
+                )
 
             try:
                 total_hours = calculate_shift_hours(
@@ -7469,24 +7666,44 @@ def render_missed_timesheet_catchup(
             except ValueError as exc:
                 total_hours = 0.0
                 hours_label = str(exc)
-            st.caption(
-                f"Rostered: {item['planned_hours']:.1f} hrs. Calculated: {hours_label} "
-                f"({start_value.strftime('%H:%M')} to {finish_value.strftime('%H:%M')}, "
-                f"less {break_value} min break)."
-            )
+            if manual_entry:
+                st.caption(
+                    f"Rostered shift was {item['planned_hours']:.1f} hrs "
+                    f"({item['start_time']} to {item['finish_time']}). Enter the hours "
+                    f"you actually worked — calculated: {hours_label} "
+                    f"({start_value.strftime('%H:%M')} to {finish_value.strftime('%H:%M')}, "
+                    f"less {break_value} min break)."
+                )
+            else:
+                st.caption(
+                    f"Rostered: {item['planned_hours']:.1f} hrs. Calculated: {hours_label} "
+                    f"({start_value.strftime('%H:%M')} to {finish_value.strftime('%H:%M')}, "
+                    f"less {break_value} min break)."
+                )
 
             submit_button = st.button(
                 f"Submit timesheet for {item['work_date']}",
                 key=f"{row_key}_submit",
                 width="stretch",
+                disabled=(
+                    bool(manual_entry and selected_choice is None)
+                    or total_hours <= 0
+                ),
             )
             if submit_button:
                 if total_hours <= 0:
                     pb_error(f"Shift for {item['work_date']} has zero or negative hours. Fix the times first.")
                     continue
+                if manual_entry and selected_choice is None:
+                    pb_error(f"Select the job and stage worked on {item['work_date']} first.")
+                    continue
                 try:
                     save_timesheet_entry(
-                        job_id=item["job_id"],
+                        job_id=(
+                            int(selected_choice["job_id"])
+                            if manual_entry and selected_choice is not None
+                            else item["job_id"]
+                        ),
                         employee_id=int(employee_id),
                         work_date=item["work_date"],
                         start_time=start_value.strftime("%H:%M"),
@@ -7495,7 +7712,11 @@ def render_missed_timesheet_catchup(
                         total_hours=total_hours,
                         work_type=selected_work_type,
                         notes=selected_notes,
-                        job_stage_id=item["stage_id"],
+                        job_stage_id=(
+                            selected_choice["job_stage_id"]
+                            if manual_entry and selected_choice is not None
+                            else item["stage_id"]
+                        ),
                     )
                     submitted_count += 1
                     st.session_state[f"{row_key}_submitted"] = True
@@ -8338,7 +8559,7 @@ def render_timesheet_bulk_actions(timesheet_df, key_prefix, empty_message="No ti
 
     return selected_ids
 
-def timesheet_entry_form(employee_id=None, employee_restricted=False, key_prefix="timesheet"):
+def timesheet_entry_form(employee_id=None, employee_restricted=False, key_prefix="timesheet", simple=False):
     job_options = (
         get_employee_job_options(employee_id)
         if employee_restricted and employee_id is not None
@@ -8400,16 +8621,19 @@ def timesheet_entry_form(employee_id=None, employee_restricted=False, key_prefix
             for label in selected_employee_labels
         ]
 
-    date_entry_mode = st.radio(
-        "Date Entry",
-        ["Single Date", "Multiple Dates"],
-        horizontal=True,
-        key=f"{key_prefix}_date_entry_mode",
-        help=(
-            "Choose Multiple Dates to create one timesheet for every selected "
-            "employee on every selected date."
-        ),
-    )
+    if simple:
+        date_entry_mode = "Single Date"
+    else:
+        date_entry_mode = st.radio(
+            "Date Entry",
+            ["Single Date", "Multiple Dates"],
+            horizontal=True,
+            key=f"{key_prefix}_date_entry_mode",
+            help=(
+                "Choose Multiple Dates to create one timesheet for every selected "
+                "employee on every selected date."
+            ),
+        )
 
     selected_work_dates = []
     if date_entry_mode == "Single Date":
@@ -8540,44 +8764,59 @@ def timesheet_entry_form(employee_id=None, employee_restricted=False, key_prefix
         "notes": notes,
     }
 
-    st.markdown("### Review Timesheet Batch")
-    with st.container(border=True):
-        review_rows = [
-            {
-                "Job / Stage": selected_job_stage,
-                "Employee": employee_label,
-                "Date": work_date.isoformat(),
-                "Start": start_text,
-                "Finish": finish_text,
-                "Break": f"{break_minutes} min",
-                "Calculated Hours": f"{total_hours:.2f}",
-                "Work Type": work_type,
-                "Notes": notes,
-            }
-            for work_date in selected_work_dates
-            for employee_label in selected_employee_labels
-        ]
-        if review_rows:
-            st.dataframe(
-                pd.DataFrame(review_rows),
-                width="stretch",
-                hide_index=True,
+    if simple:
+        st.markdown("### Check your hours")
+        with st.container(border=True):
+            simple_date_label = (
+                selected_work_dates[0].strftime("%a %d %b %Y")
+                if selected_work_dates
+                else "your selected date"
             )
-            st.caption(
-                f"{len(selected_employee_ids)} staff × {len(selected_work_dates)} "
-                f"date(s) = {batch_timesheet_count} timesheet(s), "
-                f"{batch_timesheet_count * total_hours:.2f} total hours."
+            st.write(
+                f"**{selected_job_stage}** — "
+                f"{simple_date_label} from {start_text} to {finish_text} "
+                f"({total_hours:.2f} hrs, {break_minutes} min break)."
             )
-        elif not selected_employee_ids:
-            st.info("Select at least one employee to build the batch.")
-        else:
-            st.info("Select at least one date to build the batch.")
+        accepted = True
+    else:
+        st.markdown("### Review Timesheet Batch")
+        with st.container(border=True):
+            review_rows = [
+                {
+                    "Job / Stage": selected_job_stage,
+                    "Employee": employee_label,
+                    "Date": work_date.isoformat(),
+                    "Start": start_text,
+                    "Finish": finish_text,
+                    "Break": f"{break_minutes} min",
+                    "Calculated Hours": f"{total_hours:.2f}",
+                    "Work Type": work_type,
+                    "Notes": notes,
+                }
+                for work_date in selected_work_dates
+                for employee_label in selected_employee_labels
+            ]
+            if review_rows:
+                st.dataframe(
+                    pd.DataFrame(review_rows),
+                    width="stretch",
+                    hide_index=True,
+                )
+                st.caption(
+                    f"{len(selected_employee_ids)} staff × {len(selected_work_dates)} "
+                    f"date(s) = {batch_timesheet_count} timesheet(s), "
+                    f"{batch_timesheet_count * total_hours:.2f} total hours."
+                )
+            elif not selected_employee_ids:
+                st.info("Select at least one employee to build the batch.")
+            else:
+                st.info("Select at least one date to build the batch.")
 
-        accepted = review_acceptance_checkbox(
-            key_prefix,
-            review_payload,
-            "I have reviewed every employee and date and accept that this batch is correct.",
-        )
+            accepted = review_acceptance_checkbox(
+                key_prefix,
+                review_payload,
+                "I have reviewed every employee and date and accept that this batch is correct.",
+            )
 
     submit_label = (
         "Submit Timesheet"
@@ -8668,7 +8907,12 @@ def timesheets_page(employee_restricted=False):
             return
         tab_submit, tab_my = st.tabs(["Submit Timesheet", "My Timesheets"])
         with tab_submit:
-            timesheet_entry_form(employee_id=current_employee_id, employee_restricted=True, key_prefix="employee_timesheet")
+            timesheet_entry_form(
+                employee_id=current_employee_id,
+                employee_restricted=True,
+                key_prefix="employee_timesheet",
+                simple=True,
+            )
             st.divider()
             st.subheader("Missed a timesheet?")
             st.caption(
@@ -8679,6 +8923,7 @@ def timesheets_page(employee_restricted=False):
                 current_employee_id,
                 key_prefix="employee_missed_timesheet",
                 include_name_header=False,
+                manual_entry=True,
             )
         with tab_my:
             my_df = df_query("""
@@ -20101,6 +20346,108 @@ def display_job_table_with_open_button(jobs_df, table_label, key_prefix):
     return selected_job_id
 
 
+def render_job_documents_panel(job_id):
+    """Upload job documents straight from the job folder and control who can view them."""
+    job_id = int(job_id)
+    st.markdown("### Upload a document")
+    st.caption(
+        "Attach plans, specs, colour schedules, SWMS or any other site document. "
+        "Choose who can see it in the Employee Portal."
+    )
+    with st.form(f"upload_job_document_{job_id}"):
+        upload_files = st.file_uploader(
+            "Choose files to attach",
+            type=["pdf", "png", "jpg", "jpeg", "webp", "xlsx", "xls", "csv", "docx", "txt"],
+            accept_multiple_files=True,
+            key=f"job_folder_upload_{job_id}",
+        )
+        c1, c2 = st.columns([1, 2])
+        upload_doc_type = c1.text_input(
+            "Document type",
+            value="Plan / Spec",
+            key=f"job_folder_upload_type_{job_id}",
+        )
+        upload_scope_label = c2.selectbox(
+            "Who can view this document",
+            list(JOB_DOCUMENT_VIEWER_SCOPE_OPTIONS.keys()),
+            index=0,
+            key=f"job_folder_upload_scope_{job_id}",
+        )
+        upload_notes = st.text_input("Notes", key=f"job_folder_upload_notes_{job_id}")
+        do_upload = st.form_submit_button("Upload document(s)", width="stretch")
+    if do_upload:
+        if not upload_files:
+            pb_error("Choose at least one file to upload.")
+        else:
+            uploaded_count = 0
+            for uploaded_file in upload_files:
+                if uploaded_file is None or not uploaded_file.name:
+                    continue
+                try:
+                    upload_job_document(
+                        job_id,
+                        uploaded_file,
+                        str(upload_doc_type or "Document"),
+                        notes=str(upload_notes or ""),
+                        viewer_scope=JOB_DOCUMENT_VIEWER_SCOPE_OPTIONS[upload_scope_label],
+                    )
+                    uploaded_count += 1
+                except Exception as exc:
+                    pb_error(f"Could not upload {uploaded_file.name}: {exc}")
+            if uploaded_count:
+                pb_success(f"{uploaded_count} document(s) uploaded to this job folder.")
+                pb_rerun()
+
+    st.divider()
+    st.markdown("### Documents on this job")
+    docs = job_documents_frame(job_id)
+    if docs.empty:
+        st.info("No documents are attached to this job yet.")
+        return
+    for _, doc in docs.iterrows():
+        stored_scope = str(doc["Viewer Scope"] or "crew")
+        with st.container(border=True):
+            st.markdown(f"**{doc['Document Type']}** — {doc['File Name']}")
+            if str(doc["Created At"] or "").strip():
+                st.caption(f"Created: {doc['Created At']}")
+            if str(doc["Notes"] or "").strip():
+                st.caption(str(doc["Notes"]))
+            scope_col, download_col = st.columns([2, 1])
+            selected_scope_label = scope_col.selectbox(
+                "Who can view this document",
+                list(JOB_DOCUMENT_VIEWER_SCOPE_OPTIONS.keys()),
+                index=(
+                    list(JOB_DOCUMENT_VIEWER_SCOPE_OPTIONS.values()).index(stored_scope)
+                    if stored_scope in JOB_DOCUMENT_VIEWER_SCOPE_OPTIONS.values()
+                    else 0
+                ),
+                key=f"job_doc_scope_{doc['id']}",
+            )
+            selected_scope = JOB_DOCUMENT_VIEWER_SCOPE_OPTIONS[selected_scope_label]
+            if selected_scope != stored_scope:
+                try:
+                    set_job_document_viewer_scope(doc["id"], selected_scope)
+                    pb_success(f"Viewing access updated for {doc['File Name']}.")
+                    pb_rerun()
+                except Exception as exc:
+                    pb_error(f"Could not update access: {exc}")
+            try:
+                trusted_path = resolve_trusted_storage_file(str(doc["file_path"]))
+            except ValueError:
+                trusted_path = None
+            if trusted_path and trusted_path.exists():
+                with open(trusted_path, "rb") as f:
+                    download_col.download_button(
+                        label="Download",
+                        data=f,
+                        file_name=str(doc["File Name"]),
+                        mime=str(doc["Mime Type"] or "application/octet-stream"),
+                        key=f"job_doc_dl_{doc['id']}",
+                    )
+            else:
+                download_col.warning("File path not found on disk.")
+
+
 def render_job_linked_info(job_id, expanded=True):
     job_id = int(job_id)
 
@@ -20363,8 +20710,11 @@ def render_job_linked_info(job_id, expanded=True):
     m4.metric("Wages", f"${wage_total:,.2f}")
     m5.metric("Basic Position", f"${gross_position:,.2f}")
 
-    tab_summary, tab_stages, tab_costs, tab_materials, tab_wages, tab_equipment, tab_control, tab_photos, tab_notes = st.tabs([
+    tab_summary, tab_colours, tab_documents, tab_forms, tab_stages, tab_costs, tab_materials, tab_wages, tab_equipment, tab_control, tab_photos, tab_notes = st.tabs([
         "Summary",
+        "Colours",
+        "Documents",
+        "Forms / Safety",
         "Stages / POs",
         "Costs & Estimates",
         "Materials",
@@ -20382,6 +20732,21 @@ def render_job_linked_info(job_id, expanded=True):
 
         st.markdown("### Staff Schedule")
         render_job_folder_schedule_editor(job_id, get_current_user())
+
+    with tab_colours:
+        st.markdown("### Site Colour Schedule")
+        st.caption(
+            "The colour brief for this job. Colour schedules generated in PB PlanReader "
+            "appear here automatically, and schedules can also be attached below."
+        )
+        render_colour_schedule_documents(job_id)
+        render_live_planreader_colour(job_id)
+
+    with tab_documents:
+        render_job_documents_panel(job_id)
+
+    with tab_forms:
+        render_job_field_forms_panel(jobhub_enterprise_context(), job_id)
 
     with tab_stages:
         st.markdown("### Job Stages and Purchase Orders")
@@ -20579,48 +20944,6 @@ def render_job_linked_info(job_id, expanded=True):
                         key=f"download_variation_pdf_{job_id}_{variation_no}",
                     )
 
-        st.divider()
-
-        st.markdown("### Job Documents")
-
-        documents_df = df_query("""
-            SELECT id,
-                   document_type AS 'Document Type',
-                   file_name AS 'File Name',
-                   file_path,
-                   created_at AS 'Created At',
-                   notes AS 'Notes',
-                   COALESCE(mime_type, 'application/octet-stream') AS 'Mime Type'
-            FROM job_documents
-            WHERE job_id = ?
-            ORDER BY id DESC
-        """, (job_id,))
-
-        if documents_df.empty:
-            st.info("No documents attached to this job yet.")
-        else:
-            for _, doc in documents_df.iterrows():
-                st.write(f"**{doc['Document Type']}** - {doc['File Name']}")
-                st.caption(f"Created: {doc['Created At']}")
-
-                file_path = str(doc["file_path"])
-
-                try:
-                    trusted_path = resolve_trusted_storage_file(file_path)
-                except ValueError:
-                    trusted_path = None
-                if trusted_path and trusted_path.exists():
-                    with open(trusted_path, "rb") as f:
-                        st.download_button(
-                            label=f"Download {doc['File Name']}",
-                            data=f,
-                            file_name=doc["File Name"],
-                            mime=str(doc.get("Mime Type") or "application/octet-stream"),
-                            key=f"download_job_doc_{doc['id']}",
-                        )
-                else:
-                    st.warning("File path not found on disk.")
-    
     with tab_photos:
         st.markdown("### Photo Register")
         if photos_meta.empty:
