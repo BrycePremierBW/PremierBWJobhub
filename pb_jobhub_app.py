@@ -17111,6 +17111,69 @@ def safe_df_query(sql, params=()):
         return pd.DataFrame()
 
 
+def recent_uploads_frame(limit=8):
+    """Latest uploaded job documents (plans, specs, POs, pre-start docs) joined with their jobs."""
+    return safe_df_query(
+        """
+        SELECT d.id AS doc_id,
+               d.job_id,
+               COALESCE(d.document_type, 'Document') AS doc_type,
+               COALESCE(d.file_name, '') AS file_name,
+               COALESCE(d.created_at, '') AS uploaded_at,
+               COALESCE(j.job_no, '') AS job_no,
+               COALESCE(j.job_name, '') AS job_name
+        FROM job_documents d
+        JOIN jobs j ON j.id = d.job_id
+        ORDER BY d.created_at DESC, d.id DESC
+        LIMIT ?
+        """,
+        (int(limit),),
+    )
+
+
+def render_recent_uploads_panel(limit=8, key_prefix="recent_uploads"):
+    """Show the newest uploaded plans/specs/docs with a one-click jump into the job folder."""
+    records = recent_uploads_frame(limit=max(limit, 50))
+    with st.container(border=True):
+        st.markdown("#### Recent Uploads")
+        st.caption("Latest plans, specs and documents uploaded across jobs — click to open that job folder.")
+        if records.empty:
+            st.info("No documents uploaded yet. Upload plans/specs from a job folder to see them here.")
+            return
+        types = sorted({str(t) for t in records["doc_type"].dropna().unique()})
+        selected_types = st.multiselect(
+            "Show document types",
+            types,
+            default=types,
+            key=f"{key_prefix}_doc_types",
+        )
+        filtered = records[records["doc_type"].isin(selected_types)].head(limit)
+        if filtered.empty:
+            st.info("No recent uploads match the selected document types.")
+            return
+        for _, row in filtered.iterrows():
+            doc_id = int(row["doc_id"])
+            job_id = int(row["job_id"])
+            job_no = str(row["job_no"] or "")
+            job_name = str(row["job_name"] or "")
+            file_name = str(row["file_name"] or "")
+            doc_type = str(row["doc_type"] or "Document")
+            uploaded_at = str(row["uploaded_at"] or "")
+            c1, c2, c3 = st.columns([3, 4, 2])
+            with c1:
+                st.markdown(f"**{doc_type}**")
+                st.caption((file_name[:90] + "…") if len(file_name) > 90 else file_name)
+            with c2:
+                st.markdown(f"**{job_no or 'Job'}** · {job_name}")
+                st.caption(uploaded_at)
+            with c3:
+                if st.button("Open job", key=f"{key_prefix}_open_{doc_id}", width="stretch"):
+                    st.session_state["linked_view_selected_job_id"] = int(job_id)
+                    st.session_state["go_to_menu"] = "Job Folders"
+                    pb_rerun()
+            st.divider()
+
+
 OPERATING_SETTING_DEFAULTS = {
     "overhead_wages": ("Wage overhead", "Monthly overhead", 16000.0, "$ / month", 1),
     "overhead_vehicles": ("Cars / vehicles", "Monthly overhead", 600.0, "$ / month", 2),
@@ -17340,6 +17403,8 @@ def render_operational_dashboard():
             "Active Blockers", len(active_blockers), "Review site progress blockers",
             "Job Progress Tracker", "active_blockers", "red" if len(active_blockers) else "green",
         )
+
+    render_recent_uploads_panel(limit=5, key_prefix="dashboard_recent_uploads")
 
     left, middle, right = st.columns(3)
     with left:
@@ -20409,6 +20474,8 @@ def job_lookup_links_page():
 def job_folders_page():
     st.header("Job Folders")
     st.caption("Open one job and access the full linked job file from one place: summary, plans/specs, colours/materials, timesheets, equipment, photos, documents, variations, forms and financials.")
+
+    render_recent_uploads_panel(limit=6, key_prefix="job_folder_recent_uploads")
 
     include_archived = st.checkbox("Include archived jobs", value=True, key="job_folder_include_archived")
     jobs_df = job_lookup_dataframe(include_archived=include_archived)

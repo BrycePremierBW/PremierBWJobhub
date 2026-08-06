@@ -2407,7 +2407,19 @@ def corrections_page(job_id: str):
         st.markdown("</div>", unsafe_allow_html=True)
         return
     labels = [option["label"] for option in options]
-    selected = st.selectbox("Plan page", labels, index=0)
+    box_key = f"pr_plan_page_{job_id}"
+    if box_key not in st.session_state or st.session_state.get(box_key) not in labels:
+        st.session_state[box_key] = labels[0]
+    current_label = st.session_state[box_key]
+    nav = st.columns([1, 6, 1])
+    if nav[0].button("◀ Prev", key=f"{box_key}_prev", width="stretch"):
+        st.session_state[box_key] = labels[(labels.index(current_label) - 1) % len(labels)]
+        st.rerun()
+    selected = nav[1].selectbox("Plan page", labels, index=labels.index(current_label), key=box_key, label_visibility="collapsed")
+    if nav[2].button("Next ▶", key=f"{box_key}_next", width="stretch"):
+        st.session_state[box_key] = labels[(labels.index(selected) + 1) % len(labels)]
+        st.rerun()
+    st.caption(f"Plan page {labels.index(selected) + 1} of {len(labels)}")
     option = next((o for o in options if o["label"] == selected), options[0])
     image_path = Path(option["image_path"])
     if not image_path.exists():
@@ -2462,7 +2474,19 @@ def progress_page(job_id: str):
         st.markdown("</div>", unsafe_allow_html=True)
         return
     labels = [o["label"] for o in options]
-    selected = st.selectbox("Elevation", labels, index=0)
+    box_key = f"pr_elevation_{job_id}"
+    if box_key not in st.session_state or st.session_state.get(box_key) not in labels:
+        st.session_state[box_key] = labels[0]
+    current_label = st.session_state[box_key]
+    nav = st.columns([1, 6, 1])
+    if nav[0].button("◀ Prev", key=f"{box_key}_prev", width="stretch"):
+        st.session_state[box_key] = labels[(labels.index(current_label) - 1) % len(labels)]
+        st.rerun()
+    selected = nav[1].selectbox("Elevation", labels, index=labels.index(current_label), key=box_key, label_visibility="collapsed")
+    if nav[2].button("Next ▶", key=f"{box_key}_next", width="stretch"):
+        st.session_state[box_key] = labels[(labels.index(selected) + 1) % len(labels)]
+        st.rerun()
+    st.caption(f"Elevation {labels.index(selected) + 1} of {len(labels)}")
     opt = next((o for o in options if o["label"] == selected), options[0])
     img_path = opt["image_path"]
     img_file = Path(img_path)

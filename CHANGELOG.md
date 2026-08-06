@@ -1,5 +1,18 @@
 # JobHub secured release
 
+## 2026-08-06 - Recent uploads panel + easier file selection
+
+- **JobHub**: a new **Recent Uploads** panel on the Dashboard and the top of
+  Job Folders lists the latest uploaded plans, specs and documents across all
+  jobs (type, file name, job and upload time) with a one-click **Open job**
+  button that jumps straight into that job folder. A document-type filter lets
+  you focus on pre-start docs such as Architectural Plans, Scope of Works or
+  Safety / SWMS.
+- **PlanReader**: the Plan-page and Elevation pickers now remember your last
+  selection and add **Prev / Next** stepping (with a "page X of Y" counter), so
+  working through a multi-page plan set no longer resets to page one every
+  rerun or requires scrolling a long dropdown.
+
 ## 2026-08-06 - Take-off rules engine, measurement validation + estimate report (plan reader)
 
 - **Rules engine**: litres and labour hours are recalculated consistently across
