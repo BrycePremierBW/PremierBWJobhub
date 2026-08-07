@@ -3159,14 +3159,14 @@ def render_job_folder_schedule_editor(job_id: int, user: dict | None = None) -> 
                 width="stretch",
                 hide_index=True,
                 on_select="rerun",
-                selection_mode="single-row",
+                selection_mode="multi-row",
                 key=f"job_folder_schedule_rows_{job_id}",
                 column_config={"id": None},
             )
             selected_rows = list(getattr(getattr(event, "selection", None), "rows", []) or [])
             if not selected_rows:
-                st.caption("Select a booking above to edit or remove it.")
-            else:
+                st.caption("Select one or more bookings above to edit or remove them.")
+            elif len(selected_rows) == 1:
                 row = assignments.iloc[selected_rows[0]]
                 assignment_id = int(row["id"])
                 edit_pending_key = f"job_folder_edit_clash_{assignment_id}"
@@ -3254,6 +3254,33 @@ def render_job_folder_schedule_editor(job_id: int, user: dict | None = None) -> 
                         execute("DELETE FROM staff_schedule WHERE id=?", (assignment_id,))
                         pb_success("Schedule booking removed.")
                         pb_rerun()
+            else:
+                selected_assignments = assignments.iloc[selected_rows]
+                selected_ids = selected_assignments["id"].astype(int).tolist()
+                st.markdown(f"### {len(selected_ids)} bookings selected")
+                st.dataframe(
+                    display.iloc[selected_rows],
+                    width="stretch",
+                    hide_index=True,
+                    column_config={"id": None},
+                )
+                bulk_delete_confirm = st.checkbox(
+                    f"Confirm removal of all {len(selected_ids)} selected bookings",
+                    key=f"job_folder_schedule_bulk_delete_confirm_{job_id}",
+                )
+                if st.button(
+                    "Remove all selected bookings",
+                    disabled=not bulk_delete_confirm,
+                    key=f"job_folder_schedule_bulk_delete_{job_id}",
+                    width="stretch",
+                ):
+                    placeholders = ",".join("?" for _ in selected_ids)
+                    execute(
+                        sql_text(f"DELETE FROM staff_schedule WHERE id IN ({placeholders})"),
+                        selected_ids,
+                    )
+                    pb_success(f"Removed {len(selected_ids)} schedule bookings.")
+                    pb_rerun()
 
 
 def render_jobhub_staff_scheduler(user: dict | None = None) -> None:

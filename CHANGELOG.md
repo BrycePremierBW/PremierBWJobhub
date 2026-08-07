@@ -1,5 +1,12 @@
 # JobHub secured release
 
+## 2026-08-07 - Job Folder bulk schedule removal
+
+- The Job Folder **Staff Schedule** editor now lets managers/admins select
+  **multiple bookings** in the table and remove them all at once with a single
+  confirm + "Remove all selected bookings" button (single-row edit/remove still
+  works exactly as before when one booking is selected).
+
 ## 2026-08-07 - Menu cleanup + Bluebeam-style PlanReader scales
 
 - **Decluttered the manager/admin top-level menu**: Upload PO, Colour Schedule

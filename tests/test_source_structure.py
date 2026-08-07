@@ -108,6 +108,10 @@ class SourceStructureTests(unittest.TestCase):
         self.assertIn("render_job_folder_schedule_editor(job_id, get_current_user())", app_source)
         self.assertIn("def render_job_folder_schedule_editor", scheduler_source)
         self.assertIn("replace_conflicts_for_assignment_edit", scheduler_source)
+        self.assertIn('selection_mode="multi-row"', scheduler_source)
+        self.assertIn("Remove all selected bookings", scheduler_source)
+        self.assertIn("job_folder_schedule_bulk_delete_", scheduler_source)
+        self.assertIn("DELETE FROM staff_schedule WHERE id IN", scheduler_source)
         for field in ("prepped_sealed", "prep_spray_finished", "cut_rolled", "defects"):
             self.assertIn(field, tracker_source)
         self.assertIn("_render_custom_internal_items", tracker_source)
