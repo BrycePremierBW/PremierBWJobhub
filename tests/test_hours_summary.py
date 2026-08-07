@@ -65,6 +65,27 @@ for emp_id, work_date, hours, work_type in rows:
 conn.commit()
 conn.close()
 
+import pb_jobhub_visual_scheduler as scheduler
+scheduler.USE_POSTGRES = False
+scheduler.init_linked_schema()
+
+# Roster: Ada scheduled today + yesterday (both submitted -> complete),
+# Bea scheduled today (submitted) + tomorrow (not submitted -> missing 1).
+schedule_plan = [
+    (employees["Ada"], today, 8),
+    (employees["Ada"], today - timedelta(days=1), 8),
+    (employees["Bea"], today, 8),
+    (employees["Bea"], today + timedelta(days=1), 8),
+]
+for emp_id, sched_day, planned in schedule_plan:
+    created, msg = scheduler.add_assignment(
+        employee_id=emp_id, job_id=job_id, job_stage_id=stage_id,
+        work_date=sched_day, start_value=time(7, 0), finish_value=time(15, 0),
+        planned_hours=planned, site_role="Painting", notes="", created_by="tester",
+        linked_to_job_dates=False,
+    )
+    assert created, msg
+
 df = app.df_query(
     "SELECT t.id, e.name AS 'Employee', t.work_date AS 'Date', "
     "j.job_no AS 'Job No', j.job_name AS 'Job Name', "
@@ -90,8 +111,29 @@ only_with_hours = app._build_hours_summary(df, False)
 only_names = set(str(r["Employee"]) for _, r in only_with_hours.iterrows())
 assert only_names == {"Ada", "Bea"}, only_names
 
+submission = app._employee_submission_status(
+    today - timedelta(days=3), today + timedelta(days=3)
+)
+sub_by_name = {str(r["Employee"]): r for _, r in submission.iterrows()}
+assert set(sub_by_name.keys()) == {"Ada", "Bea", "Dee"}, sorted(sub_by_name.keys())
+assert int(sub_by_name["Ada"]["Scheduled"]) == 2 and int(sub_by_name["Ada"]["Missing"]) == 0, sub_by_name["Ada"]
+assert int(sub_by_name["Bea"]["Scheduled"]) == 2 and int(sub_by_name["Bea"]["Missing"]) == 1, sub_by_name["Bea"]
+assert int(sub_by_name["Dee"]["Scheduled"]) == 0 and int(sub_by_name["Dee"]["Missing"]) == 0, sub_by_name["Dee"]
+
+annotated = app._annotate_submission(app._build_hours_summary(df, True), submission)
+ann_by_name = {str(r["Employee"]): r for _, r in annotated.iterrows()}
+assert str(ann_by_name["Ada"]["Status"]) == "Complete", ann_by_name["Ada"]
+assert str(ann_by_name["Bea"]["Status"]) == "Missing 1", ann_by_name["Bea"]
+assert str(ann_by_name["Dee"]["Status"]) == "Not rostered", ann_by_name["Dee"]
+
+missing_view = annotated[annotated["Missing"] > 0]
+assert set(str(r["Employee"]) for _, r in missing_view.iterrows()) == {"Bea"}, missing_view
+
 print("WEEK_START_FRIDAY_OK:1")
+print("SUBMISSION_OK:1")
 print("ALL_EMPLOYEES:" + json.dumps({k: {"Shifts": int(v["Shifts"]), "Hours": float(v["TotalHours"])} for k, v in by_name.items()}, sort_keys=True))
+print("SUBMISSION:" + json.dumps({k: {"Scheduled": int(v["Scheduled"]), "Missing": int(v["Missing"])} for k, v in sub_by_name.items()}, sort_keys=True))
+print("STATUS:" + json.dumps({k: str(v["Status"]) for k, v in ann_by_name.items()}, sort_keys=True))
 """
 
 
@@ -117,6 +159,7 @@ class HoursSummaryIntegrationTest(unittest.TestCase):
             self.fail("subprocess failed:\n" + (completed.stderr or "") + "\n" + output)
         lines = output.strip().splitlines()
         self.assertTrue(any(ln == "WEEK_START_FRIDAY_OK:1" for ln in lines), output)
+        self.assertTrue(any(ln == "SUBMISSION_OK:1" for ln in lines), output)
         summary_line = next((ln for ln in lines if ln.startswith("ALL_EMPLOYEES:")), None)
         self.assertIsNotNone(summary_line, output)
         data = json.loads(summary_line[len("ALL_EMPLOYEES:"):])
@@ -125,6 +168,18 @@ class HoursSummaryIntegrationTest(unittest.TestCase):
         self.assertEqual(data["Bea"]["Hours"], 5.0)
         self.assertEqual(data["Dee"]["Shifts"], 0)
         self.assertEqual(data["Dee"]["Hours"], 0.0)
+        submission_line = next((ln for ln in lines if ln.startswith("SUBMISSION:")), None)
+        self.assertIsNotNone(submission_line, output)
+        sub = json.loads(submission_line[len("SUBMISSION:"):])
+        self.assertEqual(sub["Ada"], {"Scheduled": 2, "Missing": 0})
+        self.assertEqual(sub["Bea"], {"Scheduled": 2, "Missing": 1})
+        self.assertEqual(sub["Dee"], {"Scheduled": 0, "Missing": 0})
+        status_line = next((ln for ln in lines if ln.startswith("STATUS:")), None)
+        self.assertIsNotNone(status_line, output)
+        status = json.loads(status_line[len("STATUS:"):])
+        self.assertEqual(status["Ada"], "Complete")
+        self.assertEqual(status["Bea"], "Missing 1")
+        self.assertEqual(status["Dee"], "Not rostered")
 
 
 if __name__ == "__main__":

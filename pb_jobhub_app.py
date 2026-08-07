@@ -9091,17 +9091,129 @@ def _build_hours_summary(filtered, show_all_employees):
     return summary
 
 
-def render_hours_summary():
-    """Per-person total hours for a chosen period, exportable for Xero."""
-    from_date, to_date = _hours_summary_range()
-    selected_status = timesheet_status_filter(
-        "Show Hours With Status",
-        "hours_summary_status_filter",
-        default="All",
+def _employee_submission_status(from_date, to_date):
+    """Per active employee: scheduled work days vs submitted timesheets.
+
+    Returns a DataFrame with columns ``Employee``, ``Scheduled``, ``Missing``.
+    A day is "missing" when the roster scheduled the employee but no timesheet
+    was submitted for that date and they are not on approved leave, matching
+    the same date-level rule used by ``missed_timesheet_days``.
+    """
+    from_d = from_date.isoformat()
+    to_d = to_date.isoformat()
+    employees = df_query("""
+        SELECT e.id, e.name
+        FROM employees e
+        WHERE LOWER(COALESCE(e.status, 'active')) NOT IN ('inactive', 'terminated')
+        ORDER BY e.name
+    """)
+    if employees is None or employees.empty:
+        return pd.DataFrame(columns=["Employee", "Scheduled", "Missing"])
+
+    scheduled_dates = {}
+    try:
+        sched = assignment_rows(from_date, to_date)
+    except Exception:
+        sched = None
+    if sched is not None and not sched.empty:
+        sched["_date"] = sched["schedule_date"].astype(str)
+        for emp_id, group in sched.groupby("employee_id"):
+            scheduled_dates[int(emp_id)] = set(group["_date"])
+
+    submitted_dates = {}
+    submitted_df = df_query(
+        "SELECT employee_id, work_date FROM timesheet_entries WHERE work_date BETWEEN ? AND ?",
+        (from_d, to_d),
     )
+    if submitted_df is not None and not submitted_df.empty:
+        for emp_id, group in submitted_df.groupby("employee_id"):
+            submitted_dates[int(emp_id)] = set(group["work_date"].astype(str))
+
+    leave_dates = {}
+    leave_df = df_query(
+        "SELECT employee_id, start_date, end_date FROM staff_leave_requests "
+        "WHERE LOWER(COALESCE(status, '')) = 'approved' AND end_date >= ? AND start_date <= ?",
+        (from_d, to_d),
+    )
+    if leave_df is not None and not leave_df.empty:
+        for _, row in leave_df.iterrows():
+            emp_id = int(row["employee_id"])
+            try:
+                start_d = date.fromisoformat(str(row["start_date"]))
+                end_d = date.fromisoformat(str(row["end_date"]))
+            except ValueError:
+                continue
+            cur = max(start_d, from_date)
+            hi = min(end_d, to_date)
+            while cur <= hi:
+                leave_dates.setdefault(emp_id, set()).add(cur.isoformat())
+                cur += timedelta(days=1)
+
+    rows = []
+    for _, row in employees.iterrows():
+        emp_id = int(row["id"])
+        sched_set = scheduled_dates.get(emp_id, set())
+        submitted_set = submitted_dates.get(emp_id, set())
+        leave_set = leave_dates.get(emp_id, set())
+        rows.append({
+            "Employee": str(row["name"]),
+            "Scheduled": len(sched_set),
+            "Missing": len(sched_set - submitted_set - leave_set),
+        })
+    return pd.DataFrame(rows, columns=["Employee", "Scheduled", "Missing"])
+
+
+def _highlight_missing_row(row):
+    return ["background-color: #ffd8d8"] * len(row) if int(row["Missing"]) > 0 else [""] * len(row)
+
+
+def _annotate_submission(summary, submission):
+    """Add Scheduled / Missing / Status columns to a per-person hours summary."""
+    summary = summary.copy()
+    if submission is not None and not submission.empty:
+        summary = summary.merge(submission, on="Employee", how="left")
+        summary["Scheduled"] = summary["Scheduled"].fillna(0).astype(int)
+        summary["Missing"] = summary["Missing"].fillna(0).astype(int)
+    else:
+        summary["Scheduled"] = 0
+        summary["Missing"] = 0
+    summary["Status"] = summary.apply(
+        lambda row: (
+            f"Missing {int(row['Missing'])}"
+            if int(row["Missing"]) > 0
+            else ("Complete" if int(row["Scheduled"]) > 0 else "Not rostered")
+        ),
+        axis=1,
+    )
+    return summary
+
+
+def render_hours_summary():
+    """Everyone's hours for the period at a glance, flagging who hasn't submitted."""
+    from_date, to_date = _hours_summary_range()
+    c1, c2 = st.columns(2)
+    with c1:
+        selected_status = timesheet_status_filter(
+            "Show Hours With Status",
+            "hours_summary_status_filter",
+            default="All",
+        )
+    with c2:
+        employee_search = st.text_input(
+            "Search employee",
+            key="hours_summary_employee_search",
+            help="Type part of a name to filter the summary table.",
+        ).strip().lower()
     show_all_employees = st.checkbox(
         "Show all employees (including anyone with 0 hours in this period)",
+        value=True,
         key="hours_summary_show_all",
+    )
+    view_filter = st.selectbox(
+        "Show",
+        ["All employees", "Missing timesheets", "Up to date"],
+        index=0,
+        key="hours_summary_view_filter",
     )
 
     df = df_query("""
@@ -9128,21 +9240,47 @@ def render_hours_summary():
         st.info(f"No {selected_status.lower()} timesheets in this period.")
         return
 
-    summary = _build_hours_summary(filtered, show_all_employees)
+    summary = _annotate_submission(
+        _build_hours_summary(filtered, show_all_employees),
+        _employee_submission_status(from_date, to_date),
+    )
 
     total_hours = float(summary["TotalHours"].sum())
     total_shifts = int(summary["Shifts"].sum())
+    employee_count = len(summary)
+    missing_count = int((summary["Missing"] > 0).sum())
 
-    m1, m2, m3 = st.columns(3)
+    if view_filter == "Missing timesheets":
+        summary = summary[summary["Missing"] > 0]
+    elif view_filter == "Up to date":
+        summary = summary[summary["Missing"] == 0]
+    if employee_search:
+        summary = summary[
+            summary["Employee"].astype(str).str.lower().str.contains(employee_search, na=False)
+        ]
+    summary = (
+        summary.sort_values(["Missing", "TotalHours"], ascending=[False, False])
+        .reset_index(drop=True)
+    )
+
+    m1, m2, m3, m4 = st.columns(4)
     m1.metric("Total Hours", f"{total_hours:.2f}")
     m2.metric("Shifts", total_shifts)
-    m3.metric("Employees", len(summary))
+    m3.metric("Employees", employee_count)
+    m4.metric("Missing", missing_count)
 
-    st.markdown("### Total hours per person")
-    st.dataframe(summary, width="stretch", hide_index=True)
+    st.markdown("### All employees and their hours")
+    st.dataframe(
+        summary.style.apply(_highlight_missing_row, axis=1),
+        width="stretch",
+        hide_index=True,
+    )
     st.caption(
         f"{from_date.isoformat()} to {to_date.isoformat()} · "
-        f"{selected_status} timesheets."
+        f"{selected_status} timesheets"
+        + (f" · searching '{employee_search}'" if employee_search else "")
+        + " · scheduled days come from the staff roster; "
+        "approved leave and already-submitted days are not counted as missing."
     )
 
     st.markdown("### Export for Xero")
@@ -9257,14 +9395,29 @@ def timesheets_page(employee_restricted=False):
             )
         return
 
-    tab_submit, tab_review, tab_by_job, tab_summary = st.tabs(
-        ["Add Timesheet", "Review Timesheets", "Timesheets by Job", "Hours Summary"]
+    tab_submit, tab_review, tab_by_job, tab_by_employee, tab_summary = st.tabs(
+        [
+            "Add Timesheet",
+            "Review Timesheets",
+            "Timesheets by Job",
+            "Timesheets by Employee",
+            "Hours Summary",
+        ]
     )
 
     with tab_submit:
         timesheet_entry_form(key_prefix="admin_timesheet")
 
     with tab_review:
+        r1, r2 = st.columns(2)
+        review_from = r1.date_input(
+            "From",
+            value=date.today().replace(day=1),
+            key="admin_review_from",
+        )
+        review_to = r2.date_input("To", value=date.today(), key="admin_review_to")
+        if review_to < review_from:
+            review_from, review_to = review_to, review_from
         df = df_query("""
             SELECT t.id, t.work_date AS 'Date', j.job_no AS 'Job No', j.job_name AS 'Job Name', e.name AS 'Employee',
                    COALESCE(js.stage_name, 'Whole Job') AS 'Stage',
@@ -9277,9 +9430,10 @@ def timesheets_page(employee_restricted=False):
             JOIN jobs j ON j.id = t.job_id
             JOIN employees e ON e.id = t.employee_id
             LEFT JOIN job_stages js ON js.id = t.job_stage_id
+            WHERE t.work_date BETWEEN ? AND ?
             ORDER BY t.work_date DESC, t.id DESC
             LIMIT 500
-        """)
+        """, (review_from.isoformat(), review_to.isoformat()))
 
         if df.empty:
             st.info("No timesheets submitted yet.")
@@ -9435,6 +9589,76 @@ def timesheets_page(employee_restricted=False):
                     )
                 else:
                     st.info("Accept the selected job review to display and select its timesheets.")
+
+    with tab_by_employee:
+        employee_options = get_employee_options(active_only=True)
+        if not employee_options:
+            st.info("Create employees first.")
+        else:
+            e1, e2 = st.columns(2)
+            selected_employee_label = e1.selectbox(
+                "Employee",
+                list(employee_options.keys()),
+                key="timesheet_by_employee_select",
+            )
+            emp_from = e2.date_input(
+                "From",
+                value=date.today().replace(day=1),
+                key="timesheet_by_employee_from",
+            )
+            emp_to = e2.date_input("To", value=date.today(), key="timesheet_by_employee_to")
+            if emp_to < emp_from:
+                emp_from, emp_to = emp_to, emp_from
+            selected_employee_id = int(employee_options[selected_employee_label])
+            selected_status = timesheet_status_filter(
+                "Show Timesheets With Status",
+                "timesheet_by_employee_status_filter",
+                default="All",
+            )
+            by_employee = df_query("""
+                SELECT t.id, t.work_date AS 'Date', j.job_no AS 'Job No', j.job_name AS 'Job Name',
+                       COALESCE(js.stage_name, 'Whole Job') AS 'Stage',
+                       COALESCE(t.site_location, j.site_address) AS 'Site Location',
+                       t.start_time AS 'Start', t.finish_time AS 'Finish',
+                       t.break_minutes AS 'Break Minutes', t.total_hours AS 'Hours',
+                       t.work_type AS 'Work Type',
+                       COALESCE(t.status, 'Submitted') AS 'Status',
+                       t.notes AS 'Notes'
+                FROM timesheet_entries t
+                JOIN employees e ON e.id = t.employee_id
+                JOIN jobs j ON j.id = t.job_id
+                LEFT JOIN job_stages js ON js.id = t.job_stage_id
+                WHERE t.employee_id = ?
+                  AND t.work_date BETWEEN ? AND ?
+                ORDER BY t.work_date DESC, t.id DESC
+            """, (selected_employee_id, emp_from.isoformat(), emp_to.isoformat()))
+            filtered_by_employee = filter_timesheets_by_status(by_employee, selected_status)
+
+            if filtered_by_employee.empty:
+                st.info(
+                    f"No {selected_status.lower()} timesheets for this employee in the selected dates."
+                    if selected_status != "All"
+                    else "No timesheets for this employee in the selected dates."
+                )
+            else:
+                employee_total_hours = float(filtered_by_employee["Hours"].fillna(0).sum())
+                m_emp_1, m_emp_2, m_emp_3 = st.columns(3)
+                m_emp_1.metric("Timesheets", len(filtered_by_employee))
+                m_emp_2.metric("Total Hours", f"{employee_total_hours:.2f}")
+                m_emp_3.metric("Days Worked", filtered_by_employee["Date"].nunique())
+                st.dataframe(
+                    filtered_by_employee.drop(columns=["id"], errors="ignore"),
+                    width="stretch",
+                    hide_index=True,
+                )
+                render_timesheet_bulk_actions(
+                    filtered_by_employee,
+                    key_prefix=(
+                        f"timesheet_by_employee_{selected_employee_id}_"
+                        f"{selected_status.lower().replace(' ', '_')}"
+                    ),
+                    empty_message="No timesheets to action.",
+                )
 
     with tab_summary:
         render_hours_summary()

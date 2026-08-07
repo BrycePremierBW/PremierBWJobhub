@@ -21,10 +21,20 @@
   - Optional **status filter** (All / Submitted / Approved / Rejected / Paid).
   - Optional **"Show all employees"** toggle that lists every active employee,
     including those with 0 hours in the period.
+  - **Employee search box** to filter the table by name.
+  - **At-a-glance submission status**: each employee row shows Scheduled days,
+    Missing days and a status (Missing N / Complete / Not rostered), with
+    employees who still owe timesheets highlighted and sortable first via the
+    "Show" filter (All employees / Missing timesheets / Up to date).
   - **Xero-friendly exports**: per-person summary CSV, full line listing CSV
     (Employee, Date, TrackingName = Job No, Site Location, Hours,
     EarningsRate = Work Type, Status, Description) and an Excel workbook
     with both sheets.
+- **Review Timesheets now has From / To date filtering** so you can review a
+  specific period instead of the last 500 entries.
+- **New Timesheets by Employee tab**: pick an employee (plus optional date
+  range and status filter) to see all their timesheets, total hours, days
+  worked and review/approve actions in one place.
 - Existing missed-timesheet detection, saving and exporting are unchanged
   apart from the new options above.
 
