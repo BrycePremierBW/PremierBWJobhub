@@ -335,6 +335,8 @@ PB_MENU_ICONS = {
     "Upload PO": "📤",
     "Field Mode": "📱",
     "Estimating": "💰",
+    "Colour Schedule": "🎨",
+    "PlanReader": "📐",
     "Site Operations": "🛠️",
     "Reports": "📊",
     "Management": "⚙️",
@@ -7572,6 +7574,59 @@ def missed_timesheet_days(employee_id, lookback_days=21):
     return missed
 
 
+def send_missed_timesheet_reminders(employee_id, missed_items):
+    """Send an in-app (and phone push) reminder about an employee's missed shifts.
+
+    Timesheets are never auto-generated: employees are asked to log their own
+    hours. Returns the number of linked user accounts notified, or 0 when the
+    employee has no missed shifts or no active user account to notify.
+    """
+    if not missed_items:
+        return 0
+    try:
+        employee_id = int(employee_id)
+    except (TypeError, ValueError):
+        return 0
+    user_ids_df = df_query(
+        "SELECT id FROM app_users WHERE employee_id = ? AND COALESCE(active, 0) = 1",
+        (employee_id,),
+    )
+    if user_ids_df is None or user_ids_df.empty:
+        return 0
+    user_ids = [int(row["id"]) for _, row in user_ids_df.iterrows()]
+
+    count = len(missed_items)
+    day_text = ", ".join(str(item["work_date"]) for item in missed_items[:6])
+    if count > 6:
+        day_text += f" and {count - 6} more"
+    message = (
+        f"You have {count} scheduled shift(s) still missing a timesheet: {day_text}. "
+        "Please log them from your Timesheets page so your hours are accurate."
+    )
+    return create_user_notifications(
+        user_ids,
+        "timesheet_reminder",
+        "Timesheet reminder",
+        message,
+        entity_type="timesheet",
+    )
+
+
+def send_missed_timesheet_reminders_all(lookback_days=None):
+    """Send a reminder to every active employee who has missed shifts.
+
+    Returns the number of employees that received at least one reminder.
+    """
+    if lookback_days is None:
+        lookback_days = get_missed_timesheet_lookback_days()
+    reminded = 0
+    for employee_label, employee_id in get_employee_options(active_only=True).items():
+        missed = missed_timesheet_days(int(employee_id), lookback_days=lookback_days)
+        if missed and send_missed_timesheet_reminders(int(employee_id), missed):
+            reminded += 1
+    return reminded
+
+
 def render_missed_timesheet_catchup(
     employee_id,
     key_prefix="missed_timesheet",
@@ -7615,17 +7670,18 @@ def render_missed_timesheet_catchup(
         )
         if name_df is not None and not name_df.empty:
             employee_name = str(name_df.iloc[0]["name"])
-        st.markdown(f"#### Generate missed timesheets for {employee_name}")
+        st.markdown(f"#### Backdate missed timesheets for {employee_name}")
 
     if manual_entry:
         st.caption(
             f"{len(missed)} scheduled shift(s) in the last {lookback_days} days have no timesheet. "
-            "Choose the job and the hours you actually worked for each day below."
+            "Choose the job, the date and the hours you actually worked for each day below."
         )
     else:
         st.caption(
             f"{len(missed)} scheduled shift(s) in the last {lookback_days} days have no timesheet. "
-            "Shifts shown use the rostered start/finish and can be adjusted before submitting."
+            "The work date, start/finish and job are pre-filled from the roster and can be "
+            "adjusted before submitting."
         )
 
     work_type_options = ["Painting", "Prep", "Spraying", "Touch-ups", "Travel", "Site Setup", "Other"]
@@ -7668,6 +7724,22 @@ def render_missed_timesheet_catchup(
             if item["site_role"]:
                 header_line += f" — {item['site_role']}"
             st.markdown(f"**{header_line}**")
+
+            try:
+                default_work_date = date.fromisoformat(str(item["work_date"]).strip())
+            except (ValueError, TypeError):
+                default_work_date = jobhub_today()
+            date_col, note_col = st.columns([1, 2])
+            selected_work_date = date_col.date_input(
+                "Work Date",
+                value=default_work_date,
+                key=f"{row_key}_work_date",
+                help="The date this shift was actually worked. Change it when backdating a different day.",
+            )
+            note_col.caption(
+                f"Rostered shift was planned for {item['work_date']}. Adjust the date "
+                f"above if the work happened on a different day."
+            )
 
             selected_choice = None
             if manual_entry:
@@ -7743,7 +7815,7 @@ def render_missed_timesheet_catchup(
                 )
                 selected_notes = notes_col.text_area(
                     "Notes",
-                    value="Missed timesheet (auto-generated).",
+                    value="Backdated timesheet.",
                     key=f"{row_key}_notes",
                 )
 
@@ -7783,7 +7855,7 @@ def render_missed_timesheet_catchup(
                 )
 
             submit_button = st.button(
-                f"Submit timesheet for {item['work_date']}",
+                f"Submit timesheet for {selected_work_date.isoformat()}",
                 key=f"{row_key}_submit",
                 width="stretch",
                 disabled=(
@@ -7793,10 +7865,10 @@ def render_missed_timesheet_catchup(
             )
             if submit_button:
                 if total_hours <= 0:
-                    pb_error(f"Shift for {item['work_date']} has zero or negative hours. Fix the times first.")
+                    pb_error(f"Shift for {selected_work_date.isoformat()} has zero or negative hours. Fix the times first.")
                     continue
                 if manual_entry and selected_choice is None:
-                    pb_error(f"Select the job and stage worked on {item['work_date']} first.")
+                    pb_error(f"Select the job and stage worked on {selected_work_date.isoformat()} first.")
                     continue
                 try:
                     save_timesheet_entry(
@@ -7806,7 +7878,7 @@ def render_missed_timesheet_catchup(
                             else item["job_id"]
                         ),
                         employee_id=int(employee_id),
-                        work_date=item["work_date"],
+                        work_date=selected_work_date.isoformat(),
                         start_time=start_value.strftime("%H:%M"),
                         finish_time=finish_value.strftime("%H:%M"),
                         break_minutes=break_value,
@@ -9454,11 +9526,11 @@ def timesheets_page(employee_restricted=False):
             )
 
             st.divider()
-            st.markdown("### Generate missed timesheets")
+            st.markdown("### Missed timesheets — remind or backdate")
             st.caption(
-                "Choose an employee to see scheduled shifts that never received a "
-                "timesheet, then generate one on their behalf with the rostered shift "
-                "details pre-filled."
+                "Scheduled shifts that never received a timesheet. Send the employee a "
+                "reminder to log their own hours, or backdate a timesheet on their behalf "
+                "with the rostered details pre-filled (the work date is editable)."
             )
             admin_employee_options = get_employee_options(active_only=True)
             if not admin_employee_options:
@@ -9470,11 +9542,58 @@ def timesheets_page(employee_restricted=False):
                     key="admin_missed_timesheet_employee",
                 )
                 selected_employee_id = int(admin_employee_options[selected_employee_label])
+                selected_missed = missed_timesheet_days(
+                    selected_employee_id,
+                    lookback_days=get_missed_timesheet_lookback_days(),
+                )
+                if st.button(
+                    f"Send reminder to {selected_employee_label}",
+                    key="admin_missed_timesheet_remind_btn",
+                    width="stretch",
+                    disabled=not selected_missed,
+                    help="Sends an in-app notification (and phone push if enabled) asking them to log the missing timesheets.",
+                ):
+                    notified = send_missed_timesheet_reminders(
+                        selected_employee_id,
+                        selected_missed,
+                    )
+                    if notified:
+                        pb_success(
+                            f"Reminder sent to {selected_employee_label}'s linked account(s)."
+                        )
+                        pb_rerun()
+                    else:
+                        st.warning(
+                            f"{selected_employee_label} has no linked user account to "
+                            "notify. Ask admin to link their user to the employee profile."
+                        )
                 render_missed_timesheet_catchup(
                     selected_employee_id,
                     key_prefix="admin_missed_timesheet",
                     include_name_header=True,
                 )
+
+                with st.expander("Send reminders to all employees"):
+                    st.caption(
+                        "Sends every active employee with missed timesheets a single in-app "
+                        "notification (and phone push if enabled) asking them to log their hours."
+                    )
+                    if st.button(
+                        "Send reminders to everyone with missed timesheets",
+                        key="admin_missed_timesheet_remind_all_btn",
+                        width="stretch",
+                    ):
+                        reminded = send_missed_timesheet_reminders_all()
+                        if reminded:
+                            pb_success(
+                                f"Sent reminders to {reminded} employee(s) with missed timesheets."
+                            )
+                            pb_rerun()
+                        else:
+                            st.warning(
+                                "No employees currently have missed timesheets, or none have "
+                                "a linked user account to notify."
+                            )
 
                 with st.expander("Export missed timesheets to a folder"):
                     st.caption(
@@ -21930,10 +22049,7 @@ elif role == "manager":
         "Operations Hub",
         "Jobs",
         "Job Folders",
-        "Upload PO",
         "Estimating",
-        "Colour Schedule",
-        "PlanReader",
         "Site Operations",
         "Reports",
         "Management",
@@ -21947,7 +22063,10 @@ elif role == "manager":
         "Equipment": "Equipment",
     }
     estimating_menu_map = {
+        "Upload PO": "Upload PO",
         "Import / Create Job Pack": "Import Take-off Job Pack",
+        "PlanReader": "PlanReader",
+        "Colour Schedule": "Colour Schedule",
         "Estimate Working Sheet": "Estimate Working Sheet",
         "Job Progress Tracker": "Job Progress Tracker",
         "Estimating Rate Library": "Estimating Rate Library",
@@ -21972,10 +22091,7 @@ else:
         "Operations Hub",
         "Jobs",
         "Job Folders",
-        "Upload PO",
         "Estimating",
-        "Colour Schedule",
-        "PlanReader",
         "Site Operations",
         "Reports",
         "Management",
@@ -21990,7 +22106,10 @@ else:
         "Equipment": "Equipment",
     }
     estimating_menu_map = {
+        "Upload PO": "Upload PO",
         "Import / Create Job Pack": "Import Take-off Job Pack",
+        "PlanReader": "PlanReader",
+        "Colour Schedule": "Colour Schedule",
         "Estimate Working Sheet": "Estimate Working Sheet",
         "Job Progress Tracker": "Job Progress Tracker",
         "Estimating Rate Library": "Estimating Rate Library",

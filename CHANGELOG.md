@@ -1,5 +1,33 @@
 # JobHub secured release
 
+## 2026-08-07 - Menu cleanup + Bluebeam-style PlanReader scales
+
+- **Decluttered the manager/admin top-level menu**: Upload PO, Colour Schedule
+  and PlanReader now live under **Estimating** instead of cluttering the main
+  sidebar. The Estimating submenu (manager and admin) is ordered:
+  Upload PO, Import / Create Job Pack, PlanReader, Colour Schedule, Estimate
+  Working Sheet, Job Progress Tracker, Estimating Rate Library, Job Costs /
+  Forecasting.
+- **Guards tidy-up**: JobHub Setup / Edit Defaults now only appears under
+  Management; SWMS / Safety Sign-off is injected into the top-level menu for
+  employees only (admin/manager access stays under Management / Site
+  Operations), so the admin and manager menus stay clean.
+- **Missed-timesheet flow revised**: no auto-generated entries. Admins get a
+  reminder + backdate workflow, reminders are sent to employees who owe a
+  timesheet, and the backdated work date is editable on every missed row.
+- **PlanReader now measures like Bluebeam** (new `planreader_bluebeam.py`):
+  - **Page scale as a 1:N ratio** — set a preset scale (1:50 / 1:100 / 1:200 /
+    1:250 / 1:500) or type a custom one per elevation page; box areas are then
+    measured from the drawing just like a calibrated reference line.
+  - Auto-detected vector scales are labelled with the nearest common ratio.
+  - **Scale consistency warnings** — boxes whose drawn m² disagree with the
+    typed quantity are flagged so a mis-set page scale is caught before export.
+  - **Storey inference** — level markers in plan titles/text
+    (GROUND FLOOR, LEVEL 1, ...) drive the external 3D render and a
+    per-storey side-area summary (per-storey / gross / net walls, volume).
+  - **External 3D render exposed** in the 3D Render page with a Bluebeam-style
+    story take-off summary, and multi-storey scenes now scale wall height.
+
 ## 2026-08-07 - Flexible timesheets + Hours Summary
 
 - **Missed-timesheet look-back window is now configurable**: admins pick how

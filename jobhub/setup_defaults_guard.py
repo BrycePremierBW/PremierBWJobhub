@@ -434,9 +434,10 @@ def _should_inject(label: Any, key: Any, options: Any) -> bool:
         return True
     label_text = str(label or "")
     key_text = str(key or "")
-    if key_text in {"main_menu", "management_menu"} or label_text in {"Menu", "Management Section"}:
-        return bool(labels.intersection(MENU_MARKERS))
-    return len(labels.intersection(MENU_MARKERS)) >= 2
+    # Setup lives under Management only so the top-level menu stays clean.
+    if key_text == "management_menu" or label_text == "Management Section":
+        return True
+    return False
 
 
 def _patch_radio(owner: Any, st: Any) -> bool:

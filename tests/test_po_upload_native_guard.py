@@ -51,10 +51,12 @@ class NativePoUploadTests(unittest.TestCase):
         self.assertGreater(MODULE._uploaded_size(Upload()), MODULE.MAX_UPLOAD_BYTES)
 
     def test_upload_po_is_a_first_class_main_app_route(self):
-        # Regression: the hard-coded menu must own Upload PO before session-state
-        # validation runs, otherwise Streamlit replaces it with Dashboard.
+        # Regression: Upload PO must be owned by a hard-coded menu entry before
+        # session-state validation runs, otherwise Streamlit replaces it with
+        # Dashboard. It now lives under the Estimating submenu (manager + admin)
+        # and keeps its own dispatch branch so go_to_menu routing reaches it.
         source = (ROOT / "pb_jobhub_app.py").read_text(encoding="utf-8")
-        menu_anchor = '        "Job Folders",\n        "Upload PO",\n        "Estimating",'
+        menu_anchor = '        "Upload PO": "Upload PO",'
         self.assertEqual(source.count(menu_anchor), 2)
         self.assertIn('elif menu == "Upload PO":', source)
         self.assertIn(

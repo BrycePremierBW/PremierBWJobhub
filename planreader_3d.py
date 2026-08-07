@@ -158,14 +158,22 @@ def external_scene_data(
     envelope: Optional[Dict[str, Any]] = None,
     external_info: Optional[Dict[str, Any]] = None,
     resolve_hex: Callable[[Any], str] = default_resolve_hex,
+    stories: Any = None,
 ) -> Dict[str, Any]:
-    """Build the external 3D scene model from a PlanReader job dict."""
+    """Build the external 3D scene model from a PlanReader job dict.
+
+    ``stories`` scales the wall height so multi-storey homes render at the
+    right proportions; a ``1:N`` page scale (Bluebeam-style ratio) is stored in
+    ``job["scale_ratios"]`` for reference.
+    """
     envelope = envelope or {}
     width = _f(envelope.get("envelope_w_m"))
     depth = _f(envelope.get("envelope_h_m"))
     if width <= 0 or depth <= 0:
         width = 12.0
         depth = 9.0
+
+    storeys = max(int(_f(stories) or 1), 1)
 
     wall_height = _f((external_info or {}).get("wall_height_m"))
     if wall_height <= 0:
@@ -184,6 +192,8 @@ def external_scene_data(
         eave_depth = _f((job.get("external_settings") or {}).get("eave_depth_m"))
     if eave_depth <= 0:
         eave_depth = DEFAULT_EAVE_DEPTH_M
+
+    total_height = round(wall_height * storeys, 2)
 
     schedule = job.get("colour_schedule") or []
 
@@ -223,11 +233,13 @@ def external_scene_data(
         "envelope": {
             "w": round(width, 2),
             "d": round(depth, 2),
-            "h": round(wall_height, 2),
+            "h": round(total_height, 2),
             "t": round(wall_thickness, 3),
             "perimeter_m": round(_f(envelope.get("perimeter_m"), 2 * (width + depth)), 2),
             "method": str(envelope.get("method") or "none"),
             "note": str(envelope.get("note") or ""),
+            "stories": storeys,
+            "per_story_h": round(wall_height, 2),
         },
         "eave": {"depth": round(eave_depth, 2), "colour": soffit_colour},
         "walls": {"colour": wall_colour},
@@ -252,9 +264,10 @@ def external_scene_data(
         "summary": {
             "perimeter_m": round(_f(envelope.get("perimeter_m"), 2 * (width + depth)), 2),
             "wall_height_m": round(wall_height, 2),
-            "gross_walls_m2": round(max(2 * (width + depth) * wall_height, 0), 2),
+            "stories": storeys,
+            "gross_walls_m2": round(max(2 * (width + depth) * wall_height * storeys, 0), 2),
             "openings_m2": round(openings_area, 2),
-            "net_walls_m2": round(max(2 * (width + depth) * wall_height - openings_area, 0), 2),
+            "net_walls_m2": round(max(2 * (width + depth) * wall_height * storeys - openings_area, 0), 2),
             "soffits_m2": round(max(2 * (width + depth + 2 * eave_depth) * eave_depth, 0), 2),
             "method": str(envelope.get("method") or "none"),
         },
@@ -290,7 +303,8 @@ def _render_html_template() -> str:
   <h2>External Render</h2>
   <p class="note" id="note"></p>
   <div class="metric"><span>Footprint</span><b id="mFoot"></b></div>
-  <div class="metric"><span>Wall Height</span><b id="mHeight"></b></div>
+  <div class="metric"><span>Storeys</span><b id="mStories"></b></div>
+  <div class="metric"><span>Wall Height / storey</span><b id="mHeight"></b></div>
   <div class="metric"><span>Gross Walls</span><b id="mGross"></b></div>
   <div class="metric"><span>Openings</span><b id="mOpen"></b></div>
   <div class="metric"><span>Net Walls</span><b id="mNet"></b></div>
@@ -490,7 +504,8 @@ document.getElementById('note').innerText = S.envelope.method === 'none'
   ? 'No reliable plan scale found - envelope is a placeholder rectangle.'
   : (S.envelope.note || 'External envelope from plan measurements.');
 document.getElementById('mFoot').innerText = W.toFixed(1) + ' x ' + D.toFixed(1) + ' m';
-document.getElementById('mHeight').innerText = H.toFixed(2) + ' m';
+document.getElementById('mStories').innerText = (S.envelope.stories || 1) + ' storey' + ((S.envelope.stories || 1) > 1 ? 's' : '');
+document.getElementById('mHeight').innerText = S.envelope.per_story_h.toFixed(2) + ' m';
 document.getElementById('mGross').innerText = S.summary.gross_walls_m2.toFixed(1) + ' m2';
 document.getElementById('mOpen').innerText = S.summary.openings_m2.toFixed(1) + ' m2';
 document.getElementById('mNet').innerText = S.summary.net_walls_m2.toFixed(1) + ' m2';

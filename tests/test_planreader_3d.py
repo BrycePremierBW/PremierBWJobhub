@@ -109,6 +109,40 @@ class ExternalSceneDataTest(unittest.TestCase):
         self.assertEqual(scene["summary"]["net_walls_m2"], round(2 * (14 + 9) * 2.7 - 5.0, 2))
         self.assertGreater(scene["summary"]["soffits_m2"], 0)
 
+    def test_two_storey_scales_walls_and_height(self):
+        job = _sample_job()
+        scene = external_scene_data(
+            job,
+            {"envelope_w_m": 14.0, "envelope_h_m": 9.0},
+            stories=2,
+        )
+        self.assertEqual(scene["envelope"]["stories"], 2)
+        self.assertEqual(scene["envelope"]["per_story_h"], 2.7)
+        self.assertEqual(scene["envelope"]["h"], 5.4)
+        self.assertEqual(scene["summary"]["stories"], 2)
+        self.assertEqual(scene["summary"]["gross_walls_m2"], round(2 * (14 + 9) * 2.7 * 2, 2))
+
+    def test_stories_default_to_one(self):
+        job = _sample_job()
+        scene = external_scene_data(job, {"envelope_w_m": 14.0, "envelope_h_m": 9.0})
+        self.assertEqual(scene["envelope"]["stories"], 1)
+        self.assertEqual(scene["envelope"]["h"], 2.7)
+
+    def test_invalid_stories_default_to_one(self):
+        job = _sample_job()
+        scene = external_scene_data(job, {"envelope_w_m": 14.0, "envelope_h_m": 9.0}, stories=0)
+        self.assertEqual(scene["envelope"]["stories"], 1)
+
+    def test_html_embeds_stories(self):
+        scene = external_scene_data(
+            _sample_job(),
+            {"envelope_w_m": 14.0, "envelope_h_m": 9.0},
+            stories=2,
+        )
+        html = render_planreader_3d_html(scene)
+        self.assertIn("mStories", html)
+        self.assertIn('"stories":2', html)
+
 
 class FaceMappingTest(unittest.TestCase):
     def test_face_keywords(self):

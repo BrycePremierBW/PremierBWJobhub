@@ -156,16 +156,17 @@ def _should_inject_swms(label: Any, key: Any, options: Any) -> bool:
     key_text = str(key or "").strip()
 
     if label_text == "Menu" or key_text == "main_menu":
-        return bool(option_labels.intersection(MAIN_MENU_LABELS))
+        # Employees keep SWMS at the top level for quick safety sign-off; for
+        # admin/manager roles it lives under Management / Site Operations so the
+        # top-level menu stays clean.
+        return _employee_mode() and bool(option_labels.intersection(MAIN_MENU_LABELS))
     if label_text in {"Management Section", "Site Section"} or key_text in {"management_menu", "site_operations_menu"}:
         return bool(option_labels.intersection(MANAGEMENT_LABELS | SITE_LABELS))
     if label_text in {"Employee Portal", "Employee Section"} or key_text in {"employee_menu", "employee_portal_menu"}:
         return bool(option_labels.intersection(EMPLOYEE_TAB_LABELS))
 
     # Fallback for sidebar radios whose label/key has changed but whose options
-    # clearly match one of JobHub's navigation groups.
-    if len(option_labels.intersection(MAIN_MENU_LABELS)) >= 2:
-        return True
+    # clearly match JobHub's admin navigation groups.
     if len(option_labels.intersection(MANAGEMENT_LABELS | SITE_LABELS)) >= 2:
         return True
     return False

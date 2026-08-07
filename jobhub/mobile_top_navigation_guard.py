@@ -21,6 +21,8 @@ _MENU_ICONS = {
     "Upload PO": "📤",
     "Field Mode": "📱",
     "Estimating": "💰",
+    "Colour Schedule": "🎨",
+    "PlanReader": "📐",
     "Site Operations": "🛠️",
     "Reports": "📊",
     "Management": "⚙️",

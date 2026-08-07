@@ -20,6 +20,15 @@ from planreader_3d import (
     external_scene_data,
     render_planreader_3d_html,
 )
+from planreader_bluebeam import (
+    calibration_consistency_warnings,
+    infer_stories_from_pages,
+    manual_calibration_from_scale,
+    nearest_scale_ratio,
+    parse_scale_ratio,
+    scale_ratio_label,
+    side_area_summary,
+)
 from planrender_studio import (
     ELEVATION_FACE_LABELS,
     _face_key,
@@ -1840,6 +1849,41 @@ def plan_auto_scale(job: Dict[str, Any], file: str, page: Any, dpi: int = 150):
     return None
 
 
+def manual_scale_auto_cal(job: Dict[str, Any], file: str, page: Any, img_w: Any, dpi: int = 150):
+    """A ``1:N`` page scale (Bluebeam preset style) as a calibration dict."""
+    ratio = load_manual_scale(job, file, page)
+    if ratio is None or not img_w:
+        return None
+    return manual_calibration_from_scale(ratio, dpi, img_w, _to_float(img_w))
+
+
+def load_manual_scale(job: Dict[str, Any], file: str, page: Any) -> Optional[float]:
+    """Saved ``1:N`` page scale for a rendered page, or None."""
+    ratios = job.get("manual_scales") or {}
+    value = ratios.get(_manual_scale_key(file, page))
+    try:
+        return float(value) if value else None
+    except (TypeError, ValueError):
+        return None
+
+
+def save_manual_scale(job: Dict[str, Any], file: str, page: Any, ratio: Optional[float]) -> Dict[str, Any]:
+    """Persist (or clear) the manual page scale and return the updated dict."""
+    ratios = dict(job.get("manual_scales") or {})
+    key = _manual_scale_key(file, page)
+    r = _to_float(ratio)
+    if r is not None and r > 0:
+        ratios[key] = round(r, 4)
+    else:
+        ratios.pop(key, None)
+    job["manual_scales"] = ratios
+    return job
+
+
+def _manual_scale_key(file: str, page: Any) -> str:
+    return f"{file}::{int(page or 1)}"
+
+
 def _plan_page_image(job: Dict[str, Any], file: str, page: Any):
     for analysis in job.get("analyses") or []:
         if str(analysis.get("file") or "") != str(file or ""):
@@ -3013,6 +3057,61 @@ def corrections_page(job_id: str):
     st.markdown("</div>", unsafe_allow_html=True)
 
 
+def _render_scale_selector(job: Dict[str, Any], opt: Dict[str, Any], job_id: str, img_w: Any, img_h: Any) -> None:
+    """Bluebeam-style page scale: preset ``1:N`` ratios or a custom scale.
+
+    The chosen ratio is stored per page and flows into every drawn box, just
+    like a preset page scale applied to all markups.
+    """
+    file_name = opt.get("file")
+    page_no = opt.get("page")
+    if not file_name or page_no is None:
+        return
+    manual_ratio = load_manual_scale(job, file_name, page_no)
+    presets = [
+        ("Auto-detect", None),
+        ("1:50", 50.0),
+        ("1:100", 100.0),
+        ("1:200", 200.0),
+        ("1:250", 250.0),
+        ("1:500", 500.0),
+    ]
+    keys = [p[0] for p in presets]
+    current = scale_ratio_label(manual_ratio) if manual_ratio is not None else "Auto-detect"
+    current_idx = keys.index(current) if current in keys else 0
+    stable = f"{safe_name(file_name)}_{int(page_no or 1)}"
+    with st.expander("Page scale (1:N)", expanded=manual_ratio is None):
+        col1, col2 = st.columns([3, 1])
+        chosen = col1.selectbox(
+            "Preset scale",
+            keys,
+            index=current_idx,
+            key=f"pr_scale_preset_{job_id}_{stable}",
+        )
+        if col2.button("Apply scale", type="primary", key=f"pr_scale_apply_{job_id}_{stable}"):
+            ratio = next((v for k, v in presets if k == chosen), None)
+            save_manual_scale(job, file_name, page_no, ratio)
+            save_job(job_id, job)
+            st.rerun()
+        custom = st.text_input(
+            "…or type a custom scale (e.g. 1:150)",
+            key=f"pr_scale_custom_{job_id}_{stable}",
+        )
+        if st.button("Apply custom scale", type="secondary", key=f"pr_scale_custom_btn_{job_id}_{stable}"):
+            ratio = parse_scale_ratio(custom)
+            if ratio is None:
+                st.error(f"Could not read '{custom}' as a scale — use the 1:100 format.")
+            else:
+                save_manual_scale(job, file_name, page_no, ratio)
+                save_job(job_id, job)
+                st.rerun()
+        if manual_ratio is not None:
+            st.caption(
+                f"Current: {scale_ratio_label(manual_ratio)}. Box areas are measured "
+                f"from the drawing at this scale."
+            )
+
+
 def progress_page(job_id: str):
     job = load_job(job_id)
     st.markdown("<div class='pb-card'>", unsafe_allow_html=True)
@@ -3063,21 +3162,28 @@ def progress_page(job_id: str):
 
     auto_cal = None
     auto_scale_note = ""
+    manual_cal = None
     if stored_cal is None and opt.get("file") and opt.get("page") and img_w:
-        auto = plan_auto_scale(job, opt["file"], opt["page"], dpi=opt.get("render_dpi") or 150)
+        render_dpi = opt.get("render_dpi") or 150
+        auto = plan_auto_scale(job, opt["file"], opt["page"], dpi=render_dpi)
         if auto and auto["m_per_px"]:
             auto_cal = {
                 "x1": 0.0, "y1": 0.0, "x2": 100.0, "y2": 0.0,
                 "len_m": round(img_w * auto["m_per_px"], 4),
             }
-            auto_scale_note = (f"Scale auto-detected from the PDF ({auto.get('source') or 'vector scale'}) — "
+            near = nearest_scale_ratio(auto.get("m_per_pt"))
+            snap = f" ≈ {scale_ratio_label(near)}" if near else ""
+            auto_scale_note = (f"Scale auto-detected from the PDF ({auto.get('source') or 'vector scale'}{snap}) — "
                                f"areas are measured automatically.")
+        manual_ratio = load_manual_scale(job, opt["file"], opt["page"])
+        if manual_ratio is not None:
+            manual_cal = manual_calibration_from_scale(manual_ratio, render_dpi, img_w, img_h or img_w)
 
     returned = substrate_box_editor(
         img_file.read_bytes(),
         boxes=stored,
         substrates=SUBSTRATE_OPTIONS,
-        calibration=stored_cal or auto_cal,
+        calibration=stored_cal or auto_cal or manual_cal,
         revision=rev,
         key=f"pr_boxes_{job_id}_{safe_name(img_path)}",
         height=860,
@@ -3085,11 +3191,12 @@ def progress_page(job_id: str):
     current = stored
     cal = stored_cal
     auto_cal_n = normalise_calibration(auto_cal)
+    manual_cal_n = normalise_calibration(manual_cal)
     if returned is not None:
         payload = returned if isinstance(returned, dict) else {}
         next_boxes = normalise_boxes(payload.get("boxes"))
         next_cal = normalise_calibration(payload.get("calibration"))
-        if next_cal == auto_cal_n:
+        if next_cal == auto_cal_n or next_cal == manual_cal_n:
             next_cal = None
         if next_boxes != stored or next_cal != stored_cal:
             current = next_boxes
@@ -3105,9 +3212,16 @@ def progress_page(job_id: str):
             save_job(job_id, job)
             st.session_state[rev_key] = rev + 1
 
-    mpp = calibration_mpp(cal or auto_cal, img_w, img_h) if (cal or auto_cal) else None
+    mpp = calibration_mpp(cal or auto_cal or manual_cal, img_w, img_h) if (cal or auto_cal or manual_cal) else None
     m2_total = sum(effective_box_m2(b, mpp, img_w, img_h) for b in current)
     st.caption(f"**{len(current)} box(es)** drawn · **{m2_total:g} m²** in the take-off (only boxes with an m² value flow in).")
+
+    if mpp and current:
+        consistency = calibration_consistency_warnings(current, mpp, img_w, img_h)
+        if consistency:
+            st.warning(" | ".join(consistency[:3]))
+            if len(consistency) > 3:
+                st.caption(f"…and {len(consistency) - 3} more box(es) with a scale mismatch.")
 
     if cal:
         st.caption(f"Scale calibrated — {cal['len_m']:g} m reference line, so box areas are **measured from the drawing** automatically.")
@@ -3121,10 +3235,15 @@ def progress_page(job_id: str):
             save_job(job_id, job)
             st.session_state[rev_key] = rev + 1
             st.rerun()
+    elif manual_cal:
+        st.caption(f"Page scale set to {scale_ratio_label(load_manual_scale(job, opt.get('file'), opt.get('page')))} — box areas are **measured from the drawing**.")
     elif auto_cal:
         st.caption(f"{auto_scale_note} Draw a box and its m² will be measured without manual calibration. Use **Calibrate scale** to override with a drawn reference line.")
     else:
         st.caption("Not calibrated — draw a box, then use **Calibrate scale** above to set the drawing scale so m² are measured from the drawing (or type an m² manually).")
+
+    if stored_cal is None and opt.get("file") and opt.get("page") and img_w:
+        _render_scale_selector(job, opt, job_id, img_w, img_h)
 
     c1, c2, c3 = st.columns(3)
     overall_slider = c1.slider("Overall elevation progress %", 0, 100, int(overall), step=1, key=f"pr_overall_{job_id}")
@@ -3626,6 +3745,43 @@ def three_d_render_page(job_id):
         f"{envelope.get('envelope_h_m', 0):g} m) so drawn measurements match "
         f"the plan. Measurements auto-save in this browser and export to CSV."
     )
+
+    with st.expander("External 3D render (Bluebeam-style story take-off)", expanded=False):
+        plan_pages: List[Dict[str, Any]] = []
+        all_text_parts: List[str] = []
+        for a in job.get("analyses") or []:
+            plan_pages.extend(a.get("pages") or [])
+            all_text_parts.append(str(a.get("all_text") or ""))
+        stories = max(int(infer_stories_from_pages(plan_pages, "\n".join(all_text_parts))), 1)
+        try:
+            scene = external_scene_data(job, envelope, external_info, stories=stories)
+        except Exception:
+            scene = external_scene_data(job, envelope, external_info)
+        side = side_area_summary(
+            envelope.get("envelope_w_m"),
+            envelope.get("envelope_h_m"),
+            stories,
+            scene.get("summary", {}).get("wall_height_m", 2.7),
+            scene.get("summary", {}).get("openings_m2", 0.0),
+        )
+        sc = st.columns(6)
+        sc[0].metric("Storeys", side["stories"])
+        sc[1].metric("Wall h / storey", f"{side['wall_height_m']:g} m")
+        sc[2].metric("Side area / storey", f"{side['per_story_m2']:g} m²")
+        sc[3].metric("Gross walls", f"{side['gross_walls_m2']:g} m²")
+        sc[4].metric("Openings", f"{side['openings_m2']:g} m²")
+        sc[5].metric("Net walls", f"{side['net_walls_m2']:g} m²")
+        st.caption(
+            f"Storeys inferred from the plan titles/text (ground + "
+            f"{max(stories - 1, 0)} upper level{'s' if stories > 2 else ''}). "
+            f"Change the wall height in Settings to refine the render."
+        )
+        scene_html = render_planreader_3d_html(scene)
+        try:
+            st.iframe(scene_html, height=640)
+        except (AttributeError, TypeError):
+            st.components.v1.html(scene_html, height=640, scrolling=False)
+
     studio_html = render_planrender_studio_html(studio_data)
     try:
         st.iframe(studio_html, height=1000)
