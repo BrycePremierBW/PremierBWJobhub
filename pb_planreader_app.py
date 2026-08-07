@@ -16,6 +16,18 @@ import streamlit as st
 
 from planreader_marker_component import plan_marker_editor
 from planreader_substrate_component import substrate_box_editor
+from planreader_3d import (
+    external_scene_data,
+    render_planreader_3d_html,
+)
+from planrender_studio import (
+    ELEVATION_FACE_LABELS,
+    _face_key,
+    _img_data_url,
+    _substrate_for_substrate_text,
+    build_studio_data,
+    render_planrender_studio_html,
+)
 
 APP_NAME = "PB PlanReader"
 DEFAULT_COVERAGE_M2_PER_L = 12.0
@@ -653,6 +665,10 @@ def colour_schedule_page(job_id: str):
         return
 
     df = pd.DataFrame(existing, columns=COLOUR_SCHEDULE_COLUMNS)
+    try:
+        hex_col = st.column_config.TextColumn("Hex swatch", placeholder="e.g. #F0E6D2")
+    except TypeError:
+        hex_col = st.column_config.TextColumn("Hex swatch")
     editor = st.data_editor(
         df,
         hide_index=True,
@@ -663,7 +679,7 @@ def colour_schedule_page(job_id: str):
             "area_location": st.column_config.SelectboxColumn("Area / Room", options=sorted({str(r.get("room") or "") for r in job.get("rooms", [])} | {str(r.get("area_location") or "") for r in job.get("takeoff_rows", [])} | {str(v) for v in df["area_location"].dropna().unique()} | {"Whole job"})),
             "surface": st.column_config.SelectboxColumn("Surface", options=sorted(DEFAULT_FINISH_BY_SURFACE.keys()) + ["Other"]),
             "finish": st.column_config.SelectboxColumn("Finish", options=["Flat / Matt", "Low Sheen", "Satin", "Semi Gloss", "Gloss", "Floor enamel", "Weathershield Low Sheen", "Exterior gloss", "Other"]),
-            "hex": st.column_config.TextColumn("Hex swatch", placeholder="e.g. #F0E6D2"),
+            "hex": hex_col,
         },
     )
     c1, c2 = st.columns(2)
@@ -2915,6 +2931,14 @@ def takeoff_page(job_id: str):
     st.markdown("</div>", unsafe_allow_html=True)
 
 
+def _cycle_plan_page(box_key: str, labels: List[str], delta: int) -> None:
+    labels = list(labels)
+    current = st.session_state.get(box_key)
+    if current not in labels:
+        current = labels[0]
+    st.session_state[box_key] = labels[(labels.index(current) + delta) % len(labels)]
+
+
 def corrections_page(job_id: str):
     job = load_job(job_id)
     st.markdown("<div class='pb-card'>", unsafe_allow_html=True)
@@ -2929,15 +2953,22 @@ def corrections_page(job_id: str):
     box_key = f"pr_plan_page_{job_id}"
     if box_key not in st.session_state or st.session_state.get(box_key) not in labels:
         st.session_state[box_key] = labels[0]
-    current_label = st.session_state[box_key]
     nav = st.columns([1, 6, 1])
-    if nav[0].button("◀ Prev", key=f"{box_key}_prev", width="stretch"):
-        st.session_state[box_key] = labels[(labels.index(current_label) - 1) % len(labels)]
-        st.rerun()
-    selected = nav[1].selectbox("Plan page", labels, index=labels.index(current_label), key=box_key, label_visibility="collapsed")
-    if nav[2].button("Next ▶", key=f"{box_key}_next", width="stretch"):
-        st.session_state[box_key] = labels[(labels.index(selected) + 1) % len(labels)]
-        st.rerun()
+    nav[0].button(
+        "◀ Prev",
+        key=f"{box_key}_prev",
+        width="stretch",
+        on_click=_cycle_plan_page,
+        args=(box_key, labels, -1),
+    )
+    selected = nav[1].selectbox("Plan page", labels, key=box_key, label_visibility="collapsed")
+    nav[2].button(
+        "Next ▶",
+        key=f"{box_key}_next",
+        width="stretch",
+        on_click=_cycle_plan_page,
+        args=(box_key, labels, 1),
+    )
     st.caption(f"Plan page {labels.index(selected) + 1} of {len(labels)}")
     option = next((o for o in options if o["label"] == selected), options[0])
     image_path = Path(option["image_path"])
@@ -2996,15 +3027,22 @@ def progress_page(job_id: str):
     box_key = f"pr_elevation_{job_id}"
     if box_key not in st.session_state or st.session_state.get(box_key) not in labels:
         st.session_state[box_key] = labels[0]
-    current_label = st.session_state[box_key]
     nav = st.columns([1, 6, 1])
-    if nav[0].button("◀ Prev", key=f"{box_key}_prev", width="stretch"):
-        st.session_state[box_key] = labels[(labels.index(current_label) - 1) % len(labels)]
-        st.rerun()
-    selected = nav[1].selectbox("Elevation", labels, index=labels.index(current_label), key=box_key, label_visibility="collapsed")
-    if nav[2].button("Next ▶", key=f"{box_key}_next", width="stretch"):
-        st.session_state[box_key] = labels[(labels.index(selected) + 1) % len(labels)]
-        st.rerun()
+    nav[0].button(
+        "◀ Prev",
+        key=f"{box_key}_prev",
+        width="stretch",
+        on_click=_cycle_plan_page,
+        args=(box_key, labels, -1),
+    )
+    selected = nav[1].selectbox("Elevation", labels, key=box_key, label_visibility="collapsed")
+    nav[2].button(
+        "Next ▶",
+        key=f"{box_key}_next",
+        width="stretch",
+        on_click=_cycle_plan_page,
+        args=(box_key, labels, 1),
+    )
     st.caption(f"Elevation {labels.index(selected) + 1} of {len(labels)}")
     opt = next((o for o in options if o["label"] == selected), options[0])
     img_path = opt["image_path"]
@@ -3155,21 +3193,77 @@ def progress_page(job_id: str):
     st.markdown("</div>", unsafe_allow_html=True)
 
 
+def _delete_plan_page(job_id: str, job: Dict[str, Any], img_path) -> Dict[str, Any]:
+    """Remove a converted plan/elevation page and everything that references it."""
+    img_path = str(img_path)
+    name = Path(img_path).name
+    job["files"] = [
+        f for f in job.get("files", [])
+        if str(f.get("path") or "") != img_path and str(f.get("name") or "") != name
+    ]
+    kept_analyses: List[Dict[str, Any]] = []
+    for a in job.get("analyses", []):
+        pages = [p for p in a.get("pages", []) if str(p.get("image_path") or "") != img_path]
+        a["pages"] = pages
+        if pages:
+            kept_analyses.append(a)
+    job["analyses"] = kept_analyses
+    job["rooms"] = [r for r in job.get("rooms", []) if str(r.get("file") or "") != name]
+    job["elevation_progress"] = {
+        k: v for k, v in (job.get("elevation_progress") or {}).items()
+        if str(k) != img_path and Path(str(k)).name != name
+    }
+    markers = [m for m in load_corrections(job_id) if str(m.get("file") or "") != name]
+    save_corrections(job_id, markers)
+    p = Path(img_path)
+    if p.exists():
+        try:
+            p.unlink()
+        except Exception:
+            pass
+    save_job(job_id, job)
+    return job
+
+
 def images_page(job_id: str):
     job = load_job(job_id)
     st.markdown("<div class='pb-card'>", unsafe_allow_html=True)
     st.subheader("Converted plan/elevation images")
-    st.caption("These are rendered directly from the PDF pages and can be used as clean backgrounds for the mapper.")
+    st.caption("Previews of every converted page. Deleting a page removes it from this job, the 3D studio, rooms, corrections and elevation progress.")
     imgs = [Path(f.get("path", "")) for f in job.get("files", []) if f.get("category") in ["Converted drawing image", "Drawing image"]]
     imgs = [p for p in imgs if p.exists()]
     if not imgs:
         st.warning("No converted drawing images yet. Upload PDFs and tick 'Convert PDF pages to PNG'.")
-    else:
-        cols = st.columns(3)
-        for i, img_path in enumerate(imgs[:120]):
-            with cols[i % 3]:
-                st.image(str(img_path), caption=img_path.name, width="stretch")
-                file_download_button(img_path, "Download image")
+        st.markdown("</div>", unsafe_allow_html=True)
+        return
+    by_path = {str(p): p for p in imgs}
+    meta: Dict[str, Dict[str, Any]] = {}
+    for a in job.get("analyses", []):
+        for pg in a.get("pages", []):
+            ip = str(pg.get("image_path") or "")
+            if ip in by_path:
+                meta[ip] = {
+                    "page": pg.get("page"),
+                    "page_type": pg.get("page_type"),
+                    "title": pg.get("title"),
+                }
+    allow_delete = st.checkbox("Enable page deletion", value=False, key="cv_enable_delete")
+    st.caption(f"{len(imgs)} page(s) shown (preview of every page).")
+    cols = st.columns(3)
+    for i, img_path in enumerate(imgs[:240]):
+        with cols[i % 3]:
+            st.image(str(img_path), width="stretch")
+            m = meta.get(str(img_path), {})
+            cap = img_path.name
+            if m.get("page_type") or m.get("title"):
+                cap = f"{cap} · {m.get('page_type') or m.get('title')}"
+            st.caption(cap)
+            file_download_button(img_path, "Download image")
+            if allow_delete:
+                if st.button("Delete page", key=f"cv_del_{i}_{img_path.name}", type="secondary"):
+                    _delete_plan_page(job_id, job, img_path)
+                    st.success(f"Deleted {img_path.name}")
+                    st.rerun()
     st.markdown("</div>", unsafe_allow_html=True)
 
 
@@ -3255,6 +3349,290 @@ def settings_page(job_id: str):
     st.markdown("</div>", unsafe_allow_html=True)
 
 
+def _studio_project_label(job: Dict[str, Any]) -> str:
+    parts = [str(job.get("job_no") or "").strip()]
+    name = str(job.get("name") or "").strip()
+    if name:
+        parts.append(name)
+    if not any(parts):
+        parts = ["Unnamed project"]
+    return " – ".join(p for p in parts if p)
+
+
+def _blank_elevation_data_url(face_w_m: float, face_h_m: float) -> Optional[str]:
+    """Synthesise a blank, plan-scaled elevation canvas (no photo required)."""
+    try:
+        from PIL import Image, ImageDraw
+    except ImportError:
+        return None
+    if face_w_m <= 0 or face_h_m <= 0:
+        return None
+    scale = 900 / max(face_w_m, 1.0)
+    img_w = max(400, int(round(face_w_m * scale)))
+    img_h = max(240, int(round(face_h_m * scale)))
+    image = Image.new("RGB", (img_w, img_h), (238, 240, 244))
+    draw = ImageDraw.Draw(image)
+    ground = int(img_h * 0.97)
+    draw.line([(0, ground), (img_w, ground)], fill=(176, 182, 190), width=3)
+    draw.rectangle([1, 1, img_w - 1, img_h - 1], outline=(120, 128, 140), width=2)
+    buffer = io.BytesIO()
+    image.save(buffer, "JPEG", quality=80)
+    return "data:image/jpeg;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+def _studio_elevation_entry(
+    face: str,
+    data_url: str,
+    img_w: int,
+    img_h: int,
+    mpp: float,
+    zones: List[Dict[str, Any]],
+    w_m: Optional[float] = None,
+    h_m: Optional[float] = None,
+) -> Dict[str, Any]:
+    return {
+        "key": face,
+        "label": ELEVATION_FACE_LABELS.get(face, face.title()),
+        "dataUrl": data_url,
+        "m_per_px": round(float(mpp or 0), 6),
+        "w_px": int(img_w or 0),
+        "h_px": int(img_h or 0),
+        "w_m": round(float(w_m), 2) if w_m else None,
+        "h_m": round(float(h_m), 2) if h_m else None,
+        "zones": zones or [],
+    }
+
+
+def _studio_elevations(
+    job: Dict[str, Any],
+    envelope: Dict[str, Any],
+    wall_height: Optional[float] = None,
+) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    seen: set = set()
+
+    def _face_w(face: str) -> Optional[float]:
+        return _to_float(
+            envelope.get("envelope_w_m")
+            if face in ("front", "rear")
+            else envelope.get("envelope_h_m")
+        )
+
+    def _push(face, img_file, img_w, img_h, mpp, zones, w_m=None, h_m=None):
+        data_url = _img_data_url(img_file)
+        if not data_url:
+            return
+        seen.add(face)
+        out.append(
+            _studio_elevation_entry(
+                face, data_url, img_w or 0, img_h or 0, mpp, zones,
+                w_m=w_m if w_m is not None else mpp * (img_w or 0),
+                h_m=h_m if h_m is not None else mpp * (img_h or 0),
+            )
+        )
+
+    # 1) user-calibrated elevations (Progress Tracking page)
+    for img_path, entry in (job.get("elevation_progress") or {}).items():
+        face = _face_key(img_path)
+        if not face or face in seen:
+            continue
+        img_file = Path(img_path)
+        if not img_file.exists():
+            continue
+        size = _image_pixel_size(img_file)
+        img_w = size[0] if size else None
+        img_h = size[1] if size else None
+        mpp = None
+        if img_w:
+            cal = normalise_calibration(entry.get("calibration"))
+            if cal:
+                mpp = calibration_mpp(cal, img_w, img_h or img_w)
+            if not mpp:
+                fw = _face_w(face)
+                if fw:
+                    mpp = round(fw / img_w, 6)
+        if not mpp:
+            mpp = 0.05
+        zones = []
+        for z in substrate_boxes_from_job(job, img_path):
+            code = _substrate_for_substrate_text(z.get("substrate")) or _substrate_for_substrate_text(z.get("label"))
+            zones.append({
+                "x": z.get("x", 0),
+                "y": z.get("y", 0),
+                "w": z.get("w", 0),
+                "h": z.get("h", 0),
+                "substrate": code or "RBL",
+            })
+        _push(face, img_file, img_w, img_h, mpp, zones)
+
+    # 2) auto-discover elevation drawings from the imported plan PDFs
+    for analysis in job.get("analyses") or []:
+        fname = str(analysis.get("file") or "")
+        for page in analysis.get("pages") or []:
+            img_path = page.get("image_path")
+            if not img_path:
+                continue
+            face = _face_key(str(img_path)) or _face_key(str(page.get("title") or "")) or _face_key(fname)
+            if not face or face in seen:
+                continue
+            ptype = str(page.get("page_type") or "")
+            title = str(page.get("title") or "")
+            if ptype != "elevation" and "elev" not in title.lower() and "elev" not in fname.lower():
+                continue
+            img_file = Path(img_path)
+            if not img_file.exists():
+                continue
+            size = _image_pixel_size(img_file)
+            img_w = size[0] if size else None
+            img_h = size[1] if size else None
+            mpp = None
+            auto = plan_auto_scale(job, fname, page.get("page") or 1, dpi=page.get("render_dpi") or 150)
+            if auto and auto.get("m_per_px"):
+                mpp = auto["m_per_px"]
+            elif img_w:
+                fw = _face_w(face)
+                if fw:
+                    mpp = round(fw / img_w, 6)
+            if not mpp:
+                mpp = 0.05
+            _push(face, img_file, img_w, img_h, mpp, [])
+
+    # 3) elevation drawings uploaded as files
+    for f in job.get("files") or []:
+        name = str(f.get("name") or "")
+        img_path = f.get("path") or name
+        face = _face_key(str(img_path)) or _face_key(name)
+        if not face or face in seen:
+            continue
+        category = str(f.get("category") or "")
+        if category not in ("Elevation", "Drawing image") and "elev" not in name.lower():
+            continue
+        img_file = Path(str(img_path))
+        if not img_file.exists():
+            continue
+        size = _image_pixel_size(img_file)
+        img_w = size[0] if size else None
+        img_h = size[1] if size else None
+        mpp = None
+        if img_w:
+            fw = _face_w(face)
+            if fw:
+                mpp = round(fw / img_w, 6)
+        if not mpp:
+            mpp = 0.05
+        _push(face, img_file, img_w, img_h, mpp, [])
+
+    # 4) no elevation drawings at all: synthesise faces from the measured plan
+    if not out:
+        ew = _face_w("front") or 30.0
+        ed = _face_w("left") or 9.0
+        eh = _to_float(wall_height) or _to_float((job.get("external_settings") or {}).get("wall_height_m")) or 2.7
+        for face, fw, fh in (("front", ew, eh), ("rear", ew, eh), ("left", ed, eh), ("right", ed, eh)):
+            if face in seen:
+                continue
+            data_url = _blank_elevation_data_url(fw, fh)
+            if not data_url:
+                continue
+            scale = 900 / max(fw, 1.0)
+            img_w = max(400, int(round(fw * scale)))
+            img_h = max(240, int(round(fh * scale)))
+            mpp = round(fw / img_w, 6)
+            seen.add(face)
+            out.append(
+                _studio_elevation_entry(face, data_url, img_w, img_h, mpp, [], w_m=fw, h_m=fh)
+            )
+    return out
+
+
+def _studio_drawings(job: Dict[str, Any]) -> List[Dict[str, Any]]:
+    names: List[str] = []
+    for img_path in (job.get("elevation_progress") or {}):
+        name = Path(img_path).name
+        if name and name not in names:
+            names.append(name)
+    for f in (job.get("files") or []):
+        name = str(f.get("name") or "") or Path(str(f.get("path") or "")).name
+        if name and name not in names:
+            names.append(name)
+    return [{"name": n} for n in names] or [{"name": "Elevations – Block B"}]
+
+
+def _studio_seed_areas(job: Dict[str, Any]) -> List[Dict[str, Any]]:
+    areas: List[Dict[str, Any]] = []
+    try:
+        rows, _ = compute_external_takeoff_rows(job)
+    except Exception:
+        rows = []
+    for r in rows:
+        if r.get("internal_external") != "External":
+            continue
+        code = _substrate_for_substrate_text(r.get("substrate"))
+        if not code:
+            continue
+        qty = _to_float(r.get("qty_m2"))
+        if qty <= 0 and not _to_float(r.get("lineal_m")):
+            continue
+        areas.append({
+            "id": "SEED-%02d" % (len(areas) + 1),
+            "unit": None,
+            "unit_label": "Whole building",
+            "drawing": "Elevations – Block B",
+            "elevation": ELEVATION_FACE_LABELS["front"],
+            "face": "front",
+            "substrate": code,
+            "area": round(qty, 2),
+            "status": "Paint Included",
+            "progress": 0,
+            "notes": r.get("source_note") or r.get("confidence") or "",
+            "manual": False,
+        })
+    return areas
+
+
+def three_d_render_page(job_id):
+    """PB PlanRender Takeoff Studio — premium dark take-off workspace."""
+    job = load_job(job_id)
+    markers = load_corrections(job_id)
+    rooms = apply_room_corrections(job.get("rooms", []), markers)
+    wall_thickness = float(
+        (job.get("external_settings") or {}).get("wall_thickness_m")
+        or DEFAULT_WALL_THICKNESS_M
+    )
+    envelope = external_footprint(job, markers, rooms, wall_thickness)
+    external_info = {}
+    try:
+        _, external_info = compute_external_takeoff_rows(job)
+    except Exception:
+        external_info = {}
+    project_label = _studio_project_label(job)
+    studio_data = build_studio_data(
+        job=job,
+        project_label=project_label,
+        project_id=job_id,
+        envelope=envelope,
+        external_info=external_info,
+        elevations=_studio_elevations(
+            job,
+            envelope,
+            wall_height=(job.get("external_settings") or {}).get("wall_height_m"),
+        ),
+        drawings=_studio_drawings(job),
+        seed_areas=_studio_seed_areas(job),
+    )
+    st.markdown("### PB PlanRender Takeoff Studio")
+    st.caption(
+        f"Project: **{project_label}** · the 3D model is scaled to the job's "
+        f"external envelope ({envelope.get('envelope_w_m', 0):g} × "
+        f"{envelope.get('envelope_h_m', 0):g} m) so drawn measurements match "
+        f"the plan. Measurements auto-save in this browser and export to CSV."
+    )
+    studio_html = render_planrender_studio_html(studio_data)
+    try:
+        st.iframe(studio_html, height=1000)
+    except (AttributeError, TypeError):
+        st.components.v1.html(studio_html, height=1000, scrolling=False)
+
+
 def main():
     st.set_page_config(page_title=APP_NAME, page_icon="🎨", layout="wide")
     app_css()
@@ -3277,6 +3655,7 @@ def main():
             "Extracted Info",
             "Verify & Correct",
             "Colour Schedule",
+            "3D Render",
             "JobHub Sync",
             "Take-off Draft",
             "Progress Tracking",
@@ -3295,6 +3674,8 @@ def main():
         corrections_page(job_id)
     elif menu == "Colour Schedule":
         colour_schedule_page(job_id)
+    elif menu == "3D Render":
+        three_d_render_page(job_id)
     elif menu == "JobHub Sync":
         jobhub_sync_page(job_id)
     elif menu == "Take-off Draft":
