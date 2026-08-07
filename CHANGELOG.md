@@ -1,5 +1,33 @@
 # JobHub secured release
 
+## 2026-08-07 - Flexible timesheets + Hours Summary
+
+- **Missed-timesheet look-back window is now configurable**: admins pick how
+  many days back to scan for scheduled shifts that never got a timesheet
+  (1-90, default 21). The setting is saved per database.
+- **Configurable export folder**: admins can choose where missed-timesheet
+  CSV exports are saved (or offer them as a download). Each export file is
+  named `missed_timesheets_<date>.csv`.
+- **Site / Location editable on every timesheet**: new and existing entries
+  (including missed-timesheet catch-ups) now store a per-entry
+  `site_location`, defaulting to the job's site address and editable in the
+  Add Timesheet form, the Review screen, and the missed-timesheet catch-up.
+- **New Hours Summary tab** (Timesheets page, admin view):
+  - Per-person totals (shifts and hours) with Total Hours / Shifts /
+    Employees summary metrics.
+  - Date presets: **Today**, **This Week**, **This Month** or **Custom**
+    From/To dates. "This Week" runs **Friday to Thursday** (pay week starts
+    Friday).
+  - Optional **status filter** (All / Submitted / Approved / Rejected / Paid).
+  - Optional **"Show all employees"** toggle that lists every active employee,
+    including those with 0 hours in the period.
+  - **Xero-friendly exports**: per-person summary CSV, full line listing CSV
+    (Employee, Date, TrackingName = Job No, Site Location, Hours,
+    EarningsRate = Work Type, Status, Description) and an Excel workbook
+    with both sheets.
+- Existing missed-timesheet detection, saving and exporting are unchanged
+  apart from the new options above.
+
 ## 2026-08-06 - PlanReader <-> JobHub share one database + job notes
 
 - **JobHub and PB PlanReader now talk to each other**: both apps use the same

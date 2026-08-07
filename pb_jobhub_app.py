@@ -2616,6 +2616,15 @@ def apply_schema_migrations():
                 (migration_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
             )
 
+        migration_id = "20260807_timesheet_site_location_v1"
+        if migration_id not in applied:
+            _migration_ensure_column(cur, "timesheet_entries", "site_location", "TEXT")
+
+            cur.execute(
+                "INSERT INTO schema_migrations (migration_id, applied_at) VALUES (?, ?)",
+                (migration_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+            )
+
         takeoff_migration_id = "20260725_takeoff_job_pack_v1"
         if takeoff_migration_id not in applied:
             for column, definition in [
@@ -7434,6 +7443,60 @@ def calculate_hours_from_times(start_time, finish_time, break_minutes):
         return 0.0
 
 
+def get_missed_timesheet_lookback_days():
+    """Persisted look-back window for missed-timesheet detection (default 21 days)."""
+    try:
+        return int(get_app_setting("missed_timesheet_lookback_days", "21") or 21)
+    except (TypeError, ValueError):
+        return 21
+
+
+def set_missed_timesheet_lookback_days(value):
+    set_app_setting("missed_timesheet_lookback_days", str(max(1, int(value))))
+
+
+def get_missed_timesheet_export_dir():
+    """Persisted folder that missed-timesheet exports are written to."""
+    value = str(get_app_setting("missed_timesheet_export_dir", "") or "").strip()
+    return value or str(EXPORTS_DIR)
+
+
+def set_missed_timesheet_export_dir(value):
+    set_app_setting("missed_timesheet_export_dir", str(value or "").strip())
+
+
+def export_missed_timesheets_csv(lookback_days, export_dir):
+    """Write every active employee's missed shifts to a CSV in the export folder.
+
+    Returns ``(csv_path, dataframe)``.
+    """
+    employee_options = get_employee_options(active_only=True)
+    rows = []
+    for employee_label, employee_id in employee_options.items():
+        for item in missed_timesheet_days(int(employee_id), lookback_days=lookback_days):
+            rows.append({
+                "Employee": employee_label,
+                "Work Date": item["work_date"],
+                "Job No": item["job_no"],
+                "Job Name": item["job_name"],
+                "Stage": item["stage_name"],
+                "Start": item["start_time"],
+                "Finish": item["finish_time"],
+                "Planned Hours": item["planned_hours"],
+                "Site Role": item["site_role"],
+            })
+    frame = pd.DataFrame(
+        rows,
+        columns=["Employee", "Work Date", "Job No", "Job Name", "Stage", "Start", "Finish", "Planned Hours", "Site Role"],
+    )
+    frame = frame.sort_values(["Work Date", "Employee", "Job No"]).reset_index(drop=True)
+    target = Path(export_dir)
+    target.mkdir(parents=True, exist_ok=True)
+    csv_path = target / f"missed_timesheets_{date.today().isoformat()}.csv"
+    frame.to_csv(csv_path, index=False, encoding="utf-8-sig")
+    return csv_path, frame
+
+
 def missed_timesheet_days(employee_id, lookback_days=21):
     """Scheduled shifts that never received a timesheet entry.
 
@@ -7525,11 +7588,22 @@ def render_missed_timesheet_catchup(
     if not employee_id:
         st.info("Select an employee to see missed timesheets.")
         return
-    missed = missed_timesheet_days(employee_id)
+    lookback_days = int(st.number_input(
+        "Look back (days)",
+        min_value=1,
+        max_value=90,
+        value=get_missed_timesheet_lookback_days(),
+        step=1,
+        key=f"{key_prefix}_lookback_days",
+        help="How far back scheduled shifts are checked for a missing timesheet.",
+    ))
+    if lookback_days != get_missed_timesheet_lookback_days():
+        set_missed_timesheet_lookback_days(lookback_days)
+    missed = missed_timesheet_days(employee_id, lookback_days=lookback_days)
     if not missed:
         st.success(
-            "No missed timesheets detected. Every scheduled shift in the last "
-            "21 days has a timesheet."
+            f"No missed timesheets detected. Every scheduled shift in the last "
+            f"{lookback_days} days has a timesheet."
         )
         return
 
@@ -7545,12 +7619,12 @@ def render_missed_timesheet_catchup(
 
     if manual_entry:
         st.caption(
-            f"{len(missed)} scheduled shift(s) in the last 21 days have no timesheet. "
+            f"{len(missed)} scheduled shift(s) in the last {lookback_days} days have no timesheet. "
             "Choose the job and the hours you actually worked for each day below."
         )
     else:
         st.caption(
-            f"{len(missed)} scheduled shift(s) in the last 21 days have no timesheet. "
+            f"{len(missed)} scheduled shift(s) in the last {lookback_days} days have no timesheet. "
             "Shifts shown use the rostered start/finish and can be adjusted before submitting."
         )
 
@@ -7568,6 +7642,21 @@ def render_missed_timesheet_catchup(
                     get_job_stage_options({job_label: missed_job_id})
                 )
                 existing_job_ids.add(missed_job_id)
+
+    site_by_job = {}
+    job_ids_for_sites = {
+        int(item["job_id"]) for item in missed if int(item.get("job_id") or 0)
+    }
+    for choice in (job_stage_options or {}).values():
+        job_ids_for_sites.add(int(choice.get("job_id") or 0))
+    if job_ids_for_sites:
+        ids_clause = ",".join(str(job_id) for job_id in sorted(job_ids_for_sites))
+        site_df = df_query(f"SELECT id, site_address FROM jobs WHERE id IN ({ids_clause})")
+        if site_df is not None and not site_df.empty:
+            site_by_job = {
+                int(row_data["id"]): str(row_data["site_address"] or "")
+                for _, row_data in site_df.iterrows()
+            }
 
     submitted_count = 0
     for index, item in enumerate(missed):
@@ -7658,6 +7747,18 @@ def render_missed_timesheet_catchup(
                     key=f"{row_key}_notes",
                 )
 
+            site_value = st.text_input(
+                "Site / Location",
+                value=site_by_job.get(
+                    int(selected_choice["job_id"])
+                    if manual_entry and selected_choice is not None
+                    else int(item["job_id"] or 0),
+                    "",
+                ),
+                key=f"{row_key}_site_location",
+                help="Defaults to the job's site address. Override if the work was carried out elsewhere.",
+            )
+
             try:
                 total_hours = calculate_shift_hours(
                     start_value, finish_value, break_value
@@ -7717,6 +7818,7 @@ def render_missed_timesheet_catchup(
                             if manual_entry and selected_choice is not None
                             else item["stage_id"]
                         ),
+                        site_location=site_value,
                     )
                     submitted_count += 1
                     st.session_state[f"{row_key}_submitted"] = True
@@ -7752,6 +7854,7 @@ def save_timesheet_entry(
     work_type,
     notes,
     job_stage_id=None,
+    site_location=None,
 ):
     user = get_current_user() or {}
     submitted_by = user.get("username", "")
@@ -7762,8 +7865,8 @@ def save_timesheet_entry(
         insert_sql = """
             INSERT INTO timesheet_entries
             (job_id, job_stage_id, employee_id, work_date, start_time, finish_time, break_minutes, total_hours,
-             work_type, submitted_by, submitted_at, status, notes)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             work_type, submitted_by, submitted_at, status, notes, site_location)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         if USE_POSTGRES:
             insert_sql += " RETURNING id"
@@ -7781,6 +7884,7 @@ def save_timesheet_entry(
             submitted_at,
             "Submitted",
             notes,
+            (str(site_location) if site_location else None),
         ))
         timesheet_id = int(cur.fetchone()[0]) if USE_POSTGRES else int(cur.lastrowid)
         conn.commit()
@@ -7923,6 +8027,7 @@ def update_timesheet_entry(
     work_type,
     notes,
     job_stage_id=None,
+    site_location=None,
 ):
     """Edit a timesheet and transactionally keep its wage posting consistent."""
     timesheet_id = int(timesheet_id)
@@ -7936,6 +8041,7 @@ def update_timesheet_entry(
     work_type = str(work_type or "")
     notes = str(notes or "")
     job_stage_id = int(job_stage_id) if job_stage_id is not None else None
+    site_location = str(site_location) if site_location else None
 
     conn = connect()
     try:
@@ -7943,7 +8049,7 @@ def update_timesheet_entry(
         cur.execute("""
             SELECT job_id, job_stage_id, employee_id, work_date, start_time, finish_time,
                    break_minutes, total_hours, work_type,
-                   COALESCE(status, 'Submitted'), notes
+                   COALESCE(status, 'Submitted'), notes, site_location
             FROM timesheet_entries
             WHERE id = ?
         """, (timesheet_id,))
@@ -7963,6 +8069,7 @@ def update_timesheet_entry(
             original_work_type,
             original_status,
             original_notes,
+            original_site_location,
         ) = original
 
         cur.execute("""
@@ -7997,7 +8104,7 @@ def update_timesheet_entry(
             UPDATE timesheet_entries
             SET job_id = ?, job_stage_id = ?, employee_id = ?, work_date = ?,
                 start_time = ?, finish_time = ?, break_minutes = ?,
-                total_hours = ?, work_type = ?, notes = ?, status = ?
+                total_hours = ?, work_type = ?, notes = ?, site_location = ?, status = ?
             WHERE id = ?
         """, (
             job_id,
@@ -8010,6 +8117,7 @@ def update_timesheet_entry(
             total_hours,
             work_type,
             notes,
+            site_location,
             status,
             timesheet_id,
         ))
@@ -8179,7 +8287,7 @@ def render_timesheet_edit_form(timesheet_id, key_prefix):
     timesheet = df_query("""
         SELECT t.id, t.job_id, t.job_stage_id, t.employee_id, t.work_date, t.start_time,
                t.finish_time, t.break_minutes, t.total_hours, t.work_type,
-               COALESCE(t.status, 'Submitted') AS status, t.notes,
+               COALESCE(t.status, 'Submitted') AS status, t.notes, t.site_location,
                j.job_no, j.job_name, e.name AS employee_name
         FROM timesheet_entries t
         JOIN jobs j ON j.id = t.job_id
@@ -8314,6 +8422,13 @@ def render_timesheet_edit_form(timesheet_id, key_prefix):
         value=str(row["notes"] or ""),
         key=f"{key_prefix}_edit_notes_{timesheet_id}",
     )
+    current_site_location = str(row.get("site_location") or "")
+    edited_site_location = st.text_input(
+        "Site / Location",
+        value=current_site_location,
+        key=f"{key_prefix}_edit_site_location_{timesheet_id}",
+        help="The site the work was carried out at. Defaults to the job's site address.",
+    )
 
     st.metric("Recalculated Hours", f"{edited_hours:.2f}")
     if calculation_error:
@@ -8331,6 +8446,7 @@ def render_timesheet_edit_form(timesheet_id, key_prefix):
         "hours": edited_hours,
         "work_type": edited_work_type,
         "notes": edited_notes,
+        "site_location": edited_site_location,
         "status": str(row["status"]),
     }
 
@@ -8345,6 +8461,7 @@ def render_timesheet_edit_form(timesheet_id, key_prefix):
             "Break": f"{edited_break} min",
             "Hours": f"{edited_hours:.2f}",
             "Work Type": edited_work_type,
+            "Site / Location": edited_site_location,
             "Status": str(row["status"]),
             "Notes": edited_notes,
         }]),
@@ -8380,6 +8497,7 @@ def render_timesheet_edit_form(timesheet_id, key_prefix):
                 edited_work_type,
                 edited_notes,
                 selected_job_choice["job_stage_id"],
+                edited_site_location,
             )
         except Exception as exc:
             pb_error(str(exc))
@@ -8749,6 +8867,19 @@ def timesheet_entry_form(employee_id=None, employee_restricted=False, key_prefix
     )
     notes = st.text_area("Notes", key=f"{key_prefix}_notes")
 
+    site_df = df_query("SELECT site_address FROM jobs WHERE id = ?", (selected_job_id,))
+    default_site = (
+        str(site_df.iloc[0]["site_address"] or "")
+        if site_df is not None and not site_df.empty
+        else ""
+    )
+    site_location = st.text_input(
+        "Site / Location",
+        value=default_site,
+        key=f"{key_prefix}_site_location",
+        help="The site the work was carried out at. Defaults to the selected job's site address.",
+    )
+
     review_payload = {
         "job_id": selected_job_id,
         "job_stage_id": selected_job_stage_id,
@@ -8762,6 +8893,7 @@ def timesheet_entry_form(employee_id=None, employee_restricted=False, key_prefix
         "calculated_hours": total_hours,
         "work_type": work_type,
         "notes": notes,
+        "site_location": site_location,
     }
 
     if simple:
@@ -8791,6 +8923,7 @@ def timesheet_entry_form(employee_id=None, employee_restricted=False, key_prefix
                     "Break": f"{break_minutes} min",
                     "Calculated Hours": f"{total_hours:.2f}",
                     "Work Type": work_type,
+                    "Site / Location": site_location,
                     "Notes": notes,
                 }
                 for work_date in selected_work_dates
@@ -8878,6 +9011,7 @@ def timesheet_entry_form(employee_id=None, employee_restricted=False, key_prefix
                         work_type,
                         notes,
                         selected_job_stage_id,
+                        site_location,
                     ))
                 except Exception as exc:
                     skipped.append(
@@ -8893,6 +9027,175 @@ def timesheet_entry_form(employee_id=None, employee_restricted=False, key_prefix
             st.warning("Skipped:\n\n" + "\n\n".join(f"• {item}" for item in skipped))
         if created_ids:
             refresh()
+
+
+def _week_start_friday(value: date) -> date:
+    """Start of the pay week containing `value`, with weeks running Friday to Thursday."""
+    return value - timedelta(days=(value.weekday() - 4) % 7)
+
+
+def _hours_summary_range():
+    """Resolve the chosen date range preset (Today / This Week / This Month / Custom)."""
+    preset = st.radio(
+        "Period",
+        ["Today", "This Week", "This Month", "Custom"],
+        horizontal=True,
+        index=2,
+        key="hours_summary_preset",
+    )
+    today = date.today()
+    if preset == "Today":
+        return today, today
+    if preset == "This Week":
+        return _week_start_friday(today), today
+    if preset == "This Month":
+        return today.replace(day=1), today
+    from_col, to_col = st.columns(2)
+    from_date = from_col.date_input("From", value=today.replace(day=1), key="hours_summary_from")
+    to_date = to_col.date_input("To", value=today, key="hours_summary_to")
+    if to_date < from_date:
+        from_date, to_date = to_date, from_date
+    return from_date, to_date
+
+
+def _build_hours_summary(filtered, show_all_employees):
+    """Aggregate hours per employee; optionally include every active employee."""
+    filtered = filtered.copy()
+    filtered["Hours"] = pd.to_numeric(filtered["Hours"], errors="coerce").fillna(0)
+
+    summary = (
+        filtered.groupby("Employee", as_index=False)
+        .agg(Shifts=("Hours", "size"), TotalHours=("Hours", "sum"))
+        .sort_values("TotalHours", ascending=False)
+        .reset_index(drop=True)
+    )
+    summary["TotalHours"] = summary["TotalHours"].round(2)
+
+    if show_all_employees:
+        all_employees = df_query("""
+            SELECT e.name
+            FROM employees e
+            WHERE LOWER(COALESCE(e.status, 'active')) NOT IN ('inactive', 'terminated')
+            ORDER BY e.name
+        """)
+        if not all_employees.empty:
+            summary = all_employees.rename(columns={"name": "Employee"}).merge(
+                summary, on="Employee", how="left"
+            )
+            summary["Shifts"] = summary["Shifts"].fillna(0).astype(int)
+            summary["TotalHours"] = summary["TotalHours"].fillna(0).round(2)
+            summary = (
+                summary.sort_values("TotalHours", ascending=False)
+                .reset_index(drop=True)
+            )
+    return summary
+
+
+def render_hours_summary():
+    """Per-person total hours for a chosen period, exportable for Xero."""
+    from_date, to_date = _hours_summary_range()
+    selected_status = timesheet_status_filter(
+        "Show Hours With Status",
+        "hours_summary_status_filter",
+        default="All",
+    )
+    show_all_employees = st.checkbox(
+        "Show all employees (including anyone with 0 hours in this period)",
+        key="hours_summary_show_all",
+    )
+
+    df = df_query("""
+        SELECT t.id, e.name AS 'Employee', t.work_date AS 'Date',
+               j.job_no AS 'Job No', j.job_name AS 'Job Name',
+               COALESCE(js.stage_name, 'Whole Job') AS 'Stage',
+               COALESCE(t.site_location, j.site_address) AS 'Site Location',
+               t.total_hours AS 'Hours', t.work_type AS 'Work Type',
+               COALESCE(t.status, 'Submitted') AS 'Status', t.notes AS 'Notes'
+        FROM timesheet_entries t
+        JOIN employees e ON e.id = t.employee_id
+        JOIN jobs j ON j.id = t.job_id
+        LEFT JOIN job_stages js ON js.id = t.job_stage_id
+        WHERE t.work_date BETWEEN ? AND ?
+        ORDER BY e.name, t.work_date, t.id
+    """, (from_date.isoformat(), to_date.isoformat()))
+
+    if df.empty:
+        st.info("No timesheets in this period.")
+        return
+
+    filtered = filter_timesheets_by_status(df, selected_status)
+    if filtered.empty:
+        st.info(f"No {selected_status.lower()} timesheets in this period.")
+        return
+
+    summary = _build_hours_summary(filtered, show_all_employees)
+
+    total_hours = float(summary["TotalHours"].sum())
+    total_shifts = int(summary["Shifts"].sum())
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Total Hours", f"{total_hours:.2f}")
+    m2.metric("Shifts", total_shifts)
+    m3.metric("Employees", len(summary))
+
+    st.markdown("### Total hours per person")
+    st.dataframe(summary, width="stretch", hide_index=True)
+    st.caption(
+        f"{from_date.isoformat()} to {to_date.isoformat()} · "
+        f"{selected_status} timesheets."
+    )
+
+    st.markdown("### Export for Xero")
+    st.caption(
+        "Download the per-person summary or the full Xero-style line listing "
+        "(Employee, Date, TrackingName = Job No, Hours, EarningsRate = Work Type)."
+    )
+
+    period_label = f"{from_date.isoformat()}_{to_date.isoformat()}"
+    summary_csv = summary.to_csv(index=False).encode("utf-8-sig")
+
+    detail_rows = []
+    for _, row_data in filtered.iterrows():
+        detail_rows.append({
+            "Employee": row_data["Employee"],
+            "Date": row_data["Date"],
+            "TrackingName": row_data.get("Job No", ""),
+            "Job Name": row_data.get("Job Name", ""),
+            "Site Location": row_data.get("Site Location", ""),
+            "Hours": float(row_data.get("Hours") or 0),
+            "EarningsRate": row_data.get("Work Type", ""),
+            "Status": row_data.get("Status", ""),
+            "Description": row_data.get("Notes", ""),
+        })
+    detail_csv = pd.DataFrame(detail_rows).to_csv(index=False).encode("utf-8-sig")
+
+    excel = BytesIO()
+    with pd.ExcelWriter(excel, engine="openpyxl") as writer:
+        summary.to_excel(writer, index=False, sheet_name="Hours Summary")
+        pd.DataFrame(detail_rows).to_excel(writer, index=False, sheet_name="Xero Timesheets")
+
+    d1, d2, d3 = st.columns(3)
+    d1.download_button(
+        "Download Hours Summary (CSV)",
+        summary_csv,
+        file_name=f"hours_summary_{period_label}.csv",
+        mime="text/csv",
+        key="hours_summary_csv",
+    )
+    d2.download_button(
+        "Download Xero Timesheets (CSV)",
+        detail_csv,
+        file_name=f"timesheets_xero_{period_label}.csv",
+        mime="text/csv",
+        key="hours_summary_xero_csv",
+    )
+    d3.download_button(
+        "Download Excel (both sheets)",
+        excel.getvalue(),
+        file_name=f"hours_{period_label}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="hours_summary_excel",
+    )
 
 
 def timesheets_page(employee_restricted=False):
@@ -8929,6 +9232,7 @@ def timesheets_page(employee_restricted=False):
             my_df = df_query("""
                 SELECT t.id, t.work_date AS 'Date', j.job_no AS 'Job No', j.job_name AS 'Job Name',
                        COALESCE(js.stage_name, 'Whole Job') AS 'Stage',
+                       COALESCE(t.site_location, j.site_address) AS 'Site Location',
                        t.start_time AS 'Start', t.finish_time AS 'Finish', t.break_minutes AS 'Break Minutes',
                        t.total_hours AS 'Hours', t.work_type AS 'Work Type',
                        COALESCE(t.status, 'Submitted') AS 'Status', t.notes AS 'Notes'
@@ -8953,7 +9257,9 @@ def timesheets_page(employee_restricted=False):
             )
         return
 
-    tab_submit, tab_review, tab_by_job = st.tabs(["Add Timesheet", "Review Timesheets", "Timesheets by Job"])
+    tab_submit, tab_review, tab_by_job, tab_summary = st.tabs(
+        ["Add Timesheet", "Review Timesheets", "Timesheets by Job", "Hours Summary"]
+    )
 
     with tab_submit:
         timesheet_entry_form(key_prefix="admin_timesheet")
@@ -8962,6 +9268,7 @@ def timesheets_page(employee_restricted=False):
         df = df_query("""
             SELECT t.id, t.work_date AS 'Date', j.job_no AS 'Job No', j.job_name AS 'Job Name', e.name AS 'Employee',
                    COALESCE(js.stage_name, 'Whole Job') AS 'Stage',
+                   COALESCE(t.site_location, j.site_address) AS 'Site Location',
                    t.start_time AS 'Start', t.finish_time AS 'Finish', t.break_minutes AS 'Break Minutes',
                    t.total_hours AS 'Hours', t.work_type AS 'Work Type',
                    COALESCE(t.status, 'Submitted') AS 'Status',
@@ -9015,6 +9322,43 @@ def timesheets_page(employee_restricted=False):
                     include_name_header=True,
                 )
 
+                with st.expander("Export missed timesheets to a folder"):
+                    st.caption(
+                        "Writes every active employee's missed shifts to a CSV in a "
+                        "folder you choose. The folder is remembered for next time."
+                    )
+                    export_dir = st.text_input(
+                        "Export folder",
+                        value=get_missed_timesheet_export_dir(),
+                        key="admin_missed_timesheet_export_dir",
+                        help="Full path where the missed-timesheets CSV is saved.",
+                    )
+                    export_dir = (export_dir or "").strip() or get_missed_timesheet_export_dir()
+                    if export_dir != get_missed_timesheet_export_dir():
+                        set_missed_timesheet_export_dir(export_dir)
+                    if st.button(
+                        "Export missed timesheets CSV",
+                        key="admin_missed_timesheet_export_btn",
+                    ):
+                        try:
+                            csv_path, frame = export_missed_timesheets_csv(
+                                get_missed_timesheet_lookback_days(),
+                                export_dir,
+                            )
+                        except Exception as exc:
+                            pb_error(f"Could not export missed timesheets: {exc}")
+                        else:
+                            st.success(
+                                f"Exported {len(frame)} missed shift(s) to **{csv_path}**."
+                            )
+                            st.download_button(
+                                "Download CSV",
+                                csv_path.read_bytes(),
+                                file_name=csv_path.name,
+                                mime="text/csv",
+                                key="admin_missed_timesheet_export_download",
+                            )
+
     with tab_by_job:
         job_options = get_job_options()
         if not job_options:
@@ -9034,6 +9378,7 @@ def timesheets_page(employee_restricted=False):
             by_job = df_query("""
                 SELECT t.id, t.work_date AS 'Date', e.name AS 'Employee',
                        COALESCE(js.stage_name, 'Whole Job') AS 'Stage',
+                       COALESCE(t.site_location, j.site_address) AS 'Site Location',
                        t.start_time AS 'Start', t.finish_time AS 'Finish',
                        t.break_minutes AS 'Break Minutes', t.total_hours AS 'Hours',
                        t.work_type AS 'Work Type',
@@ -9041,6 +9386,7 @@ def timesheets_page(employee_restricted=False):
                        t.notes AS 'Notes'
                 FROM timesheet_entries t
                 JOIN employees e ON e.id = t.employee_id
+                JOIN jobs j ON j.id = t.job_id
                 LEFT JOIN job_stages js ON js.id = t.job_stage_id
                 WHERE t.job_id = ?
                 ORDER BY t.work_date DESC, t.id DESC
@@ -9089,6 +9435,9 @@ def timesheets_page(employee_restricted=False):
                     )
                 else:
                     st.info("Accept the selected job review to display and select its timesheets.")
+
+    with tab_summary:
+        render_hours_summary()
 
 # =============================
 # ESTIMATE WORKING SHEET
