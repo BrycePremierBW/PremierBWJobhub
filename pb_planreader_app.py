@@ -2624,9 +2624,46 @@ def app_css():
 :root { --pb-bg:#f4f0ea; --pb-card:#ffffff; --pb-ink:#171717; --pb-muted:#666; --pb-line:#e3ddd4; --pb-accent:#b5a38d; }
 .stApp { background: var(--pb-bg); }
 .block-container { padding-top: 1.4rem; max-width: 1450px; }
-[data-testid="stSidebar"] { background:#111; color:#fff; }
-[data-testid="stSidebar"] * { color:#fff; }
-[data-testid="stSidebar"] select, [data-testid="stSidebar"] option, [data-testid="stSidebar"] input { color:#111 !important; }
+[data-testid="stSidebar"] { background:#111; }
+[data-testid="stSidebar"] .stMarkdown,
+[data-testid="stSidebar"] .stMarkdown p,
+[data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3,
+[data-testid="stSidebar"] p,
+[data-testid="stSidebar"] caption,
+[data-testid="stSidebar"] [data-testid="stCaptionContainer"] {
+    color:#fff !important;
+}
+[data-testid="stSidebar"] [role="radiogroup"] {
+    background:#fff; border-radius:12px; padding:6px 8px; margin:4px 0;
+}
+[data-testid="stSidebar"] [role="radiogroup"] *,
+[data-testid="stSidebar"] [data-baseweb="select"],
+[data-testid="stSidebar"] [data-baseweb="select"] * {
+    color:#0f172a !important;
+    font-weight:650 !important;
+}
+[data-testid="stSidebar"] [data-baseweb="select"] > div {
+    background:#fff !important;
+    border:1.5px solid rgba(15,23,42,0.35) !important;
+    border-radius:10px !important;
+}
+[data-testid="stSidebar"] div[data-testid="stTextInput"] input,
+[data-testid="stSidebar"] div[data-testid="stNumberInput"] input,
+[data-testid="stSidebar"] div[data-testid="stTextArea"] textarea {
+    color:#0f172a !important;
+    background:#fff !important;
+    border:1.5px solid rgba(15,23,42,0.35) !important;
+    border-radius:10px !important;
+}
+[data-testid="stSidebar"] [role="radiogroup"] label:has(input:checked) {
+    background: rgba(15,23,42,0.08) !important;
+    border-radius:8px !important;
+}
+[data-testid="stSidebar"] [role="listbox"],
+[data-testid="stSidebar"] [data-baseweb="popover"],
+[data-testid="stSidebar"] [data-baseweb="popover"] * {
+    color:#0f172a !important;
+}
 .side-logo { background:#fff; border-radius:16px; padding:12px; margin: 8px 0 18px 0; text-align:center; }
 .side-logo img { max-width: 100%; max-height: 95px; object-fit:contain; }
 .pb-card { background:rgba(255,255,255,.93); border:1px solid var(--pb-line); border-radius:18px; padding:18px; margin:10px 0; box-shadow:0 8px 24px rgba(0,0,0,.04); }

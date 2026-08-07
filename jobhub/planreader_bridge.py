@@ -66,9 +66,13 @@ def connection_status() -> str:
 
 # ----------------------------------------------------------------- db helpers
 def _adapt_for_postgres(sql: str) -> str:
+    # Escape literal % (e.g. LIKE '%soffit%') to %% BEFORE converting ? -> %s.
+    # Escaping with a lookahead after the conversion leaves a literal % followed
+    # by "s" as a single %s, which psycopg2 mistakes for a placeholder and
+    # crashes with "IndexError: tuple index out of range".
     sql = sql.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY")
+    sql = sql.replace("%", "%%")
     sql = sql.replace("?", "%s")
-    sql = re.sub(r"%(?!s)", "%%", sql)
     return sql
 
 

@@ -1448,13 +1448,16 @@ def adapt_sql_for_postgres(sql):
         else:
             s = re.sub(r"INSERT\s+OR\s+REPLACE\s+INTO", "INSERT INTO", s, flags=re.IGNORECASE)
 
+    # Psycopg2 uses % for parameter formatting. Any literal % in SQL, such as
+    # a column alias "Rate + 10%" or a LIKE '%soffit%' pattern, must be escaped
+    # as %% BEFORE the ? -> %s conversion. Escaping after the conversion with a
+    # lookahead leaves a literal % followed by "s" (e.g. the first % of
+    # '%soffit%') as a single %s, which psycopg2 mistakes for a placeholder and
+    # crashes with "IndexError: tuple index out of range".
+    s = s.replace("%", "%%")
+
     # SQLite placeholders ? -> psycopg2 placeholders %s.
     s = s.replace("?", "%s")
-
-    # Psycopg2 uses % for parameter formatting. Any literal % in SQL, such as
-    # a column alias "Rate + 10%", must be escaped as %% or psycopg2 can crash
-    # with "IndexError: tuple index out of range".
-    s = re.sub(r"%(?!s)", "%%", s)
 
     return s
 

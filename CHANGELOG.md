@@ -1,5 +1,19 @@
 # JobHub secured release
 
+## 2026-08-07 - PlanReader sidebar readability + Postgres LIKE percent fix
+
+- **PlanReader sidebar fixed**: the old CSS forced every sidebar element white
+  (`[data-testid="stSidebar"] * { color:#fff }`), which left Streamlit 1.59's
+  custom radio/selectbox widgets unreadable on their light backgrounds. The new
+  CSS whites only headings/captions/labels and gives widgets a white
+  background with dark, bold text (radio groups, selectboxes, text inputs).
+- **Postgres `IndexError: tuple index out of range` fixed**: `adapt_sql_for_postgres`
+  escaped literal `%` with a `(?!s)` lookahead, so a LIKE pattern such as
+  `'%soffit%'` kept a lone `%s` that psycopg2 treated as a placeholder. Literal
+  `%` is now escaped to `%%` *before* the `?` -> `%s` conversion in
+  `pb_jobhub_app.py`, `jobhub/database.py` and `jobhub/planreader_bridge.py`.
+  Added regression tests for both adapters.
+
 ## 2026-08-07 - Job Folder bulk schedule removal
 
 - The Job Folder **Staff Schedule** editor now lets managers/admins select
