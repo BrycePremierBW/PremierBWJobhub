@@ -6,8 +6,9 @@ whole Streamlit app frozen or fail permanently on the first refused socket.
 
 This guard wraps pool factories before they are first used, adds conservative
 connection keepalives/timeouts, retries only unmistakable transient connection
-failures, and configures each physical connection once with server-side query
-and lock timeouts. SQL/programming errors are never retried or hidden.
+failures, validates reused pooled connections, and configures each physical
+connection once with server-side query and lock timeouts. SQL/programming errors
+are never retried or hidden.
 """
 
 from __future__ import annotations
@@ -83,7 +84,7 @@ def _is_transient_connection_failure(exc: BaseException) -> bool:
 
 
 class _TimeoutPoolProxy:
-    """Delegate to a psycopg2 pool while configuring each connection once."""
+    """Delegate to a psycopg2 pool while keeping pooled sockets healthy."""
 
     def __init__(self, pool: Any):
         self._pool = pool
@@ -91,11 +92,31 @@ class _TimeoutPoolProxy:
         self._configuration_lock = threading.Lock()
         setattr(self, POOL_PROXY_MARKER, True)
 
-    def _configure(self, connection: Any) -> None:
+    def _forget_connection(self, connection: Any) -> None:
+        with self._configuration_lock:
+            self._configured_connection_ids.discard(id(connection))
+
+    def _discard_connection(self, connection: Any) -> None:
+        """Remove a failed physical connection so the pool must replace it."""
+        self._forget_connection(connection)
+        try:
+            connection.rollback()
+        except Exception:
+            pass
+        try:
+            self._pool.putconn(connection, close=True)
+        except Exception:
+            try:
+                connection.close()
+            except Exception:
+                pass
+
+    def _configure(self, connection: Any) -> bool:
+        """Configure a new physical connection; return True when configured now."""
         connection_id = id(connection)
         with self._configuration_lock:
             if connection_id in self._configured_connection_ids:
-                return
+                return False
 
         cursor = None
         try:
@@ -111,10 +132,6 @@ class _TimeoutPoolProxy:
                 connection.rollback()
             except Exception:
                 pass
-            try:
-                self._pool.putconn(connection, close=True)
-            except Exception:
-                pass
             raise
         finally:
             if cursor is not None:
@@ -125,19 +142,72 @@ class _TimeoutPoolProxy:
 
         with self._configuration_lock:
             self._configured_connection_ids.add(connection_id)
+        return True
+
+    def _probe_reused_connection(self, connection: Any) -> None:
+        """Validate an already-configured pooled socket before handing it out."""
+        if bool(getattr(connection, "closed", False)):
+            raise RuntimeError("connection already closed")
+
+        cursor = None
+        try:
+            cursor = connection.cursor()
+            cursor.execute("SELECT 1")
+            # Leave the pooled connection transaction-free before real work.
+            connection.rollback()
+        except Exception:
+            try:
+                connection.rollback()
+            except Exception:
+                pass
+            raise
+        finally:
+            if cursor is not None:
+                try:
+                    cursor.close()
+                except Exception:
+                    pass
 
     def getconn(self, *args: Any, **kwargs: Any) -> Any:
-        connection = self._pool.getconn(*args, **kwargs)
-        self._configure(connection)
-        return connection
+        """Return a live pooled connection, replacing stale sockets if needed."""
+        last_error: BaseException | None = None
+        for attempt, delay in enumerate(POOL_CONNECT_RETRY_DELAYS, start=1):
+            if delay > 0:
+                time.sleep(delay)
+
+            connection = None
+            try:
+                connection = self._pool.getconn(*args, **kwargs)
+                configured_now = self._configure(connection)
+                if not configured_now:
+                    self._probe_reused_connection(connection)
+                return connection
+            except Exception as exc:
+                last_error = exc
+                if connection is not None:
+                    self._discard_connection(connection)
+                if not _is_transient_connection_failure(exc):
+                    raise
+                if attempt >= len(POOL_CONNECT_RETRY_DELAYS):
+                    raise
+                # Do not log the exception text: it can contain connection
+                # details. The attempt count is sufficient for Render logs.
+                print(
+                    "JobHub PostgreSQL pooled connection unavailable; retrying "
+                    f"({attempt}/{len(POOL_CONNECT_RETRY_DELAYS)}) "
+                    f"after {POOL_CONNECT_RETRY_DELAYS[attempt]:g}s."
+                )
+
+        if last_error is not None:  # pragma: no cover - loop returns/raises
+            raise last_error
+        raise RuntimeError("PostgreSQL pooled connection retry loop ended unexpectedly.")
 
     def putconn(self, connection: Any, *args: Any, **kwargs: Any) -> Any:
         close_requested = bool(kwargs.get("close", False))
         if len(args) >= 2:
             close_requested = close_requested or bool(args[1])
         if close_requested or bool(getattr(connection, "closed", False)):
-            with self._configuration_lock:
-                self._configured_connection_ids.discard(id(connection))
+            self._forget_connection(connection)
         return self._pool.putconn(connection, *args, **kwargs)
 
     def closeall(self) -> Any:
