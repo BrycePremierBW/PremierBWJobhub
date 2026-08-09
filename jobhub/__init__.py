@@ -26,6 +26,7 @@ from .setup_crew_leader_guard import install_setup_crew_leader_guard
 from .setup_defaults_guard import install_setup_defaults_guard
 from .setup_defaults_route_guard import install_setup_defaults_route_guard
 from .setup_scheduler_crew_bridge_guard import install_setup_scheduler_crew_bridge_guard
+from .setup_scheduler_startup_resilience_guard import install_setup_scheduler_startup_resilience_guard
 from .sidebar_readability_guard import install_sidebar_readability_guard
 from .stage_dwelling_builder_guard import install_stage_dwelling_builder_guard
 from .stage_preset_guard import install_stage_preset_guard
@@ -80,6 +81,11 @@ install_system_health_guard()
 install_integration_health_guard()
 install_setup_defaults_guard()
 install_setup_crew_leader_guard()
+# The crew bridge performs a compatibility schema check during installation.
+# Make only transient PostgreSQL connection failures fail-soft so a Render DB
+# restart cannot crash all of JobHub during package import. The schema check is
+# retried automatically when the bridge next needs it.
+install_setup_scheduler_startup_resilience_guard()
 install_setup_scheduler_crew_bridge_guard()
 
 # Keep compatibility and storage helpers in their tested order. The legacy PO
