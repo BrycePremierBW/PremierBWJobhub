@@ -18,7 +18,7 @@ jobs:
           python-version: "3.12"
           cache: pip
       - name: Install dependencies
-        run: pip install -r requirements.txt pytest
+        run: pip install -r requirements.txt pytest sqlglot
       - name: Compile application modules
         run: >-
           python -m compileall -q
