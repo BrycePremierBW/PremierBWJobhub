@@ -35,6 +35,7 @@ from .stage_preset_visibility_guard import install_stage_preset_visibility_guard
 from .stage_scope_refresh_guard import install_stage_scope_refresh_guard
 from .stage_selection_guard import install_stage_selection_guard
 from .stage_setup_simplifier_guard import install_stage_setup_simplifier_guard
+from .startup_database_resilience_guard import install_startup_database_resilience_guard
 from .swms_attach_fallback_guard import install_swms_attach_fallback_guard
 from .swms_guard import install_swms_guard
 from .swms_signature_index_guard import install_swms_signature_index_guard
@@ -62,6 +63,10 @@ install_po_upload_guard = _retired_po_upload_route_guard
 install_push_configuration_guard()
 install_session_keepalive_guard()
 install_database_timeout_guard()
+# The main app later decorates its idempotent startup bootstrap with
+# st.cache_resource. Wrap only that named bootstrap so a brief database outage
+# restarts the whole schema/seed sequence instead of ending the Streamlit run.
+install_startup_database_resilience_guard()
 install_runtime_performance_guard()
 install_notification_freeze_guard()
 install_page_render_freeze_guard()
