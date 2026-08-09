@@ -2905,6 +2905,20 @@ def apply_schema_migrations():
                 (document_viewer_migration_id, now),
             )
 
+        file_data_migration_id = "20260809_job_document_file_data_v1"
+        if file_data_migration_id not in applied:
+            _migration_ensure_column(
+                cur,
+                "job_documents",
+                "file_data",
+                "BYTEA" if USE_POSTGRES else "BLOB",
+            )
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            cur.execute(
+                "INSERT INTO schema_migrations (migration_id, applied_at) VALUES (?, ?)",
+                (file_data_migration_id, now),
+            )
+
         conn.commit()
         return True
     except Exception:
@@ -2915,6 +2929,45 @@ def apply_schema_migrations():
         raise
     finally:
         conn.close()
+
+
+def backfill_job_document_file_data():
+    """Store file bytes in job_documents.file_data for any row that is missing
+    them. This covers documents uploaded before the blob column existed and any
+    insert path that bypasses attach_document_to_job. Idempotent: only rows with
+    NULL file_data are processed, and only when the file still exists on disk."""
+    try:
+        conn = connect()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id, file_path FROM job_documents WHERE file_data IS NULL ORDER BY id"
+        )
+        rows = cur.fetchall()
+        updated = 0
+        for doc_id, file_path in rows:
+            try:
+                if file_path and os.path.isfile(file_path):
+                    with open(file_path, "rb") as fh:
+                        data = fh.read()
+                    cur.execute(
+                        "UPDATE job_documents SET file_data=? WHERE id=?",
+                        (data, doc_id),
+                    )
+                    updated += 1
+            except Exception:
+                continue
+        conn.commit()
+        conn.close()
+        if updated:
+            print(
+                f"JobHub document file-data backfill: {updated} row(s) updated",
+                flush=True,
+            )
+    except Exception:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 def df_query(sql, params=()):
@@ -4954,10 +5007,11 @@ def fill_pdf_template(template_path, output_path, field_values):
 
 def attach_document_to_job(job_id, document_type, file_path, notes="Generated from JobHub", mime_type=""):
     resolved_mime = str(mime_type or mimetypes.guess_type(str(file_path))[0] or "application/octet-stream")
+    file_data = _read_document_bytes(file_path)
     execute("""
         INSERT INTO job_documents
-        (job_id, document_type, file_name, file_path, created_at, notes, mime_type)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        (job_id, document_type, file_name, file_path, created_at, notes, mime_type, file_data)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         job_id,
         document_type,
@@ -4966,7 +5020,20 @@ def attach_document_to_job(job_id, document_type, file_path, notes="Generated fr
         datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         notes,
         resolved_mime,
+        file_data,
     ))
+
+
+def _read_document_bytes(file_path):
+    """Return the file bytes for storage in job_documents.file_data so that
+    external apps (PlanReader) can import linked files without disk access."""
+    try:
+        if file_path and os.path.isfile(file_path):
+            with open(file_path, "rb") as fh:
+                return fh.read()
+    except Exception:
+        pass
+    return None
 
 
 JOB_DOCUMENT_VIEWER_SCOPE_OPTIONS = {
@@ -21965,6 +22032,7 @@ def initialise_jobhub_runtime(database_url, data_dir):
     """
     init_db()
     apply_schema_migrations()
+    backfill_job_document_file_data()
     ensure_enterprise_schema(connect)
     ensure_v2_schema(connect)
     ensure_v4_schema(connect)
