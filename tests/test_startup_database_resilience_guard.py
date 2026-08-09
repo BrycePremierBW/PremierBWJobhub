@@ -160,7 +160,8 @@ class StartupDatabaseResilienceGuardTests(unittest.TestCase):
         self.assertFalse(
             getattr(some_other_cached_resource.function, MODULE.WRAP_MARKER, False)
         )
-        self.assertIs(guarded.clear, original.clear)
+        guarded.clear()
+        self.assertEqual(original.global_clear_calls, 1)
 
     def test_database_cache_clear_targets_main_and_scheduler_pool_factories(self):
         fake_module_name = "pb_startup_guard_fake_module"
