@@ -19,7 +19,7 @@ from urllib.parse import urlparse
 
 PASSWORD_SCHEME = "pbkdf2_sha256"
 PBKDF2_ITERATIONS = 600_000
-MIN_PASSWORD_LENGTH = 6
+MIN_PASSWORD_LENGTH = 15
 MONEY_PLACES = Decimal("0.01")
 
 _KNOWN_DEFAULT_PASSWORDS = ("admin123", "manager123", "changeme123")

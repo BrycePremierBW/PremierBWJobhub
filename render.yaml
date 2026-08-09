@@ -10,10 +10,10 @@ services:
     disk:
       name: jobhub-data
       mountPath: /var/data
-      sizeGB: 1
+      sizeGB: 5
     envVars:
       - key: PYTHON_VERSION
-        value: 3.12.4
+        value: 3.13.5
       - key: DATA_DIR
         value: /var/data
       - key: DATABASE_URL

@@ -1,9 +1,9 @@
 """Add secret-safe deployment integration checks to JobHub System Health.
 
-The base System Health page verifies the database, storage, backups and core
-data. This guard extends the same report with configuration readiness for the
-optional services that cannot be exercised by repository tests: web push,
-public URLs, email delivery, offline sync and external AI.
+The base System Health page verifies the database, storage, archives, recovery
+readiness and core data. This guard extends the same report with configuration
+readiness for optional services that cannot be exercised by repository tests:
+web push, public URLs, email delivery, offline sync and external AI.
 
 Only configured/not-configured state is reported. Secret values are never
 included in the report or rendered to the page.
@@ -15,7 +15,7 @@ import functools
 import os
 from typing import Any
 
-from . import system_health_guard
+from . import system_health_v2_guard as system_health_guard
 
 
 PATCH_MARKER = "_pb_integration_health_guard"
@@ -52,7 +52,9 @@ def integration_health_report() -> tuple[list[dict[str, str]], dict[str, Any]]:
             _check(
                 "Production database configuration",
                 "Healthy" if database_url else "Critical",
-                "DATABASE_URL is configured." if database_url else "PostgreSQL is selected but DATABASE_URL is missing.",
+                "DATABASE_URL is configured."
+                if database_url
+                else "PostgreSQL is selected but DATABASE_URL is missing.",
             )
         )
     else:
@@ -65,7 +67,12 @@ def integration_health_report() -> tuple[list[dict[str, str]], dict[str, Any]]:
         )
     metrics["Database URL configured"] = "Yes" if database_url else "No"
 
-    public_url = _configured_any("JOBHUB_PUBLIC_URL", "RENDER_EXTERNAL_URL", "RENDER_SERVICE_URL", "RENDER_EXTERNAL_HOSTNAME")
+    public_url = _configured_any(
+        "JOBHUB_PUBLIC_URL",
+        "RENDER_EXTERNAL_URL",
+        "RENDER_SERVICE_URL",
+        "RENDER_EXTERNAL_HOSTNAME",
+    )
     checks.append(
         _check(
             "Public JobHub URL",
@@ -77,7 +84,9 @@ def integration_health_report() -> tuple[list[dict[str, str]], dict[str, Any]]:
     )
     metrics["Public URL configured"] = "Yes" if public_url else "No"
 
-    one_signal_app = _configured_any("ONESIGNAL_APP_ID", "ONE_SIGNAL_APP_ID", "ONESIGNAL_WEB_APP_ID")
+    one_signal_app = _configured_any(
+        "ONESIGNAL_APP_ID", "ONE_SIGNAL_APP_ID", "ONESIGNAL_WEB_APP_ID"
+    )
     one_signal_key = _configured_any(
         "ONESIGNAL_REST_API_KEY",
         "ONESIGNAL_API_KEY",
@@ -166,7 +175,9 @@ def _recalculate_status(report: dict[str, Any]) -> dict[str, Any]:
         status: sum(1 for row in checks if row.get("Status") == status)
         for status in ("Healthy", "Warning", "Critical", "Info")
     }
-    overall = "Critical" if status_counts["Critical"] else ("Warning" if status_counts["Warning"] else "Healthy")
+    overall = "Critical" if status_counts["Critical"] else (
+        "Warning" if status_counts["Warning"] else "Healthy"
+    )
     report["checks"] = checks
     report["status_counts"] = status_counts
     report["overall_status"] = overall

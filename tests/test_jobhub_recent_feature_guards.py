@@ -96,9 +96,9 @@ class RecentFeatureGuardSmokeTests(unittest.TestCase):
         for marker in required:
             self.assertIn(marker, source)
 
-    def test_password_policy_is_six_characters_without_symbol_or_number(self):
+    def test_password_policy_requires_fifteen_characters_without_symbol_or_number_rules(self):
         source = read("jobhub_core.py")
-        self.assertIn("MIN_PASSWORD_LENGTH = 6", source)
+        self.assertIn("MIN_PASSWORD_LENGTH = 15", source)
         self.assertNotIn('"Include a number."', source)
         self.assertNotIn('"Include a symbol."', source)
         self.assertNotIn('re.search(r"\\d"', source)
