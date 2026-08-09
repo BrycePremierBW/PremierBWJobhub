@@ -32,5 +32,3 @@ services:
         sync: false
       - key: JOBHUB_PUBLIC_URL
         sync: false
-      - key: JOBHUB_POSTGRES_RESTORE_VERIFIED_AT
-        sync: false
