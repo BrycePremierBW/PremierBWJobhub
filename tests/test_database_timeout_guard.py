@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -81,6 +82,44 @@ class DatabaseTimeoutGuardTests(unittest.TestCase):
         self.assertEqual(captured["keepalives_idle"], 10)
         self.assertEqual(captured["keepalives_interval"], 5)
         self.assertEqual(captured["keepalives_count"], 2)
+
+    def test_factory_retries_connection_refused_then_recovers(self):
+        calls = {"count": 0}
+        pool = FakePool()
+
+        def factory(*args, **kwargs):
+            calls["count"] += 1
+            if calls["count"] < 3:
+                raise RuntimeError("connection refused while opening PostgreSQL")
+            return pool
+
+        with patch.object(MODULE, "POOL_CONNECT_RETRY_DELAYS", (0.0, 0.0, 0.0)):
+            guarded = MODULE._guard_pool_factory(factory)
+            result = guarded(minconn=1, maxconn=8, dsn="postgresql://example")
+
+        self.assertTrue(getattr(result, MODULE.POOL_PROXY_MARKER, False))
+        self.assertEqual(calls["count"], 3)
+
+    def test_factory_does_not_retry_sql_programming_failure(self):
+        calls = {"count": 0}
+
+        def factory(*args, **kwargs):
+            calls["count"] += 1
+            raise RuntimeError("syntax error at or near CREATE")
+
+        with patch.object(MODULE, "POOL_CONNECT_RETRY_DELAYS", (0.0, 0.0, 0.0)):
+            guarded = MODULE._guard_pool_factory(factory)
+            with self.assertRaisesRegex(RuntimeError, "syntax error"):
+                guarded(minconn=1, maxconn=8, dsn="postgresql://example")
+
+        self.assertEqual(calls["count"], 1)
+
+    def test_authentication_failure_is_not_classified_by_message_fallback(self):
+        self.assertFalse(
+            MODULE._is_transient_connection_failure(
+                RuntimeError("password authentication failed for user postgres")
+            )
+        )
 
     def test_connection_is_configured_once_with_server_side_limits(self):
         connection = FakeConnection()
