@@ -1,11 +1,13 @@
-"""Bound database waits so a slow query cannot freeze the whole JobHub page.
+"""Bound database waits and survive short PostgreSQL availability gaps.
 
 JobHub and the embedded scheduler create PostgreSQL pools during application
-startup.  A database lock, stale socket or unexpectedly expensive query could
-previously leave Streamlit waiting without a useful error.  This guard wraps the
-pool factories before they are first used, adds conservative connection
-keepalives, and configures each physical connection once with server-side query
-and lock timeouts.
+startup. A database restart, stale socket, lock or slow query must not leave the
+whole Streamlit app frozen or fail permanently on the first refused socket.
+
+This guard wraps pool factories before they are first used, adds conservative
+connection keepalives/timeouts, retries only unmistakable transient connection
+failures, and configures each physical connection once with server-side query
+and lock timeouts. SQL/programming errors are never retried or hidden.
 """
 
 from __future__ import annotations
@@ -13,6 +15,7 @@ from __future__ import annotations
 import functools
 import sys
 import threading
+import time
 from typing import Any, Callable
 
 
@@ -22,6 +25,61 @@ CONNECT_TIMEOUT_SECONDS = 8
 STATEMENT_TIMEOUT = "12s"
 LOCK_TIMEOUT = "3s"
 IDLE_TRANSACTION_TIMEOUT = "30s"
+# Connection-refused failures usually return immediately. These short retries
+# bridge a Render Postgres restart without making a real configuration error
+# hang for minutes. A connect timeout still bounds each individual attempt.
+POOL_CONNECT_RETRY_DELAYS = (0.0, 1.0, 2.0, 4.0, 7.0)
+
+
+_TRANSIENT_CONNECTION_MARKERS = (
+    "connection refused",
+    "could not connect to server",
+    "connection timed out",
+    "connection timeout",
+    "server closed the connection unexpectedly",
+    "connection already closed",
+    "network is unreachable",
+    "name or service not known",
+    "temporary failure in name resolution",
+    "could not translate host name",
+    "ssl connection has been closed unexpectedly",
+    "terminating connection due to administrator command",
+    "the database system is starting up",
+    "the database system is shutting down",
+    "cannot connect now",
+)
+
+
+def _is_transient_connection_failure(exc: BaseException) -> bool:
+    """Identify only connection/availability failures worth retrying.
+
+    Keep this deliberately narrow: syntax errors, auth failures and schema
+    failures must surface immediately instead of being disguised as downtime.
+    """
+    exc_type = type(exc)
+    module_name = str(getattr(exc_type, "__module__", "") or "").lower()
+    class_name = str(getattr(exc_type, "__name__", "") or "").lower()
+    if module_name.startswith("psycopg2") and class_name in {
+        "operationalerror",
+        "interfaceerror",
+    }:
+        text = str(exc or "").strip().lower()
+        # psycopg2 OperationalError can also represent bad credentials. Do not
+        # retry authentication/authorization failures.
+        auth_markers = (
+            "password authentication failed",
+            "no password supplied",
+            "authentication failed",
+            "permission denied",
+            "role does not exist",
+            "database does not exist",
+        )
+        if any(marker in text for marker in auth_markers):
+            return False
+        return True
+
+    text = str(exc or "").strip().lower()
+    return any(marker in text for marker in _TRANSIENT_CONNECTION_MARKERS)
 
 
 class _TimeoutPoolProxy:
@@ -91,6 +149,35 @@ class _TimeoutPoolProxy:
         return getattr(self._pool, name)
 
 
+def _create_pool_with_retry(
+    factory: Callable[..., Any],
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+) -> Any:
+    last_error: BaseException | None = None
+    for attempt, delay in enumerate(POOL_CONNECT_RETRY_DELAYS, start=1):
+        if delay > 0:
+            time.sleep(delay)
+        try:
+            return factory(*args, **kwargs)
+        except Exception as exc:
+            last_error = exc
+            if not _is_transient_connection_failure(exc):
+                raise
+            if attempt >= len(POOL_CONNECT_RETRY_DELAYS):
+                raise
+            # Do not print the DSN or exception text: DATABASE_URL can contain
+            # credentials. Render logs only need the attempt number/type.
+            print(
+                "JobHub PostgreSQL pool unavailable; retrying "
+                f"({attempt}/{len(POOL_CONNECT_RETRY_DELAYS)}) "
+                f"after {POOL_CONNECT_RETRY_DELAYS[attempt]:g}s."
+            )
+    if last_error is not None:  # pragma: no cover - loop always returns/raises
+        raise last_error
+    raise RuntimeError("PostgreSQL pool retry loop ended unexpectedly.")
+
+
 def _guard_pool_factory(factory: Callable[..., Any]) -> Callable[..., Any]:
     if getattr(factory, PATCH_MARKER, False):
         return factory
@@ -102,7 +189,7 @@ def _guard_pool_factory(factory: Callable[..., Any]) -> Callable[..., Any]:
         kwargs.setdefault("keepalives_idle", 10)
         kwargs.setdefault("keepalives_interval", 5)
         kwargs.setdefault("keepalives_count", 2)
-        pool = factory(*args, **kwargs)
+        pool = _create_pool_with_retry(factory, args, kwargs)
         if getattr(pool, POOL_PROXY_MARKER, False):
             return pool
         return _TimeoutPoolProxy(pool)
