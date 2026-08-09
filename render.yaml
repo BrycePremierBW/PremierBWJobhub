@@ -10,10 +10,10 @@ services:
     disk:
       name: jobhub-data
       mountPath: /var/data
-      sizeGB: 1
+      sizeGB: 5
     envVars:
       - key: PYTHON_VERSION
-        value: 3.12.4
+        value: 3.13.5
       - key: DATA_DIR
         value: /var/data
       - key: DATABASE_URL
@@ -31,4 +31,6 @@ services:
       - key: ONESIGNAL_REST_API_KEY
         sync: false
       - key: JOBHUB_PUBLIC_URL
+        sync: false
+      - key: JOBHUB_POSTGRES_RESTORE_VERIFIED_AT
         sync: false
