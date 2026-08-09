@@ -33,6 +33,7 @@ class PasswordTests(unittest.TestCase):
         legacy_default = hashlib.sha256(b"admin123").hexdigest()
         self.assertTrue(is_known_default_password_hash(legacy_default))
         self.assertTrue(password_strength_errors("admin123", "admin"))
+        self.assertTrue(password_strength_errors("Short!Pass12", "admin"))
         self.assertFalse(password_strength_errors("Long!UniquePass42", "admin"))
 
 
