@@ -17,14 +17,15 @@ SPEC.loader.exec_module(MODULE)
 
 
 class FakeCursor:
-    def __init__(self, fail=False):
+    def __init__(self, fail=False, error_message="configuration failed"):
         self.fail = fail
+        self.error_message = error_message
         self.statements = []
         self.closed = False
 
     def execute(self, statement):
         if self.fail:
-            raise RuntimeError("configuration failed")
+            raise RuntimeError(self.error_message)
         self.statements.append(statement)
 
     def close(self):
@@ -32,8 +33,8 @@ class FakeCursor:
 
 
 class FakeConnection:
-    def __init__(self, fail=False):
-        self.cursor_instance = FakeCursor(fail=fail)
+    def __init__(self, fail=False, error_message="configuration failed"):
+        self.cursor_instance = FakeCursor(fail=fail, error_message=error_message)
         self.commits = 0
         self.rollbacks = 0
         self.closed = False
@@ -46,6 +47,9 @@ class FakeConnection:
 
     def rollback(self):
         self.rollbacks += 1
+
+    def close(self):
+        self.closed = True
 
 
 class FakePool:
@@ -62,6 +66,17 @@ class FakePool:
 
     def closeall(self):
         self.closed_all = True
+
+
+class SequencePool(FakePool):
+    def __init__(self, connections):
+        super().__init__(connections[0])
+        self.connections = list(connections)
+
+    def getconn(self, *args, **kwargs):
+        if not self.connections:
+            raise RuntimeError("pool exhausted")
+        return self.connections.pop(0)
 
 
 class DatabaseTimeoutGuardTests(unittest.TestCase):
@@ -121,7 +136,7 @@ class DatabaseTimeoutGuardTests(unittest.TestCase):
             )
         )
 
-    def test_connection_is_configured_once_with_server_side_limits(self):
+    def test_connection_is_configured_once_and_reused_connection_is_probed(self):
         connection = FakeConnection()
         proxy = MODULE._TimeoutPoolProxy(FakePool(connection))
 
@@ -129,6 +144,7 @@ class DatabaseTimeoutGuardTests(unittest.TestCase):
         self.assertIs(proxy.getconn(), connection)
 
         self.assertEqual(connection.commits, 1)
+        self.assertEqual(connection.rollbacks, 1)
         self.assertEqual(
             connection.cursor_instance.statements,
             [
@@ -138,9 +154,33 @@ class DatabaseTimeoutGuardTests(unittest.TestCase):
                     "SET idle_in_transaction_session_timeout = "
                     f"'{MODULE.IDLE_TRANSACTION_TIMEOUT}'"
                 ),
+                "SELECT 1",
             ],
         )
         self.assertTrue(connection.cursor_instance.closed)
+
+    def test_stale_reused_connection_is_discarded_and_replaced(self):
+        stale = FakeConnection(
+            fail=True,
+            error_message="connection refused while probing PostgreSQL",
+        )
+        fresh = FakeConnection()
+        pool = SequencePool([stale, fresh])
+        proxy = MODULE._TimeoutPoolProxy(pool)
+        # Simulate a physical connection that was configured before Render
+        # restarted PostgreSQL and is now a stale cached socket.
+        proxy._configured_connection_ids.add(id(stale))
+
+        with patch.object(MODULE, "POOL_CONNECT_RETRY_DELAYS", (0.0, 0.0)):
+            result = proxy.getconn()
+
+        self.assertIs(result, fresh)
+        self.assertEqual(len(pool.put_calls), 1)
+        self.assertIs(pool.put_calls[0][0], stale)
+        self.assertTrue(pool.put_calls[0][2].get("close"))
+        self.assertNotIn(id(stale), proxy._configured_connection_ids)
+        self.assertIn(id(fresh), proxy._configured_connection_ids)
+        self.assertEqual(fresh.commits, 1)
 
     def test_failed_configuration_discards_the_connection(self):
         connection = FakeConnection(fail=True)
@@ -150,7 +190,7 @@ class DatabaseTimeoutGuardTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             proxy.getconn()
 
-        self.assertEqual(connection.rollbacks, 1)
+        self.assertGreaterEqual(connection.rollbacks, 1)
         self.assertEqual(len(pool.put_calls), 1)
         self.assertTrue(pool.put_calls[0][2].get("close"))
 
