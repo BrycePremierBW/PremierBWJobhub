@@ -40,7 +40,7 @@ from .swms_attach_fallback_guard import install_swms_attach_fallback_guard
 from .swms_guard import install_swms_guard
 from .swms_signature_index_guard import install_swms_signature_index_guard
 from .swms_visibility_guard import install_swms_visibility_guard
-from .system_health_guard import install_system_health_guard
+from .system_health_v2_guard import install_system_health_guard
 from .timesheet_area_guard import install_timesheet_area_guard
 
 
