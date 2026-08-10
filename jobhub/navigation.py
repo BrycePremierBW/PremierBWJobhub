@@ -37,6 +37,7 @@ def navigation_for_role(role):
         },
         "Site & Team": {
             "Timesheets": "Timesheets",
+            "Blip Attendance": "Blip Attendance",
             "Materials": "Material Costs",
             "Wages": "Wages",
             "Equipment": "Equipment",
