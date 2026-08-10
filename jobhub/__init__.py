@@ -2,6 +2,7 @@
 
 from .ai_menu_guard import install_ai_menu_guard
 from .bulk_delete_guard import install_bulk_delete_guard
+from .blip_integration_guard import install_blip_integration_guard
 from .database_timeout_guard import install_database_timeout_guard
 from .document_centre_guard import install_document_centre_guard
 from .document_centre_versioning_guard import install_document_centre_versioning_guard
@@ -83,6 +84,7 @@ install_po_job_switch_guard()
 install_setup_defaults_route_guard()
 install_document_centre_guard()
 install_document_centre_versioning_guard()
+install_blip_integration_guard()
 install_permission_policy_guard()
 install_system_health_guard()
 install_integration_health_guard()
