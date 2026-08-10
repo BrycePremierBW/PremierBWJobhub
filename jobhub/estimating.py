@@ -90,7 +90,7 @@ def estimate_working_sheet_page():
         with st.form("create_estimate_form"):
             col1, col2, col3 = st.columns(3)
             estimate_no = col1.text_input("Estimate No", value=f"{default_job_no}-EST-{next_rev:02d}")
-            estimate_date = col2.text_input("Estimate Date", value=str(date.today()))
+            estimate_date = col2.text_input("Estimate Date", value=str(jobhub_today()))
             revision = col3.text_input("Revision", value=f"Rev {next_rev}")
             notes = st.text_area("Initial Notes")
             created = st.form_submit_button("Create Estimate Working Sheet")
@@ -137,7 +137,7 @@ def estimate_working_sheet_page():
         with st.form("estimate_summary_form"):
             col1, col2, col3, col4 = st.columns(4)
             estimate_no = col1.text_input("Estimate No", value=str(current["estimate_no"] or ""))
-            estimate_date = col2.text_input("Estimate Date", value=str(current["estimate_date"] or str(date.today())))
+            estimate_date = col2.text_input("Estimate Date", value=str(current["estimate_date"] or str(jobhub_today())))
             revision = col3.text_input("Revision", value=str(current["revision"] or ""))
             statuses = ["Draft", "Sent", "Approved", "Lost", "Superseded"]
             current_status = str(current["status"] or "Draft")
@@ -1044,7 +1044,7 @@ def jc_business_days(start_value, end_value):
     return days
 
 def jc_add_business_days(start_date, days):
-    current = start_date or date.today()
+    current = start_date or jobhub_today()
     added = 0
     days = int(max(days, 0))
     while added < days:
@@ -1210,7 +1210,7 @@ def job_costs_forecasting_page():
         days_required = int((remaining_hours + daily_capacity - 0.001) // daily_capacity) if daily_capacity else 0
         if daily_capacity and remaining_hours % daily_capacity:
             days_required += 1
-        finish_date = jc_add_business_days(date.today(), days_required)
+        finish_date = jc_add_business_days(jobhub_today(), days_required)
 
         forecast_cost = jc_float(row["Total Actual Cost"]) + remaining_hours * labour_cost_hour
         forecast_profit = jc_float(row["Contract Value"]) - forecast_cost

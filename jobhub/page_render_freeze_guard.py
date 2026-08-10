@@ -26,6 +26,8 @@ import sys
 import time
 from typing import Any, Callable
 
+from jobhub_time import jobhub_today
+
 
 PATCH_MARKER = "_pb_page_render_freeze_guard"
 ORIGINAL_SYNC_ATTR = "_pb_original_sync"
@@ -53,7 +55,7 @@ def _unwrap(function: Callable[..., Any], attribute: str) -> Callable[..., Any]:
 def _daily_backup_exists(context: dict[str, Any]) -> bool:
     data_dir = Path(str(context.get("DATA_DIR") or "/var/data"))
     backup_dir = data_dir / "backups"
-    prefix = f"PB_JobHub_Daily_Data_{date.today().strftime('%Y%m%d')}"
+    prefix = f"PB_JobHub_Daily_Data_{jobhub_today().strftime('%Y%m%d')}"
     try:
         return any(path.name.startswith(prefix) for path in backup_dir.glob("*.zip"))
     except OSError:

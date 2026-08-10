@@ -313,7 +313,7 @@ def timesheet_entry_form(employee_id=None, employee_restricted=False, key_prefix
 
         if period_type == "Single Day":
             col1, col2, col3, col4 = st.columns(4)
-            work_day = col1.date_input("Date", value=date.today(), key=f"{key_prefix}_date")
+            work_day = col1.date_input("Date", value=jobhub_today(), key=f"{key_prefix}_date")
             start_time = col2.text_input("Start Time", value="07:00", key=f"{key_prefix}_start")
             finish_time = col3.text_input("Finish Time", value="15:00", key=f"{key_prefix}_finish")
             break_minutes = col4.number_input("Break Minutes", min_value=0.0, step=15.0, value=0.0, key=f"{key_prefix}_break")
@@ -324,7 +324,7 @@ def timesheet_entry_form(employee_id=None, employee_restricted=False, key_prefix
             period_end = str(work_day)
         else:
             col1, col2, col3 = st.columns(3)
-            default_week_end = date.today()
+            default_week_end = jobhub_today()
             default_week_start = default_week_end - timedelta(days=4)
             from_date = col1.date_input("From Date", value=default_week_start, key=f"{key_prefix}_from_date")
             week_ending = col2.date_input("Week Ending", value=default_week_end, key=f"{key_prefix}_week_ending")

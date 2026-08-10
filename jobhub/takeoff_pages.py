@@ -303,7 +303,7 @@ def painting_takeoff_generator_page(default_job_id=None):
                 current_status = str(p.get("status") or "Draft")
                 status_index = status_options.index(current_status) if current_status in status_options else 0
                 status = c1.selectbox("Status", status_options, index=status_index)
-                takeoff_date = c2.text_input("Take-off Date", value=str(p.get("takeoff_date") or str(date.today())))
+                takeoff_date = c2.text_input("Take-off Date", value=str(p.get("takeoff_date") or str(jobhub_today())))
                 assumptions = st.text_area("Assumptions / measurement notes", value=str(p.get("assumptions") or ""))
                 notes = st.text_area("Internal Notes", value=str(p.get("notes") or ""))
                 save_pkg = st.form_submit_button("Save Package Details")

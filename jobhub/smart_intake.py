@@ -21,6 +21,8 @@ from io import BytesIO
 from pathlib import PurePosixPath
 from typing import Any, Dict, List, Tuple
 
+from jobhub_time import jobhub_today
+
 import pandas as pd
 
 from jobhub.takeoff import (
@@ -970,7 +972,7 @@ def build_intake_zip_bytes(merged: Dict[str, Any]) -> Tuple[bytes, List[str]]:
         },
         "estimate": {
             "estimate_no": "",
-            "estimate_date": str(date.today()),
+            "estimate_date": str(jobhub_today()),
             "status": "Draft",
             "labour_hours": round(labour_hours, 2),
             "material_allowance": round(material_allowance, 2),
@@ -1065,7 +1067,7 @@ def parts_to_intake_package(
         "restrict_material_products_supplied": False,
         "allowed_material_suppliers": [],
         "estimate_no": "",
-        "estimate_date": str(date.today()),
+        "estimate_date": str(jobhub_today()),
         "estimate_status": "Draft",
         "labour_hours": round(labour_hours, 2),
         "labour_rate": INTAKE_LABOUR_RATE,

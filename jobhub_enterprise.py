@@ -735,7 +735,7 @@ def render_job_control(ctx: dict[str, Any]) -> None:
                 "Revised contract, less the strongest known material commitment and other "
                 "non-labour allowances, divided by $125 per painter-hour, less timesheet hours used."
             )
-            finish = st.date_input("Forecast completion date", value=date.today()).isoformat()
+            finish = st.date_input("Forecast completion date", value=jobhub_today()).isoformat()
             notes = st.text_area("Progress notes / recovery actions")
             submitted = st.form_submit_button("Save Progress Forecast", width="stretch")
         if submitted:
@@ -1018,8 +1018,8 @@ def render_procurement(ctx: dict[str, Any]) -> None:
             with st.form("enterprise_po_header"):
                 po_no = st.text_input("PO Number", value=_next_po_number(ctx, job_id))
                 c1, c2 = st.columns(2)
-                order_date = c1.date_input("Order date", value=date.today()).isoformat()
-                expected_date = c2.date_input("Required / expected date", value=date.today()).isoformat()
+                order_date = c1.date_input("Order date", value=jobhub_today()).isoformat()
+                expected_date = c2.date_input("Required / expected date", value=jobhub_today()).isoformat()
                 status_options = ["Requested", "Approved", "Ordered"] if _management(ctx) else ["Requested"]
                 status = st.selectbox("Initial status", status_options)
                 notes = st.text_area("Delivery instructions / notes")
@@ -1184,8 +1184,8 @@ def render_procurement(ctx: dict[str, Any]) -> None:
             with st.form("enterprise_invoice_header"):
                 invoice_no = st.text_input("Supplier invoice number")
                 d1, d2 = st.columns(2)
-                invoice_date = d1.date_input("Invoice date", value=date.today()).isoformat()
-                due_date = d2.date_input("Due date", value=date.today()).isoformat()
+                invoice_date = d1.date_input("Invoice date", value=jobhub_today()).isoformat()
+                due_date = d2.date_input("Due date", value=jobhub_today()).isoformat()
                 status = st.selectbox("Invoice status", ["Received", "Matched", "Approved", "Paid", "Disputed"])
                 uploaded = st.file_uploader("Supplier invoice PDF", type=["pdf"], key="enterprise_supplier_invoice_pdf")
                 notes = st.text_area("Invoice notes")
@@ -1944,7 +1944,7 @@ def create_backup(ctx: dict[str, Any], include_job_files: bool, backup_type: str
 
 def ensure_daily_backup(ctx: dict[str, Any]) -> None:
     """Create one lightweight database CSV backup per calendar day."""
-    today_prefix = f"PB_JobHub_Daily_Data_{date.today().strftime('%Y%m%d')}"
+    today_prefix = f"PB_JobHub_Daily_Data_{jobhub_today().strftime('%Y%m%d')}"
     backup_dir = Path(ctx["DATA_DIR"]) / "backups"
     backup_dir.mkdir(parents=True, exist_ok=True)
     if any(path.name.startswith(today_prefix) for path in backup_dir.glob("*.zip")):

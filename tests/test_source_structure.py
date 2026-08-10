@@ -128,6 +128,27 @@ class SourceStructureTests(unittest.TestCase):
         self.assertIn("value=jobhub_today() + timedelta(days=7)", control_centre)
         self.assertIn("return jobhub_today().isoformat()", enterprise)
 
+    def test_no_utc_today_anywhere_in_application_source(self):
+        # UTC date.today() can be a day behind Brisbane, so every app date
+        # default, filename and date maths must flow through jobhub_today().
+        offenders = []
+        for item in (
+            ROOT / "pb_jobhub_app.py",
+            ROOT / "pb_jobhub_visual_scheduler.py",
+            ROOT / "jobhub_core.py",
+            ROOT / "jobhub_feedback.py",
+            ROOT / "jobhub_enterprise.py",
+            ROOT / "jobhub",
+            ROOT / "jobhub_v2",
+            ROOT / "jobhub_v4",
+        ):
+            files = [p for p in item.rglob("*.py")] if item.is_dir() else [item]
+            for path in files:
+                for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                    if "date.today()" in line:
+                        offenders.append(f"{path.relative_to(ROOT)}:{i}")
+        self.assertEqual(offenders, [])
+
     def test_job_folder_uses_editable_schedule_and_weighted_progress(self):
         app_source = (ROOT / "pb_jobhub_app.py").read_text(encoding="utf-8")
         scheduler_source = (ROOT / "pb_jobhub_visual_scheduler.py").read_text(encoding="utf-8")

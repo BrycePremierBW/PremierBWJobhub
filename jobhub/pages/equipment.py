@@ -167,7 +167,7 @@ def render_equipment():
 
                 st.markdown("### Sign Out / Return Details")
                 col_a, col_b, col_c, col_d = st.columns(4)
-                date_out = col_a.text_input("Date Out", value=str(date.today()))
+                date_out = col_a.text_input("Date Out", value=str(jobhub_today()))
                 date_in = col_b.text_input("Date In")
                 taken_by = col_c.text_input("Taken By")
                 returned_by = col_d.text_input("Returned By")

@@ -14,6 +14,7 @@ import re
 import sys
 from typing import Any
 
+from jobhub_time import jobhub_today
 from .runtime import DATA_DIR, JOB_FILES_DIR
 
 
@@ -591,7 +592,7 @@ def render_document_centre_page() -> None:
     ).strip()
     document_date_value = c2.date_input(
         "Document date",
-        value=date.today(),
+        value=jobhub_today(),
         key="document_centre_document_date",
     )
     notes = st.text_area(

@@ -42,14 +42,14 @@ def render_wages():
 
                 if period_type == "Single Day":
                     col1, col2 = st.columns(2)
-                    work_day = col1.date_input("Date", value=date.today(), key="wage_single_date")
+                    work_day = col1.date_input("Date", value=jobhub_today(), key="wage_single_date")
                     hours = col2.number_input("Hours", min_value=0.0, step=0.5, key="wage_single_hours")
                     work_date = str(work_day)
                     period_start = str(work_day)
                     period_end = str(work_day)
                 else:
                     col1, col2, col3 = st.columns(3)
-                    default_week_end = date.today()
+                    default_week_end = jobhub_today()
                     default_week_start = default_week_end - timedelta(days=4)
                     from_date = col1.date_input("From Date", value=default_week_start, key="wage_week_from")
                     week_ending = col2.date_input("Week Ending", value=default_week_end, key="wage_week_ending")

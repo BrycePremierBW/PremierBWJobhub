@@ -1400,7 +1400,7 @@ def generate_variation_form_pdf(job_id, requested_by="", description="", reason=
     )
 
     created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    today_text = str(date.today())
+    today_text = str(jobhub_today())
 
     execute("""
         INSERT INTO job_variations

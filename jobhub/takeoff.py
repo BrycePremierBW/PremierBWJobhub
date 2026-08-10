@@ -183,7 +183,7 @@ def create_takeoff_package(job_id, method="Manual", source_documents="", assumpt
     """, (
         job_id,
         takeoff_no,
-        str(date.today()),
+        str(jobhub_today()),
         "Draft",
         source_documents,
         method,

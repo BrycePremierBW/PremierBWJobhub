@@ -1645,14 +1645,14 @@ def render_progress_billing_model(job_id, package_id=None, key_prefix="progress_
         elif summary["claim_available"] <= 0:
             st.error("There is no positive unbilled value available to claim.")
         else:
-            claim_no = f"PC-{date.today().strftime('%Y%m%d')}-{int(package_id)}"
+            claim_no = f"PC-{jobhub_today().strftime('%Y%m%d')}-{int(package_id)}"
             execute("""
                 INSERT INTO invoice_claims
                 (job_id, claim_no, description, amount_ex_gst, invoice_date, due_date, paid_date, status, notes, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 job_id, claim_no, claim_description, round(summary["claim_available"], 2),
-                str(date.today()), "", "", "Draft",
+                str(jobhub_today()), "", "", "Draft",
                 f"Generated from progress model package ID {package_id}. Review before sending.",
                 datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             ))

@@ -440,7 +440,7 @@ def _sync_approved_items_to_material_entries(cur, order_id, order, items):
                 product_id,
                 float(row["qty_required"] or 0),
                 float(row["qty_received"] or 0),
-                str(order.get("required_delivery_date") or date.today()),
+                str(order.get("required_delivery_date") or jobhub_today()),
                 str(row["supplier"] or order.get("supplier") or ""),
                 f"Approved material order {order.get('order_no')}. {str(row['notes'] or '')}".strip(),
                 str(row["product_code"] or ("CUSTOM" if is_custom else "")),
@@ -534,7 +534,7 @@ def render_employee_material_orders(job_id, employee_id, employee_name, requeste
     if editable_id is None:
         with st.form(f"employee_start_material_order_{job_id}"):
             c1, c2 = st.columns(2)
-            required_delivery = c1.date_input("Required delivery date", value=date.today() + timedelta(days=1))
+            required_delivery = c1.date_input("Required delivery date", value=jobhub_today() + timedelta(days=1))
             preferred_supplier = c2.text_input("Preferred supplier")
             request_notes = st.text_area("Order notes / site instructions")
             start_order = st.form_submit_button("Start Material Order")
@@ -560,11 +560,11 @@ def render_employee_material_orders(job_id, employee_id, employee_name, requeste
         with st.expander("Order details", expanded=True):
             with st.form(f"employee_material_order_header_{editable_id}"):
                 c1, c2 = st.columns(2)
-                current_delivery = str(order.get("required_delivery_date") or date.today())
+                current_delivery = str(order.get("required_delivery_date") or jobhub_today())
                 try:
                     delivery_value = date.fromisoformat(current_delivery[:10])
                 except Exception:
-                    delivery_value = date.today()
+                    delivery_value = jobhub_today()
                 required_delivery = c1.date_input("Required delivery date", value=delivery_value)
                 preferred_supplier = c2.text_input("Preferred supplier", value=str(order.get("supplier") or ""))
                 request_notes = st.text_area("Order notes / site instructions", value=str(order.get("employee_notes") or ""))

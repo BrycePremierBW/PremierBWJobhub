@@ -46,7 +46,7 @@ def render_dashboard():
               AND due_date IS NOT NULL
               AND due_date <> ''
               AND due_date < ?
-        """, (str(date.today()),))
+        """, (str(jobhub_today()),))
         overdue_claims = int(overdue_claims_df.iloc[0]["c"])
         overdue_value = float(overdue_claims_df.iloc[0]["total"] or 0)
     except Exception:

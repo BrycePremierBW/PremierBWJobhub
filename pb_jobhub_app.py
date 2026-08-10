@@ -6286,7 +6286,7 @@ def employee_portal():
                 c_qty1, c_qty2, c_qty3 = st.columns(3)
                 qty_required = c_qty1.number_input("Qty Required", min_value=0.0, step=1.0, key=f"employee_material_qty_required_{selected_job_id}")
                 qty_received = c_qty2.number_input("Qty Received / Loaded", min_value=0.0, step=1.0, key=f"employee_material_qty_received_{selected_job_id}")
-                date_ordered = c_qty3.text_input("Date", value=str(date.today()), key=f"employee_material_date_{selected_job_id}")
+                date_ordered = c_qty3.text_input("Date", value=str(jobhub_today()), key=f"employee_material_date_{selected_job_id}")
                 material_notes = st.text_area("Notes", key=f"employee_material_notes_{selected_job_id}")
                 save_material_request = st.form_submit_button("Save Material Request to Job Register")
 
@@ -7564,7 +7564,7 @@ def export_missed_timesheets_csv(lookback_days, export_dir):
     frame = frame.sort_values(["Work Date", "Employee", "Job No"]).reset_index(drop=True)
     target = Path(export_dir)
     target.mkdir(parents=True, exist_ok=True)
-    csv_path = target / f"missed_timesheets_{date.today().isoformat()}.csv"
+    csv_path = target / f"missed_timesheets_{jobhub_today().isoformat()}.csv"
     frame.to_csv(csv_path, index=False, encoding="utf-8-sig")
     return csv_path, frame
 
@@ -10180,7 +10180,7 @@ def estimating_rate_library_page():
             st.download_button(
                 "Export Current JobHub Rate Library",
                 data=export_df[export_columns].to_csv(index=False).encode("utf-8-sig"),
-                file_name=f"PB_JobHub_Rate_Library_Export_{date.today().isoformat()}.csv",
+                file_name=f"PB_JobHub_Rate_Library_Export_{jobhub_today().isoformat()}.csv",
                 mime="text/csv",
                 key="export_current_rate_library",
             )
@@ -10224,7 +10224,7 @@ def estimating_rate_library_page():
             )
             rate_basis = st.text_input("Rate Basis", value="Base substrate/item rate")
             notes = st.text_area("Included Scope / Notes")
-            effective_date = st.text_input("Effective Date", value=str(date.today()))
+            effective_date = st.text_input("Effective Date", value=str(jobhub_today()))
             active = st.checkbox("Active", value=True)
             save_rate = st.form_submit_button("Save / Update Rate")
             if save_rate:
@@ -11468,7 +11468,7 @@ def parse_takeoff_job_pack(uploaded_file):
         "restrict_material_products_supplied": restrict_supplied,
         "allowed_material_suppliers": allowed_suppliers,
         "estimate_no": _takeoff_text(_takeoff_value(estimate_manifest, "estimate_no", "estimate_number")),
-        "estimate_date": _takeoff_text(_takeoff_value(estimate_manifest, "estimate_date", "date"), str(date.today())),
+        "estimate_date": _takeoff_text(_takeoff_value(estimate_manifest, "estimate_date", "date"), str(jobhub_today())),
         "estimate_status": _takeoff_text(_takeoff_value(estimate_manifest, "status"), "Draft"),
         "labour_hours": total_labour_hours,
         "labour_rate": labour_rate,
@@ -11561,7 +11561,7 @@ def build_takeoff_job_pack_template():
         },
         "estimate": {
             "estimate_no": "PB00000-TO-01",
-            "estimate_date": str(date.today()),
+            "estimate_date": str(jobhub_today()),
             "revision": "1",
             "status": "Draft",
             "labour_hours": 0,
@@ -11935,7 +11935,7 @@ def import_takeoff_job_pack(
                 (
                     job_id,
                     estimate_no[:120],
-                    _takeoff_text(summary.get("estimate_date"), str(date.today()))[:30],
+                    _takeoff_text(summary.get("estimate_date"), str(jobhub_today()))[:30],
                     revision,
                     _takeoff_text(summary.get("estimate_status"), "Draft")[:30],
                     labour_hours,
@@ -12617,7 +12617,7 @@ def _takeoff_new_estimate_values(job_id, estimate_no, revision, summary, now):
     return (
         job_id,
         estimate_no,
-        _takeoff_text(summary.get("estimate_date"), str(date.today())),
+        _takeoff_text(summary.get("estimate_date"), str(jobhub_today())),
         revision,
         _takeoff_text(summary.get("estimate_status"), "Draft"),
         labour_hours,
@@ -14323,7 +14323,7 @@ def estimate_working_sheet_page():
         with st.form("create_estimate_form"):
             col1, col2, col3 = st.columns(3)
             estimate_no = col1.text_input("Estimate No", value=f"{default_job_no}-EST-{next_rev:02d}")
-            estimate_date = col2.text_input("Estimate Date", value=str(date.today()))
+            estimate_date = col2.text_input("Estimate Date", value=str(jobhub_today()))
             revision = col3.text_input("Revision", value=f"Rev {next_rev}")
             notes = st.text_area("Initial Notes")
             created = st.form_submit_button("Create Estimate Working Sheet")
@@ -14489,7 +14489,7 @@ def estimate_working_sheet_page():
             "Estimate No", value=str(current["estimate_no"] or ""), key=summary_keys["estimate_no"]
         )
         estimate_date = col2.text_input(
-            "Estimate Date", value=str(current["estimate_date"] or str(date.today())), key=summary_keys["estimate_date"]
+            "Estimate Date", value=str(current["estimate_date"] or str(jobhub_today())), key=summary_keys["estimate_date"]
         )
         revision = col3.text_input("Revision", value=str(current["revision"] or ""), key=summary_keys["revision"])
         statuses = ["Draft", "Sent", "Approved", "Lost", "Superseded"]
@@ -15650,7 +15650,7 @@ def jc_business_days(start_value, end_value):
 
 
 def jc_add_business_days(start_date, days):
-    current = start_date or date.today()
+    current = start_date or jobhub_today()
     added = 0
     days = int(max(days, 0))
     while added < days:
@@ -15838,7 +15838,7 @@ def job_costs_forecasting_page():
         days_required = int((remaining_hours + daily_capacity - 0.001) // daily_capacity) if daily_capacity else 0
         if daily_capacity and remaining_hours % daily_capacity:
             days_required += 1
-        finish_date = jc_add_business_days(date.today(), days_required)
+        finish_date = jc_add_business_days(jobhub_today(), days_required)
 
         forecast_cost = jc_float(row["Total Actual Cost"]) + remaining_hours * labour_cost_hour
         forecast_profit = jc_float(row["Contract Value"]) - forecast_cost
@@ -17511,7 +17511,7 @@ def pb_job_cost_frame():
     df["Unpaid Claimed"] = (df["Claimed Amount"] - df["Paid Amount"]).clip(lower=0)
 
     def health(row):
-        today = date.today()
+        today = jobhub_today()
         issues = []
         cost_pct = pb_float(row["Cost to Date %"])
         end = pb_date(row["End Date"])
@@ -17542,7 +17542,7 @@ def pb_job_cost_frame():
 def pb_control_daily_dashboard(df):
     st.subheader("Daily Dashboard")
 
-    today = date.today()
+    today = jobhub_today()
     week_end = today + timedelta(days=7)
 
     active = df[~df["Status"].astype(str).str.lower().isin(["complete", "completed", "closed", "archived"])]
@@ -17873,8 +17873,8 @@ def pb_control_variations():
             description = st.text_area("Description")
             reason = st.text_area("Reason")
             c4, c5, c6 = st.columns(3)
-            sent_date = c4.text_input("Sent Date", value=str(date.today()) if status in ["Sent", "Approved"] else "")
-            approved_date = c5.text_input("Approved Date", value=str(date.today()) if status == "Approved" else "")
+            sent_date = c4.text_input("Sent Date", value=str(jobhub_today()) if status in ["Sent", "Approved"] else "")
+            approved_date = c5.text_input("Approved Date", value=str(jobhub_today()) if status == "Approved" else "")
             approved_by = c6.text_input("Approved By")
             notes = st.text_area("Notes")
             submitted = st.form_submit_button("Save Variation")
@@ -17922,7 +17922,7 @@ def pb_control_invoice_claims():
             status = c3.selectbox("Status", ["Draft", "Sent", "Approved", "Paid", "Overdue", "Void"])
             description = st.text_area("Description")
             c4, c5, c6 = st.columns(3)
-            invoice_date = c4.text_input("Invoice Date", value=str(date.today()))
+            invoice_date = c4.text_input("Invoice Date", value=str(jobhub_today()))
             due_date = c5.text_input("Due Date")
             paid_date = c6.text_input("Paid Date")
             notes = st.text_area("Notes")
@@ -17968,7 +17968,7 @@ def pb_control_staff_schedule():
             selected_job = c1.selectbox("Job", list(job_options.keys()), key="schedule_job")
             selected_employee = c2.selectbox("Employee", list(employee_options.keys()), key="schedule_employee")
             c3, c4, c5 = st.columns(3)
-            schedule_date = c3.text_input("Date", value=str(date.today()))
+            schedule_date = c3.text_input("Date", value=str(jobhub_today()))
             start_time = c4.text_input("Start Time", value="07:00")
             finish_time = c5.text_input("Finish Time", value="15:00")
             site_role = st.selectbox("Site Role", ["Painter", "Leading Hand", "Supervisor", "Apprentice", "Subcontractor", "Other"])
@@ -17984,8 +17984,8 @@ def pb_control_staff_schedule():
             refresh()
 
     c1, c2 = st.columns(2)
-    start_filter = c1.text_input("From Date", value=str(date.today()))
-    end_filter = c2.text_input("To Date", value=str(date.today() + timedelta(days=7)))
+    start_filter = c1.text_input("From Date", value=str(jobhub_today()))
+    end_filter = c2.text_input("To Date", value=str(jobhub_today() + timedelta(days=7)))
     schedule = df_query("""
         SELECT s.id AS 'ID',
                s.schedule_date AS 'Date',
@@ -20048,7 +20048,7 @@ def render_stage_updates_panel(job_id, employee_mode=False, key_prefix="stage_up
 
     with st.form(f"{key_prefix}_form_{job_id}_{stage_id}"):
         u1, u2 = st.columns(2)
-        update_date = u1.date_input("Update Date", value=date.today(), format="DD/MM/YYYY")
+        update_date = u1.date_input("Update Date", value=jobhub_today(), format="DD/MM/YYYY")
         selected_line_label = u2.selectbox("Work Item", list(line_options.keys()))
         selected_line_id = line_options[selected_line_label]
         selected_line = None
@@ -20309,7 +20309,7 @@ def operational_alerts_dataframe(job_id):
     if summary.empty:
         return pd.DataFrame()
     alerts = []
-    today = date.today()
+    today = jobhub_today()
     for _, row in summary.iterrows():
         stage_id = int(row["id"])
         stage = str(row["Stage"] or "")
@@ -23734,7 +23734,7 @@ elif menu == "Products":
             st.download_button(
                 "Export Current Product List",
                 data=current_products_export.to_csv(index=False).encode("utf-8-sig"),
-                file_name=f"PB_JobHub_Product_List_{date.today().isoformat()}.csv",
+                file_name=f"PB_JobHub_Product_List_{jobhub_today().isoformat()}.csv",
                 mime="text/csv",
                 key="products_export_current_csv",
             )
@@ -24092,7 +24092,7 @@ elif menu == "Material Costs":
                 col1, col2, col3 = st.columns(3)
                 qty_required = col1.number_input("Qty Required", min_value=0.0, step=1.0)
                 qty_received = col2.number_input("Qty Received", min_value=0.0, step=1.0)
-                date_ordered = col3.text_input("Date Ordered", value=str(date.today()))
+                date_ordered = col3.text_input("Date Ordered", value=str(jobhub_today()))
 
                 estimated_total = float(qty_required or 0) * float(display_unit_price or 0)
                 st.info(f"Estimated material cost ex GST: ${estimated_total:,.2f}")
@@ -24406,7 +24406,7 @@ elif menu == "Wages":
                     )
 
                 col1, col2 = st.columns(2)
-                work_date = col1.text_input("Date", value=str(date.today()))
+                work_date = col1.text_input("Date", value=str(jobhub_today()))
                 hours = col2.number_input("Hours", min_value=0.0, step=0.5)
                 notes = st.text_area("Notes")
                 submitted = st.form_submit_button("Save Wage Entry")
@@ -24636,7 +24636,7 @@ elif menu == "Equipment":
 
                 st.markdown("### Sign Out / Return Details")
                 col_a, col_b, col_c, col_d = st.columns(4)
-                date_out = col_a.text_input("Date Out", value=str(date.today()))
+                date_out = col_a.text_input("Date Out", value=str(jobhub_today()))
                 date_in = col_b.text_input("Date In")
                 taken_by = col_c.text_input("Taken By")
                 returned_by = col_d.text_input("Returned By")

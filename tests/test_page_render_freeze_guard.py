@@ -77,7 +77,7 @@ class PageRenderFreezeGuardTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             backup_dir = Path(directory) / "backups"
             backup_dir.mkdir()
-            prefix = f"PB_JobHub_Daily_Data_{MODULE.date.today().strftime('%Y%m%d')}"
+            prefix = f"PB_JobHub_Daily_Data_{MODULE.jobhub_today().strftime('%Y%m%d')}"
             (backup_dir / f"{prefix}.zip").write_bytes(b"backup")
             wrapped({"DATA_DIR": directory})
 

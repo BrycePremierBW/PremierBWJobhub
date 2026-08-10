@@ -141,7 +141,7 @@ def render_material_costs():
                 col1, col2, col3 = st.columns(3)
                 qty_required = col1.number_input("Qty Required", min_value=0.0, step=1.0)
                 qty_received = col2.number_input("Qty Received", min_value=0.0, step=1.0)
-                date_ordered = col3.text_input("Date Ordered", value=str(date.today()))
+                date_ordered = col3.text_input("Date Ordered", value=str(jobhub_today()))
 
                 estimated_total = float(qty_required or 0) * float(display_unit_price or 0)
                 st.info(f"Estimated material cost ex GST: ${estimated_total:,.2f}")
