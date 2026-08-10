@@ -8367,14 +8367,13 @@ def update_timesheet_entry(
 
 
 def delete_timesheet_entry(timesheet_id):
-    conn = get_db_connection()
-
+    conn = connect()
     try:
         cur = conn.cursor()
         timesheet_id = int(timesheet_id)
 
-        # Keep the original field clock records, but release them
-        # from the timesheet that is being deleted.
+        # Release Blip / field-clock records from this submitted timesheet
+        # without deleting the original clock history.
         cur.execute(
             """
             UPDATE field_clock_entries
@@ -8384,7 +8383,13 @@ def delete_timesheet_entry(timesheet_id):
             (timesheet_id,),
         )
 
-        # Now the timesheet can safely be deleted.
+        # Remove linked wage entry first
+        cur.execute(
+            "DELETE FROM wage_entries WHERE timesheet_id = ?",
+            (timesheet_id,),
+        )
+
+        # Now safely delete the timesheet
         cur.execute(
             "DELETE FROM timesheet_entries WHERE id = ?",
             (timesheet_id,),
@@ -8393,11 +8398,16 @@ def delete_timesheet_entry(timesheet_id):
         conn.commit()
 
     except Exception:
-        conn.rollback()
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         raise
 
     finally:
         conn.close()
+
+    record_audit_event("timesheet_deleted", "timesheet", timesheet_id)
 
 
 
