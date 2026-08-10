@@ -27,6 +27,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 import pandas as pd
+
+from jobhub_time import jobhub_today
 import streamlit as st
 
 from jobhub_production import remaining_contract_labour
@@ -40,7 +42,7 @@ def _now() -> str:
 
 
 def _today() -> str:
-    return date.today().isoformat()
+    return jobhub_today().isoformat()
 
 
 def _f(value: Any, default: float = 0.0) -> float:

@@ -6,6 +6,7 @@ Generated from the previously working JobHub monolith.
 from __future__ import annotations
 
 from .runtime import *
+from jobhub_time import jobhub_today
 
 
 def pb_float(value, default=0.0):
@@ -169,7 +170,7 @@ def pb_job_cost_frame():
     df["Unpaid Claimed"] = (df["Claimed Amount"] - df["Paid Amount"]).clip(lower=0)
 
     def health(row):
-        today = date.today()
+        today = jobhub_today()
         issues = []
         cost_pct = pb_float(row["Cost to Date %"])
         end = pb_date(row["End Date"])
@@ -199,7 +200,7 @@ def pb_job_cost_frame():
 def pb_control_daily_dashboard(df):
     st.subheader("Daily Dashboard")
 
-    today = date.today()
+    today = jobhub_today()
     week_end = today + timedelta(days=7)
 
     active = df[~df["Status"].astype(str).str.lower().isin(["complete", "completed", "closed", "archived"])]
@@ -494,7 +495,7 @@ def pb_control_staff_schedule():
 
             if period_type == "Single Day":
                 c1, c2, c3, c4 = st.columns(4)
-                schedule_day = c1.date_input("Date", value=date.today(), key="schedule_single_day")
+                schedule_day = c1.date_input("Date", value=jobhub_today(), key="schedule_single_day")
                 start_time = c2.text_input("Start Time", value="07:00", key="schedule_single_start")
                 finish_time = c3.text_input("Finish Time", value="15:00", key="schedule_single_finish")
                 planned_hours = c4.number_input("Planned Hours", min_value=0.0, step=0.25, value=8.0, key="schedule_single_hours")
@@ -503,7 +504,7 @@ def pb_control_staff_schedule():
                 period_end = str(schedule_day)
             else:
                 c1, c2, c3, c4 = st.columns(4)
-                default_week_end = date.today()
+                default_week_end = jobhub_today()
                 default_week_start = default_week_end - timedelta(days=4)
                 from_date = c1.date_input("From Date", value=default_week_start, key="schedule_week_from")
                 week_ending = c2.date_input("Week Ending", value=default_week_end, key="schedule_week_ending")
@@ -551,8 +552,8 @@ def pb_control_staff_schedule():
                 refresh()
 
     c1, c2 = st.columns(2)
-    start_filter = str(c1.date_input("From Date", value=date.today(), key="schedule_filter_from"))
-    end_filter = str(c2.date_input("To / Week Ending", value=date.today() + timedelta(days=7), key="schedule_filter_to"))
+    start_filter = str(c1.date_input("From Date", value=jobhub_today(), key="schedule_filter_from"))
+    end_filter = str(c2.date_input("To / Week Ending", value=jobhub_today() + timedelta(days=7), key="schedule_filter_to"))
 
     schedule = df_query("""
         SELECT s.id AS 'ID',

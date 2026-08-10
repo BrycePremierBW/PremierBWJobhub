@@ -3820,7 +3820,7 @@ def staff_requests_page():
         selected_stage_label = st.selectbox("Job Stage", list(stage_options.keys()))
         selected_stage_id = stage_options[selected_stage_label]
         d1, d2 = st.columns(2)
-        due_date = d1.date_input("Due Date", value=date.today() + timedelta(days=1), format="DD/MM/YYYY")
+        due_date = d1.date_input("Due Date", value=jobhub_today() + timedelta(days=1), format="DD/MM/YYYY")
         due_time = d2.time_input("Due Time", value=time(16, 0))
         request_title = st.text_input("Request Title", value=f"Please submit: {request_type}")
         instructions = st.text_area(
@@ -5408,7 +5408,7 @@ def generate_variation_form_pdf(job_id, requested_by="", description="", reason=
     )
 
     created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    today_text = str(date.today())
+    today_text = jobhub_today().isoformat()
 
     execute("""
         INSERT INTO job_variations
@@ -8264,6 +8264,19 @@ def update_timesheet_entry(
             timesheet_id,
         ))
 
+        # Keep any linked Blip / field-clock record in step with the edit so
+        # the clock history and the submitted timesheet do not diverge.
+        cur.execute("""
+            UPDATE field_clock_entries
+            SET break_minutes = ?, total_hours = ?, notes = ?
+            WHERE submitted_timesheet_id = ?
+        """, (
+            break_minutes,
+            total_hours,
+            notes,
+            timesheet_id,
+        ))
+
         hourly_rate_snapshot = None
         if status in {"Approved", "Paid"}:
             cur.execute("""
@@ -8494,7 +8507,7 @@ def render_timesheet_edit_form(timesheet_id, key_prefix):
         return fallback
 
     parsed_date = pd.to_datetime(row["work_date"], errors="coerce")
-    current_date = date.today() if pd.isna(parsed_date) else parsed_date.date()
+    current_date = jobhub_today() if pd.isna(parsed_date) else parsed_date.date()
     current_start = stored_time(row["start_time"], time(7, 0))
     current_finish = stored_time(row["finish_time"], time(15, 0))
     current_break = int(float(row["break_minutes"] or 0))
@@ -8928,12 +8941,12 @@ def timesheet_entry_form(employee_id=None, employee_restricted=False, key_prefix
         selected_work_dates = [
             st.date_input(
                 "Date",
-                value=date.today(),
+                value=jobhub_today(),
                 key=f"{key_prefix}_date",
             )
         ]
     else:
-        default_from = date.today() - timedelta(days=date.today().weekday())
+        default_from = jobhub_today() - timedelta(days=jobhub_today().weekday())
         default_to = default_from + timedelta(days=4)
         date_window = st.date_input(
             "Date Range",
@@ -9213,7 +9226,7 @@ def _hours_summary_range():
         index=2,
         key="hours_summary_preset",
     )
-    today = date.today()
+    today = jobhub_today()
     if preset == "Today":
         return today, today
     if preset == "This Week":
@@ -9582,10 +9595,10 @@ def timesheets_page(employee_restricted=False):
         r1, r2 = st.columns(2)
         review_from = r1.date_input(
             "From",
-            value=date.today().replace(day=1),
+            value=jobhub_today().replace(day=1),
             key="admin_review_from",
         )
-        review_to = r2.date_input("To", value=date.today(), key="admin_review_to")
+        review_to = r2.date_input("To", value=jobhub_today(), key="admin_review_to")
         if review_to < review_from:
             review_from, review_to = review_to, review_from
         df = df_query("""
@@ -9820,10 +9833,10 @@ def timesheets_page(employee_restricted=False):
             )
             emp_from = e2.date_input(
                 "From",
-                value=date.today().replace(day=1),
+                value=jobhub_today().replace(day=1),
                 key="timesheet_by_employee_from",
             )
-            emp_to = e2.date_input("To", value=date.today(), key="timesheet_by_employee_to")
+            emp_to = e2.date_input("To", value=jobhub_today(), key="timesheet_by_employee_to")
             if emp_to < emp_from:
                 emp_from, emp_to = emp_to, emp_from
             selected_employee_id = int(employee_options[selected_employee_label])
@@ -20545,9 +20558,9 @@ def render_stage_progress_claims_panel(job_id):
         with st.form(f"create_stage_progress_claim_{job_id}"):
             c1, c2, c3 = st.columns(3)
             claim_no = c1.text_input("Claim / Invoice No", value=pb_next_claim_no(job_id))
-            claim_date = c2.date_input("Claim Date", value=date.today(), format="DD/MM/YYYY")
+            claim_date = c2.date_input("Claim Date", value=jobhub_today(), format="DD/MM/YYYY")
             due_date = c3.date_input(
-                "Due Date", value=date.today() + timedelta(days=14), format="DD/MM/YYYY"
+                "Due Date", value=jobhub_today() + timedelta(days=14), format="DD/MM/YYYY"
             )
             c4, c5 = st.columns(2)
             claim_status = c4.selectbox("Status", ["Draft", "Sent", "Approved", "Paid"])

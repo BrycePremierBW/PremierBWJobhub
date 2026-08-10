@@ -101,6 +101,33 @@ class SourceStructureTests(unittest.TestCase):
         ):
             self.assertIn(target, source)
 
+    def test_timesheet_and_schedule_date_defaults_are_business_local(self):
+        app_source = (ROOT / "pb_jobhub_app.py").read_text(encoding="utf-8")
+        control_centre = (ROOT / "jobhub" / "control_centre.py").read_text(encoding="utf-8")
+        enterprise = (ROOT / "jobhub_enterprise.py").read_text(encoding="utf-8")
+
+        form = app_source[app_source.index("def timesheet_entry_form"):app_source.index("def timesheets_page")]
+        self.assertNotIn("date.today()", form)
+        self.assertIn("value=jobhub_today()", form)
+        self.assertIn(
+            "default_from = jobhub_today() - timedelta(days=jobhub_today().weekday())",
+            form,
+        )
+        edit_form = app_source[
+            app_source.index("def render_timesheet_edit_form"):app_source.index("def timesheet_entry_form")
+        ]
+        self.assertNotIn("date.today()", edit_form)
+        self.assertIn(
+            "current_date = jobhub_today() if pd.isna(parsed_date) else parsed_date.date()",
+            edit_form,
+        )
+        self.assertIn("today_text = jobhub_today().isoformat()", app_source)
+        self.assertIn("value=jobhub_today(), key=\"schedule_single_day\"", control_centre)
+        self.assertIn("default_week_end = jobhub_today()", control_centre)
+        self.assertIn("value=jobhub_today(), key=\"schedule_filter_from\"", control_centre)
+        self.assertIn("value=jobhub_today() + timedelta(days=7)", control_centre)
+        self.assertIn("return jobhub_today().isoformat()", enterprise)
+
     def test_job_folder_uses_editable_schedule_and_weighted_progress(self):
         app_source = (ROOT / "pb_jobhub_app.py").read_text(encoding="utf-8")
         scheduler_source = (ROOT / "pb_jobhub_visual_scheduler.py").read_text(encoding="utf-8")
