@@ -19538,6 +19538,12 @@ def job_tracking_lines(job_id, job_stage_id=None):
     job_id = int(job_id)
     stage_clause = "AND l.job_stage_id IS NULL" if job_stage_id is None else "AND l.job_stage_id=?"
     stage_params = () if job_stage_id is None else (int(job_stage_id),)
+    return _tracking_lines_source(job_id, stage_clause, stage_params)
+
+
+def _tracking_lines_source(job_id, stage_clause, stage_params):
+    """Resolve the active baseline/estimate once and return its tracked lines."""
+    job_id = int(job_id)
     baseline = safe_df_query(
         """
         SELECT id FROM estimate_baselines
@@ -19577,7 +19583,6 @@ def job_tracking_lines(job_id, job_stage_id=None):
     )
     if estimate.empty:
         return pd.DataFrame()
-    stage_clause = "AND li.job_stage_id IS NULL" if job_stage_id is None else "AND li.job_stage_id=?"
     return safe_df_query(
         f"""
         SELECT li.id AS estimate_line_item_id,li.job_stage_id,
@@ -19600,34 +19605,32 @@ def job_tracking_lines(job_id, job_stage_id=None):
     )
 
 
-def stage_actual_progress(job_id, job_stage_id):
-    """Calculate earned physical progress from measured quantities or manual fallback."""
-    job_id = int(job_id)
-    stage_id = int(job_stage_id) if job_stage_id else None
-    lines = job_tracking_lines(job_id, stage_id)
-    stage_filter = "job_stage_id IS NULL" if stage_id is None else "job_stage_id=?"
-    params = (job_id,) if stage_id is None else (job_id, stage_id)
-    updates = safe_df_query(
-        f"""
-        SELECT estimate_line_item_id,COALESCE(completed_quantity,0) AS completed_quantity,
-               manual_progress_percent,update_date,id
-        FROM stage_progress_updates
-        WHERE job_id=? AND {stage_filter}
-        ORDER BY update_date,id
-        """,
-        params,
-    )
-    measured_updates = updates[
-        updates["estimate_line_item_id"].notna()
-        & (updates["completed_quantity"].fillna(0).astype(float) > 0)
-    ] if not updates.empty else pd.DataFrame()
-    if not lines.empty and not measured_updates.empty:
+def stage_actual_progress_from_data(lines, updates, job_stage_id):
+    """Calculate earned physical progress from already-loaded lines and updates."""
+    stage_filter = "job_stage_id IS NULL" if job_stage_id is None else "job_stage_id=?"
+    stage_lines = lines
+    stage_updates = updates
+    if stage_filter == "job_stage_id IS NULL":
+        if not stage_lines.empty and stage_lines["job_stage_id"].notna().any():
+            stage_lines = stage_lines[stage_lines["job_stage_id"].isna()]
+        if not stage_updates.empty and stage_updates["job_stage_id"].notna().any():
+            stage_updates = stage_updates[stage_updates["job_stage_id"].isna()]
+    else:
+        if not stage_lines.empty and (stage_lines["job_stage_id"].astype(object) != job_stage_id).any():
+            stage_lines = stage_lines[stage_lines["job_stage_id"].astype(object) == job_stage_id]
+        if not stage_updates.empty and (stage_updates["job_stage_id"].astype(object) != job_stage_id).any():
+            stage_updates = stage_updates[stage_updates["job_stage_id"].astype(object) == job_stage_id]
+    measured_updates = stage_updates[
+        stage_updates["estimate_line_item_id"].notna()
+        & (stage_updates["completed_quantity"].fillna(0).astype(float) > 0)
+    ] if not stage_updates.empty else pd.DataFrame()
+    if not stage_lines.empty and not measured_updates.empty:
         completed_by_line = (
             measured_updates.groupby("estimate_line_item_id")["completed_quantity"].sum().to_dict()
         )
         target_value = 0.0
         earned_value = 0.0
-        for _, line in lines.iterrows():
+        for _, line in stage_lines.iterrows():
             line_id = line.get("estimate_line_item_id")
             qty = max(0.0, float(line.get("qty") or 0))
             rate = max(0.0, float(line.get("unit_rate") or 0))
@@ -19645,8 +19648,8 @@ def stage_actual_progress(job_id, job_stage_id):
                 "earned_value": earned_value,
                 "target_value": target_value,
             }
-    if not updates.empty:
-        manual = updates[updates["manual_progress_percent"].notna()]
+    if not stage_updates.empty:
+        manual = stage_updates[stage_updates["manual_progress_percent"].notna()]
         if not manual.empty:
             percent = float(manual.iloc[-1]["manual_progress_percent"] or 0)
             return {
@@ -19656,6 +19659,26 @@ def stage_actual_progress(job_id, job_stage_id):
                 "target_value": 0.0,
             }
     return {"actual_percent": 0.0, "source": "No progress update", "earned_value": 0.0, "target_value": 0.0}
+
+
+def stage_actual_progress(job_id, job_stage_id):
+    """Calculate earned physical progress from measured quantities or manual fallback."""
+    job_id = int(job_id)
+    stage_id = int(job_stage_id) if job_stage_id else None
+    lines = job_tracking_lines(job_id, stage_id)
+    stage_filter = "job_stage_id IS NULL" if stage_id is None else "job_stage_id=?"
+    params = (job_id,) if stage_id is None else (job_id, stage_id)
+    updates = safe_df_query(
+        f"""
+        SELECT estimate_line_item_id,COALESCE(completed_quantity,0) AS completed_quantity,
+               manual_progress_percent,update_date,id,job_stage_id
+        FROM stage_progress_updates
+        WHERE job_id=? AND {stage_filter}
+        ORDER BY update_date,id
+        """,
+        params,
+    )
+    return stage_actual_progress_from_data(lines, updates, stage_id)
 
 
 def stage_progress_summary_dataframe(job_id):
@@ -19677,10 +19700,21 @@ def stage_progress_summary_dataframe(job_id):
         for _, row in claim_rows.iterrows()
         if not pd.isna(row["job_stage_id"])
     }
+    all_lines = _tracking_lines_source(int(job_id), "", ())
+    all_updates = safe_df_query(
+        """
+        SELECT estimate_line_item_id,COALESCE(completed_quantity,0) AS completed_quantity,
+               manual_progress_percent,update_date,id,job_stage_id
+        FROM stage_progress_updates
+        WHERE job_id=?
+        ORDER BY update_date,id
+        """,
+        (int(job_id),),
+    )
     rows = []
     for _, stage in stages.iterrows():
         stage_id = int(stage["id"])
-        physical = stage_actual_progress(job_id, stage_id)
+        physical = stage_actual_progress_from_data(all_lines, all_updates, stage_id)
         expected = float(stage["Expected Progress %"] or 0)
         variance = production_variance(physical["actual_percent"], expected)
         stage_value = float(stage["Stage Value Ex GST"] or 0)
