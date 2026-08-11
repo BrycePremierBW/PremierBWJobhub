@@ -384,7 +384,7 @@ def apply_pb_branding():
         logo_background_css = f"""
         .stApp {{
             background-image:
-                linear-gradient(rgba(247, 243, 238, 0.89), rgba(247, 243, 238, 0.89)),
+                linear-gradient(rgba(249, 246, 241, 0.91), rgba(249, 246, 241, 0.91)),
                 url("{logo_data_uri}");
             background-size: cover, min(72vw, 760px) auto;
             background-position: center center;
@@ -401,31 +401,36 @@ def apply_pb_branding():
     st.markdown(
         """
         <style>
-        @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700;800&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Nunito+Sans:opsz,wght@6..12,400;6..12,500;6..12,600;6..12,700;6..12,800&display=swap');
 
         :root {
-            --pb-bg: #f7f3ee;
-            --pb-card: #ffffff;
-            --pb-charcoal: #1f1f1f;
-            --pb-muted: #6f6a63;
-            --pb-border: #e8ded3;
-            --pb-accent: #d8c8b8;
-            --pb-accent-dark: #7a6856;
-            --pb-success: #1f7a4d;
-            --pb-warning: #b7791f;
-            --pb-danger: #b42318;
-            --pb-info: #2f5f8f;
+            --pb-bg: #f9f6f1;
+            --pb-card: #fffdfa;
+            --pb-charcoal: #2b2520;
+            --pb-muted: #7a7166;
+            --pb-border: #eadfd1;
+            --pb-accent: #e0d0bd;
+            --pb-accent-dark: #8a6b4b;
+            --pb-success: #2e8b57;
+            --pb-warning: #cf9d38;
+            --pb-danger: #c05a4e;
+            --pb-info: #4a7ea6;
         }
 
         html, body, [class*="css"] {
-            font-family: 'Poppins', 'Segoe UI', Arial, sans-serif;
+            font-family: 'Nunito Sans', 'Plus Jakarta Sans', 'Segoe UI', Arial, sans-serif;
             -webkit-font-smoothing: antialiased;
             -moz-osx-font-smoothing: grayscale;
         }
 
+        h1, h2, h3, h4, [data-testid="stMetricLabel"] {
+            font-family: 'Plus Jakarta Sans', 'Nunito Sans', 'Segoe UI', sans-serif;
+        }
+
         .stApp {
             background:
-                radial-gradient(circle at top left, rgba(216, 200, 184, 0.36), rgba(247, 243, 238, 0) 34rem),
+                radial-gradient(circle at top left, rgba(216, 200, 184, 0.30), rgba(249, 246, 241, 0) 34rem),
+                radial-gradient(circle at bottom right, rgba(224, 208, 189, 0.16), rgba(249, 246, 241, 0) 30rem),
                 var(--pb-bg);
             color: var(--pb-charcoal);
         }
@@ -446,7 +451,7 @@ def apply_pb_branding():
         }
 
         section[data-testid="stSidebar"] {
-            background: linear-gradient(180deg, #171717 0%, #29231f 100%);
+            background: linear-gradient(180deg, #1c1a17 0%, #2e2822 100%);
             border-right: 1px solid rgba(255,255,255,0.08);
         }
 
@@ -478,13 +483,15 @@ def apply_pb_branding():
             min-height: 42px !important;
             width: 100% !important;
             align-items: center !important;
-            border: 1px solid rgba(255,255,255,0.08) !important;
-            background: rgba(255,255,255,0.035) !important;
+            border: 1px solid rgba(255,255,255,0.09) !important;
+            background: rgba(255,255,255,0.04) !important;
+            border-radius: 12px !important;
         }
 
         section[data-testid="stSidebar"] [role="radiogroup"] label:has(input:checked) {
-            background: rgba(216,200,184,0.24) !important;
-            border-color: rgba(216,200,184,0.55) !important;
+            background: rgba(224,208,189,0.26) !important;
+            border-color: rgba(224,208,189,0.55) !important;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.18);
         }
 
         section[data-testid="stSidebar"] [role="radiogroup"] label p {
@@ -679,6 +686,10 @@ def apply_pb_branding():
             text-wrap: balance;
         }
 
+        h1 { font-size: clamp(1.9rem, 4.5vw, 2.5rem) !important; }
+        h2 { font-size: clamp(1.4rem, 3.2vw, 1.7rem) !important; }
+        h3 { font-size: clamp(1.1rem, 2.4vw, 1.25rem) !important; }
+
         p, li, label, [data-testid="stCaptionContainer"] {
             line-height: 1.5;
         }
@@ -688,12 +699,44 @@ def apply_pb_branding():
             text-underline-offset: 3px;
         }
 
+        ::selection {
+            background: rgba(138,107,75,0.22);
+        }
+
+        .block-container::-webkit-scrollbar,
+        [data-testid="stMainBlockContainer"]::-webkit-scrollbar {
+            width: 10px;
+        }
+
+        .block-container::-webkit-scrollbar-thumb,
+        [data-testid="stMainBlockContainer"]::-webkit-scrollbar-thumb {
+            background: rgba(138,107,75,0.35);
+            border: 3px solid transparent;
+            border-radius: 999px;
+            background-clip: padding-box;
+        }
+
+        .block-container::-webkit-scrollbar-thumb:hover,
+        [data-testid="stMainBlockContainer"]::-webkit-scrollbar-thumb:hover {
+            background: rgba(138,107,75,0.55);
+            border: 3px solid transparent;
+            background-clip: padding-box;
+        }
+
+        div[data-testid="stPopoverBody"] {
+            border-radius: 16px;
+        }
+
+        div[data-testid="stFileUploader"] section {
+            border-radius: 16px;
+        }
+
         div[data-testid="stMetric"],
         div[data-testid="stVerticalBlockBorderWrapper"] {
-            background: rgba(255,255,255,0.96);
+            background: linear-gradient(180deg, #fffdfa 0%, #fbf7f1 100%);
             border: 1px solid var(--pb-border);
             border-radius: 18px;
-            box-shadow: 0 10px 28px rgba(31,31,31,0.06);
+            box-shadow: 0 10px 28px rgba(49, 39, 28, 0.07);
         }
 
         div[data-testid="stVerticalBlockBorderWrapper"] {
@@ -761,12 +804,13 @@ def apply_pb_branding():
         }
 
         .pb-page-hero {
-            background: linear-gradient(135deg, #1f1f1f 0%, #463a30 62%, #d8c8b8 140%);
+            background: linear-gradient(135deg, #23201c 0%, #463a30 62%, #c9ab86 140%);
             color: white;
-            border-radius: 26px;
+            border-radius: 30px;
             padding: 26px 30px;
             margin: 8px 0 22px 0;
-            box-shadow: 0 16px 34px rgba(31,31,31,0.16);
+            box-shadow: 0 18px 38px rgba(49, 39, 28, 0.18);
+            border: 1px solid rgba(255,255,255,0.06);
         }
 
         .pb-page-eyebrow {
@@ -793,11 +837,11 @@ def apply_pb_branding():
         }
 
         .pb-card {
-            background: rgba(255,255,255,0.97);
+            background: linear-gradient(180deg, #fffdfa 0%, #fbf7f1 100%);
             border: 1px solid var(--pb-border);
-            border-radius: 20px;
+            border-radius: 22px;
             padding: 18px;
-            box-shadow: 0 10px 26px rgba(31,31,31,0.06);
+            box-shadow: 0 12px 28px rgba(49, 39, 28, 0.07);
             min-height: 120px;
             margin-bottom: 12px;
         }
@@ -875,27 +919,28 @@ def apply_pb_branding():
             border-radius: 999px !important;
             border: 1px solid var(--pb-accent) !important;
             background: #ffffff !important;
-            color: #1f1f1f !important;
+            color: #1f1a15 !important;
             font-weight: 700 !important;
             padding: 0.55rem 1rem !important;
-            box-shadow: 0 6px 14px rgba(31,31,31,0.05);
+            box-shadow: 0 6px 14px rgba(49, 39, 28, 0.06);
             transition: transform 140ms ease, box-shadow 140ms ease,
                         border-color 140ms ease, background-color 140ms ease;
         }
 
         .stButton > button:hover, .stDownloadButton > button:hover {
             border-color: var(--pb-accent-dark) !important;
-            color: #000000 !important;
+            color: #14100c !important;
             transform: translateY(-1px);
+            box-shadow: 0 9px 20px rgba(49, 39, 28, 0.12) !important;
         }
 
         .stButton > button[kind="primary"],
         .stDownloadButton > button[kind="primary"],
         button[data-testid="baseButton-primary"] {
-            background: linear-gradient(135deg, #7a6856, #4c4036) !important;
-            border-color: #6b5948 !important;
+            background: linear-gradient(135deg, #8a6b4b, #55432f) !important;
+            border-color: #6f553a !important;
             color: #ffffff !important;
-            box-shadow: 0 8px 18px rgba(76,64,54,0.22) !important;
+            box-shadow: 0 8px 18px rgba(85, 67, 47, 0.24) !important;
         }
 
         .stButton > button[kind="primary"] p,
@@ -909,7 +954,7 @@ def apply_pb_branding():
         textarea:focus-visible,
         [role="combobox"]:focus-visible,
         [role="tab"]:focus-visible {
-            outline: 3px solid rgba(47,95,143,0.34) !important;
+            outline: 3px solid rgba(138,107,75,0.32) !important;
             outline-offset: 2px !important;
         }
 
@@ -920,14 +965,14 @@ def apply_pb_branding():
         div[data-testid="stDateInput"] > div > div,
         div[data-testid="stTimeInput"] > div > div {
             min-height: 44px;
-            border-radius: 12px !important;
+            border-radius: 14px !important;
             background: rgba(255,255,255,0.98) !important;
         }
 
         div[data-baseweb="input"]:focus-within,
         div[data-baseweb="textarea"]:focus-within,
         div[data-baseweb="select"]:focus-within {
-            box-shadow: 0 0 0 3px rgba(47,95,143,0.14) !important;
+            box-shadow: 0 0 0 3px rgba(138,107,75,0.15) !important;
         }
 
         [data-testid="stWidgetLabel"] p {
@@ -938,14 +983,14 @@ def apply_pb_branding():
         div[data-testid="stForm"] {
             background: rgba(255,255,255,0.72);
             border: 1px solid var(--pb-border) !important;
-            border-radius: 18px !important;
+            border-radius: 20px !important;
             padding: 0.85rem !important;
         }
 
         details[data-testid="stExpander"] {
             background: rgba(255,255,255,0.90);
             border: 1px solid var(--pb-border) !important;
-            border-radius: 14px !important;
+            border-radius: 16px !important;
             overflow: hidden;
         }
 
@@ -956,34 +1001,76 @@ def apply_pb_branding():
 
         div[data-testid="stTabs"] [data-baseweb="tab-list"] {
             gap: 0.35rem;
-            padding: 0.25rem;
+            padding: 0.3rem;
             background: rgba(237,229,218,0.68);
-            border-radius: 13px;
+            border-radius: 16px;
         }
 
         div[data-testid="stTabs"] [role="tab"] {
             min-height: 42px;
-            border-radius: 10px;
+            border-radius: 12px;
             padding-inline: 0.85rem;
         }
 
         div[data-testid="stTabs"] [aria-selected="true"] {
             background: #ffffff;
-            box-shadow: 0 4px 12px rgba(31,31,31,0.08);
+            box-shadow: 0 4px 12px rgba(49, 39, 28, 0.10);
         }
 
         div[data-testid="stAlert"] {
-            border-radius: 14px !important;
+            border-radius: 16px !important;
             border-width: 1px !important;
-            box-shadow: 0 5px 14px rgba(31,31,31,0.04);
+            box-shadow: 0 5px 14px rgba(49, 39, 28, 0.05);
         }
 
+        /* Rounded, warm data tables: AG Grid (st.dataframe) and st.table. */
         [data-testid="stDataFrame"], [data-testid="stTable"] {
             border: 1px solid var(--pb-border);
             border-radius: 18px;
             overflow: hidden;
-            background: rgba(255,255,255,0.98);
-            box-shadow: 0 8px 20px rgba(31,31,31,0.045);
+            background: #fffdfa;
+            box-shadow: 0 8px 22px rgba(49, 39, 28, 0.06);
+        }
+
+        [data-testid="stDataFrame"] .ag-theme-streamlit,
+        [data-testid="stDataFrame"] .ag-root-wrapper {
+            --ag-font-family: 'Nunito Sans', 'Segoe UI', sans-serif;
+            --ag-header-background-color: #f2e8db;
+            --ag-header-foreground-color: #4a3f33;
+            --ag-header-height: 46px;
+            --ag-row-height: 38px;
+            --ag-odd-row-background-color: #fbf7f1;
+            --ag-row-hover-color: #f7eede;
+            --ag-selected-row-background-color: #f2e2cc;
+            --ag-row-border-color: #f0e8dc;
+            --ag-border-color: #eadfd1;
+            --ag-font-size: 14px;
+            border-radius: 18px;
+            overflow: hidden;
+        }
+
+        [data-testid="stDataFrame"] .ag-header-cell {
+            font-weight: 700 !important;
+            letter-spacing: 0.01em;
+        }
+
+        [data-testid="stDataFrame"] .ag-row:hover {
+            box-shadow: inset 3px 0 0 var(--pb-accent-dark);
+        }
+
+        [data-testid="stTable"] thead tr th {
+            background: #f2e8db !important;
+            color: #4a3f33 !important;
+            font-weight: 700 !important;
+            border-bottom: 2px solid var(--pb-border) !important;
+        }
+
+        [data-testid="stTable"] tbody tr:nth-child(even) td {
+            background: #fbf7f1 !important;
+        }
+
+        [data-testid="stTable"] tbody tr:hover td {
+            background: #f7eede !important;
         }
 
         div[data-testid="stTabs"] button {

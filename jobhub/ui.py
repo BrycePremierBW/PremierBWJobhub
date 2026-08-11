@@ -38,25 +38,31 @@ def apply_pb_branding():
     st.markdown(
         """
         <style>
+        @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Nunito+Sans:opsz,wght@6..12,400;6..12,500;6..12,600;6..12,700;6..12,800&display=swap');
+
         :root {
-            --pb-bg: #f5f3ef;
-            --pb-surface: #ffffff;
-            --pb-soft: #faf9f7;
-            --pb-text: #242321;
-            --pb-muted: #706d68;
-            --pb-border: #ded9d1;
-            --pb-sidebar: #181817;
-            --pb-sidebar-hover: #292826;
-            --pb-accent: #9a8067;
-            --pb-success: #47735b;
-            --pb-warning: #a06f2f;
-            --pb-danger: #9b4c48;
-            --pb-radius: 12px;
-            --pb-shadow: 0 6px 22px rgba(29, 27, 24, 0.06);
+            --pb-bg: #f9f6f1;
+            --pb-surface: #fffdfa;
+            --pb-soft: #fbf7f1;
+            --pb-text: #2b2520;
+            --pb-muted: #7a7166;
+            --pb-border: #eadfd1;
+            --pb-sidebar: #1c1a17;
+            --pb-sidebar-hover: #2e2822;
+            --pb-accent: #8a6b4b;
+            --pb-success: #2e8b57;
+            --pb-warning: #cf9d38;
+            --pb-danger: #c05a4e;
+            --pb-radius: 16px;
+            --pb-shadow: 0 10px 26px rgba(49, 39, 28, 0.08);
         }
 
         html, body, [class*="css"] {
-            font-family: "Poppins", "Segoe UI", Arial, sans-serif;
+            font-family: 'Nunito Sans', 'Plus Jakarta Sans', 'Segoe UI', Arial, sans-serif;
+        }
+
+        h1, h2, h3, h4 {
+            font-family: 'Plus Jakarta Sans', 'Nunito Sans', 'Segoe UI', sans-serif;
         }
 
         .stApp, [data-testid="stAppViewContainer"] {
@@ -121,7 +127,7 @@ def apply_pb_branding():
 
         .stButton > button, .stDownloadButton > button {
             min-height: 2.55rem;
-            border-radius: 9px !important;
+            border-radius: 999px !important;
             border: 1px solid var(--pb-border) !important;
             background: var(--pb-surface) !important;
             color: var(--pb-text) !important;
@@ -158,7 +164,7 @@ def apply_pb_branding():
 
         [data-testid="stDataFrame"], [data-testid="stTable"] {
             border: 1px solid var(--pb-border);
-            border-radius: 10px;
+            border-radius: 16px;
             overflow: hidden;
             background: var(--pb-surface);
         }
