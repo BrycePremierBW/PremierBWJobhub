@@ -3,7 +3,7 @@ services:
     name: PremierBWJobhub
     runtime: python
     region: singapore
-    plan: starter
+    plan: standard
     buildCommand: pip install -r requirements.txt
     startCommand: streamlit run pb_jobhub_app.py --server.port=$PORT --server.address=0.0.0.0 --server.headless=true
     healthCheckPath: /_stcore/health
@@ -19,9 +19,15 @@ services:
       - key: DATABASE_URL
         sync: false
       - key: AI_PROVIDER
-        value: none
+        value: gemini
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash
       - key: JOBHUB_ALLOW_EXTERNAL_AI
-        value: "false"
+        value: "true"
+      - key: STREAMLIT_SERVER_COOKIE_SECRET
+        sync: false
       - key: JOBHUB_AI_INCLUDE_PERSONAL_DATA
         value: "false"
       - key: JOBHUB_ENABLE_SELF_EDIT

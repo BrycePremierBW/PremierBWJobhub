@@ -38,6 +38,34 @@ def jobhub_ai_model():
         pass
     return os.environ.get("OPENAI_MODEL", "gpt-5.5")
 
+def jobhub_gemini_api_key():
+    """Return a cleaned Gemini API key from secrets/environment."""
+    raw_key = ""
+    try:
+        if "GEMINI_API_KEY" in st.secrets:
+            raw_key = st.secrets["GEMINI_API_KEY"]
+    except Exception:
+        raw_key = ""
+    if not raw_key:
+        raw_key = os.environ.get("GEMINI_API_KEY", "")
+
+    key = str(raw_key or "").strip()
+    if key.lower().startswith("bearer "):
+        key = key[7:].strip()
+    key = key.replace("\n", "").replace("\r", "").replace("\t", "").strip()
+    return key
+
+def jobhub_gemini_model():
+    try:
+        if "GEMINI_MODEL" in st.secrets:
+            return st.secrets["GEMINI_MODEL"]
+    except Exception:
+        pass
+    return os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+
+def gemini_enabled():
+    return bool(str(jobhub_gemini_api_key() or "").strip())
+
 def jobhub_ai_context(selected_job_id=None):
     df = job_cost_summary_dataframe()
     lines = []
@@ -561,11 +589,13 @@ def ai_provider():
     """
     AI provider rules:
     - AI_PROVIDER=openai: use OpenAI online/cloud.
+    - AI_PROVIDER=gemini: use Google Gemini online/cloud.
     - AI_PROVIDER=ollama: use local Ollama only.
     - AI_PROVIDER=auto or blank:
         * if OPENAI_API_KEY exists, use OpenAI
-        * if hosted on Render and no OpenAI key, switch AI off
-        * if running locally and no OpenAI key, use Ollama
+        * if GEMINI_API_KEY exists, use Gemini
+        * if hosted on Render and no key, switch AI off
+        * if running locally and no key, use Ollama
     - AI_PROVIDER=none/off/disabled: switch AI off
     """
     provider = str(ai_secret("AI_PROVIDER", "auto")).strip().lower()
@@ -573,14 +603,18 @@ def ai_provider():
     if provider in ["none", "off", "disabled", "disable", "false", "0", "no", "no_ai", "no-ai"]:
         return "none"
 
-    if provider not in ["ollama", "openai", "auto"]:
+    if provider not in ["ollama", "openai", "gemini", "auto"]:
         provider = "auto"
 
     has_openai_key = bool(str(jobhub_ai_api_key() or "").strip())
+    has_gemini_key = bool(str(jobhub_gemini_api_key() or "").strip())
     is_render = bool(os.getenv("RENDER") or os.getenv("RENDER_SERVICE_ID"))
 
     if provider == "openai":
         return "openai"
+
+    if provider == "gemini":
+        return "gemini"
 
     if provider == "ollama":
         return "ollama"
@@ -589,6 +623,9 @@ def ai_provider():
     if has_openai_key:
         return "openai"
 
+    if has_gemini_key:
+        return "gemini"
+
     if is_render:
         return "none"
 
@@ -596,8 +633,9 @@ def ai_provider():
 
 def ai_disabled_message():
     return (
-        "AI is switched off on this hosted Render app because no OpenAI API key is configured. "
-        "Add AI_PROVIDER=openai and OPENAI_API_KEY in Render Environment to use online AI. "
+        "AI is switched off on this hosted Render app because no AI API key is configured. "
+        "Add AI_PROVIDER=openai and OPENAI_API_KEY, or AI_PROVIDER=gemini and GEMINI_API_KEY, "
+        "in Render Environment to use online AI. "
         "For free Ollama AI, run JobHub locally on the same computer as Ollama."
     )
 
@@ -636,6 +674,11 @@ def ai_backend_ready():
             return True, f"Using OpenAI online model {jobhub_ai_model()}."
         return False, "AI_PROVIDER is openai but OPENAI_API_KEY is missing."
 
+    if provider == "gemini":
+        if gemini_enabled():
+            return True, f"Using Google Gemini online model {jobhub_gemini_model()}."
+        return False, "AI_PROVIDER is gemini but GEMINI_API_KEY is missing."
+
     if provider == "ollama":
         return ollama_status()
 
@@ -654,8 +697,8 @@ def ollama_generate(prompt, system="", context="", model=None, timeout=None):
     if ai_provider() == "none":
         return None, ai_disabled_message()
 
-    if ai_provider() == "openai":
-        return None, "Ollama is not used in OpenAI mode. Use the JobHub AI Assistant or App Builder AI with OpenAI."
+    if ai_provider() in ("openai", "gemini"):
+        return None, "Ollama is not used in online AI mode. Use the JobHub AI Assistant or App Builder AI with the configured provider."
 
     model = model or ollama_model()
     timeout = timeout or ollama_timeout()
@@ -729,6 +772,63 @@ def openai_responses_answer(prompt, context_text="", include_web=False, require_
     except Exception as e:
         return None, f"OpenAI request failed: {e}"
 
+def gemini_answer(prompt, context_text="", include_web=False, system_text=""):
+    api_key = jobhub_gemini_api_key()
+    if not api_key:
+        return None, "GEMINI_API_KEY is missing."
+
+    model = jobhub_gemini_model()
+
+    payload = {
+        "contents": [
+            {
+                "role": "user",
+                "parts": [
+                    {
+                        "text": (
+                            (system_text or "You are a helpful assistant for Premier Brushworks JobHub.") +
+                            "\n\nCONTEXT:\n" + str(context_text or "") +
+                            "\n\nUSER REQUEST:\n" + str(prompt)
+                        )
+                    }
+                ],
+            }
+        ]
+    }
+
+    if include_web:
+        payload["tools"] = [{"google_search": {}}]
+
+    try:
+        response = requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+            params={"key": api_key},
+            json=payload,
+            timeout=90,
+        )
+        if response.status_code >= 400:
+            hint = ""
+            if response.status_code == 404:
+                hint = (
+                    " Check GEMINI_MODEL is a current Gemini model name for this API key; "
+                    "list available models with GET /v1beta/models."
+                )
+            return None, f"Gemini API error {response.status_code}: {response.text[:1000]}{hint}"
+
+        data = response.json()
+        parts = []
+        for candidate in data.get("candidates", []) or []:
+            for content in candidate.get("content", {}).get("parts", []) or []:
+                if isinstance(content, dict) and content.get("text"):
+                    parts.append(str(content["text"]))
+
+        if not parts:
+            return None, "Gemini returned an empty response. " + json.dumps(data)[:2000]
+
+        return "\n".join(parts), None
+    except Exception as e:
+        return None, f"Gemini request failed: {e}"
+
 def jobhub_ai_answer(question, context_text):
     system = (
         "You are JobHub AI for Premier Brushworks, a painting and decorating business. "
@@ -742,6 +842,9 @@ def jobhub_ai_answer(question, context_text):
 
     if provider == "openai":
         return openai_responses_answer(question, context_text, include_web=False, require_web=False, system_text=system)
+
+    if provider == "gemini":
+        return gemini_answer(question, context_text, include_web=False, system_text=system)
 
     return ollama_generate(question, system=system, context=context_text)
 
@@ -795,6 +898,14 @@ SAVED APP BUILDER LEARNINGS:
             context,
             include_web=include_web,
             require_web=require_web,
+            system_text=system_prompt,
+        )
+
+    if provider == "gemini":
+        return gemini_answer(
+            question,
+            context,
+            include_web=include_web,
             system_text=system_prompt,
         )
 
@@ -891,13 +1002,18 @@ def summarise_url_into_learning(topic, url):
 
 def free_local_ai_setup_page():
     st.header("Free Local AI Setup")
-    st.caption("Use OpenAI online on Render, or Ollama for free local AI when running JobHub on your own computer.")
+    st.caption("Use OpenAI or Google Gemini online on Render, or Ollama for free local AI when running JobHub on your own computer.")
 
     status_ok, status_message = ai_backend_ready()
 
     c1, c2 = st.columns(2)
     c1.metric("AI Provider", ai_provider())
-    c2.metric("OpenAI Model", jobhub_ai_model() if ai_provider() == "openai" else ollama_model())
+    if ai_provider() == "openai":
+        c2.metric("OpenAI Model", jobhub_ai_model())
+    elif ai_provider() == "gemini":
+        c2.metric("Gemini Model", jobhub_gemini_model())
+    else:
+        c2.metric("Ollama Model", ollama_model())
 
     if status_ok:
         st.success(status_message)
@@ -910,9 +1026,11 @@ def free_local_ai_setup_page():
         'OLLAMA_BASE_URL = "http://localhost:11434"\n'
         'OLLAMA_MODEL = "llama3.2:3b"\n'
         'OLLAMA_TIMEOUT = "120"\n\n'
-        '# Optional paid fallback only if you ever want it:\n'
+        '# Optional paid online AI only if you ever want it:\n'
         '# OPENAI_API_KEY = "sk-..."\n'
-        '# OPENAI_MODEL = "gpt-5.5"\n',
+        '# OPENAI_MODEL = "gpt-5.5"\n'
+        '# GEMINI_API_KEY = "..."\n'
+        '# GEMINI_MODEL = "gemini-2.5-flash"\n',
         language="toml",
     )
 
@@ -961,9 +1079,9 @@ def app_builder_ai_page():
         include_web = False
         require_web = False
 
-        if ai_provider() == "openai" or (ai_provider() == "auto" and openai_enabled()):
-            include_web = st.checkbox("Allow OpenAI live internet research", value=True, key="app_builder_include_web")
-            require_web = st.checkbox("Force OpenAI web search for this request", value=False, key="app_builder_require_web")
+        if ai_provider() in ("openai", "gemini") or (ai_provider() == "auto" and (openai_enabled() or gemini_enabled())):
+            include_web = st.checkbox("Allow online AI live internet research", value=True, key="app_builder_include_web")
+            require_web = st.checkbox("Force online AI web search for this request", value=False, key="app_builder_require_web")
         else:
             st.info("Free local Ollama mode is active. For internet learning, use the Internet Learning tab with URLs.")
 

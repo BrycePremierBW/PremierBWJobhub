@@ -31,9 +31,15 @@ def get_postgres_pool():
     if not DATABASE_URL:
         return None
 
+    try:
+        maxconn = int(os.environ.get("JOBHUB_DB_MAXCONN", "5"))
+    except Exception:
+        maxconn = 5
+    maxconn = max(1, min(maxconn, 50))
+
     return ThreadedConnectionPool(
         minconn=1,
-        maxconn=5,
+        maxconn=maxconn,
         dsn=DATABASE_URL,
         sslmode="require",
     )
