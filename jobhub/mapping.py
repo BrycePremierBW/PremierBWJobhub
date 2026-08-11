@@ -440,7 +440,7 @@ def generate_building_surfaces_from_takeoff(job_id, package_id=None, reset_exist
         return 0
 
     elevation_counts = {"Front": 0, "Rear": 0, "Left": 0, "Right": 0, "Internal": 0, "Ceiling / Roof": 0}
-    now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now_text = jobhub_now().strftime("%Y-%m-%d %H:%M:%S")
     created_count = 0
 
     for idx, (_, row) in enumerate(sections.iterrows()):
@@ -588,7 +588,7 @@ def generate_plan_shape_surfaces_from_takeoff(job_id, package_id=None, building_
     building_depth = max(app_float(building_depth), 2.0)
     level_count = max(int(app_float(level_count) or 1), 1)
     level_height = max(app_float(level_height), 2.1)
-    now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now_text = jobhub_now().strftime("%Y-%m-%d %H:%M:%S")
     cursors = {}
     created = 0
 
@@ -777,7 +777,7 @@ def building_mapper_page(default_job_id=None):
                     x_pos = ?, y_pos = ?, z_pos = ?, width = ?, height = ?, depth = ?,
                     rotation_y = ?, updated_at = ?
                 WHERE id = ?
-            """, (str(row.get("Surface Name") or ""), str(row.get("Surface Type") or ""), str(row.get("Elevation") or ""), str(row.get("Level") or ""), app_float(row.get("X")), app_float(row.get("Y")), app_float(row.get("Z")), max(app_float(row.get("Width")), 0.05), max(app_float(row.get("Height")), 0.05), max(app_float(row.get("Depth")), 0.03), app_float(row.get("Rotation Y")), datetime.now().strftime("%Y-%m-%d %H:%M:%S"), int(row.get("ID"))))
+            """, (str(row.get("Surface Name") or ""), str(row.get("Surface Type") or ""), str(row.get("Elevation") or ""), str(row.get("Level") or ""), app_float(row.get("X")), app_float(row.get("Y")), app_float(row.get("Z")), max(app_float(row.get("Width")), 0.05), max(app_float(row.get("Height")), 0.05), max(app_float(row.get("Depth")), 0.03), app_float(row.get("Rotation Y")), jobhub_now().strftime("%Y-%m-%d %H:%M:%S"), int(row.get("ID"))))
         st.success("3D mapper layout saved.")
         st.rerun()
     with st.expander("Manually add one mapped surface"):
@@ -809,7 +809,7 @@ def building_mapper_page(default_job_id=None):
                          surface_type, elevation, level_name, x_pos, y_pos, z_pos, width, height, depth,
                          rotation_y, colour_hex, notes, created_at, updated_at)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (selected_job_id, package_id, int(src_row.get("ID") or 0), int(src_row.get("Takeoff Line ID") or 0) if app_float(src_row.get("Takeoff Line ID")) else None, str(src_row.get("Section Code") or ""), surface_name, surface_type, elevation, "Manual", x_pos, y_pos, z_pos, width, height, depth, rotation_y, building_surface_colour(src_row.get("Substrate"), src_row.get("Labour Category"), src_row.get("Area")), "Manually mapped surface.", datetime.now().strftime("%Y-%m-%d %H:%M:%S"), datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+                    """, (selected_job_id, package_id, int(src_row.get("ID") or 0), int(src_row.get("Takeoff Line ID") or 0) if app_float(src_row.get("Takeoff Line ID")) else None, str(src_row.get("Section Code") or ""), surface_name, surface_type, elevation, "Manual", x_pos, y_pos, z_pos, width, height, depth, rotation_y, building_surface_colour(src_row.get("Substrate"), src_row.get("Labour Category"), src_row.get("Area")), "Manually mapped surface.", jobhub_now().strftime("%Y-%m-%d %H:%M:%S"), jobhub_now().strftime("%Y-%m-%d %H:%M:%S")))
                     st.success("Mapped surface added.")
                     st.rerun()
     with st.expander("Delete mapped surface"):
@@ -1061,7 +1061,7 @@ def create_grid_zones_from_progress_sections(job_id, package_id, document_id, vi
     existing_progress_ids = set()
     if not existing.empty and "Progress Section ID" in existing.columns:
         existing_progress_ids = {int(x) for x in existing["Progress Section ID"].dropna().astype(int).tolist() if int(x) > 0}
-    now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now_text = jobhub_now().strftime("%Y-%m-%d %H:%M:%S")
     created = 0
     cols = 5
     cell_w = 17.5
@@ -1303,7 +1303,7 @@ def building_progress_mapper_page(default_job_id=None):
                     UPDATE drawing_progress_zones
                     SET view_name = ?, zone_name = ?, x_percent = ?, y_percent = ?, width_percent = ?, height_percent = ?, updated_at = ?
                     WHERE id = ?
-                """, (str(row.get("View") or ""), str(row.get("Zone Name") or ""), max(0, min(100, app_float(row.get("X %")))), max(0, min(100, app_float(row.get("Y %")))), max(1, min(100, app_float(row.get("Width %")))), max(1, min(100, app_float(row.get("Height %")))), datetime.now().strftime("%Y-%m-%d %H:%M:%S"), int(row.get("ID"))))
+                """, (str(row.get("View") or ""), str(row.get("Zone Name") or ""), max(0, min(100, app_float(row.get("X %")))), max(0, min(100, app_float(row.get("Y %")))), max(1, min(100, app_float(row.get("Width %")))), max(1, min(100, app_float(row.get("Height %")))), jobhub_now().strftime("%Y-%m-%d %H:%M:%S"), int(row.get("ID"))))
             st.success("Zone positions saved.")
             st.rerun()
 
@@ -1315,7 +1315,7 @@ def building_progress_mapper_page(default_job_id=None):
             if not selected_zone_labels:
                 st.error("Select at least one mapped zone.")
             else:
-                now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                now_text = jobhub_now().strftime("%Y-%m-%d %H:%M:%S")
                 updated = 0
                 for label in selected_zone_labels:
                     progress_id = zone_options[label]
@@ -1358,7 +1358,7 @@ def building_progress_mapper_page(default_job_id=None):
                         (job_id, package_id, document_id, progress_section_id, takeoff_line_id, view_name, zone_name,
                          x_percent, y_percent, width_percent, height_percent, colour_hex, notes, created_at, updated_at)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (selected_job_id, package_id, document_id, int(src_row.get("ID") or 0), int(src_row.get("Takeoff Line ID") or 0) if app_float(src_row.get("Takeoff Line ID")) else None, view_name, zone_name, x_percent, y_percent, width_percent, height_percent, building_surface_colour(src_row.get("Substrate"), src_row.get("Labour Category"), src_row.get("Area")), zone_note, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+                    """, (selected_job_id, package_id, document_id, int(src_row.get("ID") or 0), int(src_row.get("Takeoff Line ID") or 0) if app_float(src_row.get("Takeoff Line ID")) else None, view_name, zone_name, x_percent, y_percent, width_percent, height_percent, building_surface_colour(src_row.get("Substrate"), src_row.get("Labour Category"), src_row.get("Area")), zone_note, jobhub_now().strftime("%Y-%m-%d %H:%M:%S"), jobhub_now().strftime("%Y-%m-%d %H:%M:%S")))
                     st.success("Mapped zone added.")
                     st.rerun()
 
@@ -1654,7 +1654,7 @@ def render_progress_billing_model(job_id, package_id=None, key_prefix="progress_
                 job_id, claim_no, claim_description, round(summary["claim_available"], 2),
                 str(jobhub_today()), "", "", "Draft",
                 f"Generated from progress model package ID {package_id}. Review before sending.",
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                jobhub_now().strftime("%Y-%m-%d %H:%M:%S"),
             ))
             st.success(f"Draft claim {claim_no} created. Review it in Control Centre → Invoice / Claim Tracker before sending.")
             refresh()

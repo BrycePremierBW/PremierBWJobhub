@@ -20,6 +20,7 @@ schema, but replaces the page renderer with one self-contained implementation:
 from __future__ import annotations
 
 from datetime import datetime
+from jobhub_time import jobhub_now
 import importlib
 import mimetypes
 import os
@@ -510,7 +511,7 @@ def render_native_po_upload_page() -> None:
                     file_name, file_path = po._save_uploaded_file(
                         job_id, base_number, uploaded
                     )
-                    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    now = jobhub_now().strftime("%Y-%m-%d %H:%M:%S")
                     uploaded_by = _current_user(po)
                     mime_type = str(
                         getattr(uploaded, "type", "")
@@ -651,7 +652,7 @@ def render_native_po_upload_page() -> None:
                     file_name, file_path = po._save_uploaded_file(
                         job_id, clean_number, uploaded
                     )
-                    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    now = jobhub_now().strftime("%Y-%m-%d %H:%M:%S")
                     uploaded_by = _current_user(po)
                     mime_type = str(
                         getattr(uploaded, "type", "")

@@ -312,7 +312,7 @@ def painting_takeoff_generator_page(default_job_id=None):
                         UPDATE painting_takeoff_packages
                         SET status = ?, takeoff_date = ?, assumptions = ?, notes = ?, updated_at = ?
                         WHERE id = ?
-                    """, (status, takeoff_date, assumptions, notes, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), package_id))
+                    """, (status, takeoff_date, assumptions, notes, jobhub_now().strftime("%Y-%m-%d %H:%M:%S"), package_id))
                     st.success("Take-off package updated.")
                     refresh()
 

@@ -10,6 +10,7 @@ safe account/role audit that never displays password hashes or secrets.
 from __future__ import annotations
 
 from datetime import datetime
+from jobhub_time import jobhub_now
 import json
 import sys
 from typing import Any
@@ -328,7 +329,7 @@ def build_access_audit() -> dict[str, Any]:
         "permissions": _permission_rows(),
         "accounts": accounts,
         "findings": findings,
-        "checked_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "checked_at": jobhub_now().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
 
@@ -380,7 +381,7 @@ def render_permissions_audit_page() -> None:
     st.download_button(
         "Download access audit",
         data=json.dumps(report, indent=2, default=str).encode("utf-8"),
-        file_name=f"jobhub_access_audit_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+        file_name=f"jobhub_access_audit_{jobhub_now().strftime('%Y%m%d_%H%M%S')}.json",
         mime="application/json",
         key="pb_download_access_audit",
     )

@@ -44,7 +44,7 @@ def recalc_estimate_totals(estimate_id):
         UPDATE estimate_working_sheets
         SET total_ex_gst = ?, gst_amount = ?, total_inc_gst = ?, updated_at = ?
         WHERE id = ?
-    """, (totals["total_ex_gst"], totals["gst_amount"], totals["total_inc_gst"], datetime.now().strftime("%Y-%m-%d %H:%M:%S"), estimate_id))
+    """, (totals["total_ex_gst"], totals["gst_amount"], totals["total_inc_gst"], jobhub_now().strftime("%Y-%m-%d %H:%M:%S"), estimate_id))
 
 def estimate_working_sheet_page():
     st.header("Estimate Working Sheet")
@@ -95,7 +95,7 @@ def estimate_working_sheet_page():
             notes = st.text_area("Initial Notes")
             created = st.form_submit_button("Create Estimate Working Sheet")
             if created:
-                now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                now = jobhub_now().strftime("%Y-%m-%d %H:%M:%S")
                 execute("""
                     INSERT INTO estimate_working_sheets
                     (job_id, estimate_no, estimate_date, revision, status, labour_hours, labour_rate,
@@ -180,7 +180,7 @@ def estimate_working_sheet_page():
                 """, (estimate_no, estimate_date, revision, status, labour_hours, labour_rate, material_allowance,
                       access_equipment_allowance, subcontractor_allowance, sundries_allowance, margin_percent, contingency_percent,
                       gst_percent, preview["total_ex_gst"], preview["gst_amount"], preview["total_inc_gst"],
-                      datetime.now().strftime("%Y-%m-%d %H:%M:%S"), notes, selected_estimate_id))
+                      jobhub_now().strftime("%Y-%m-%d %H:%M:%S"), notes, selected_estimate_id))
                 st.success("Estimate summary saved.")
                 refresh()
 

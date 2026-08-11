@@ -29,7 +29,7 @@ FINAL_ORDER_STATUSES = ("Approved", "Rejected")
 
 
 def _now_text():
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return jobhub_now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _safe_text(value):
@@ -40,7 +40,7 @@ def _new_order_number(job_id):
     job_df = df_query("SELECT job_no FROM jobs WHERE id = ?", (job_id,))
     job_no = str(job_df.iloc[0]["job_no"] or f"JOB{job_id}") if not job_df.empty else f"JOB{job_id}"
     clean_job_no = re.sub(r"[^A-Za-z0-9-]", "", job_no).upper() or f"JOB{job_id}"
-    return f"MO-{clean_job_no}-{datetime.now():%Y%m%d%H%M%S}-{secrets.token_hex(2).upper()}"
+    return f"MO-{clean_job_no}-{jobhub_now():%Y%m%d%H%M%S}-{secrets.token_hex(2).upper()}"
 
 
 def get_material_order(order_id):

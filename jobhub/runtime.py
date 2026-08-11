@@ -16,7 +16,7 @@ from io import BytesIO
 from pathlib import Path
 from urllib.parse import urlparse
 
-from jobhub_time import jobhub_today
+from jobhub_time import jobhub_now, jobhub_today
 
 import pandas as pd
 import psycopg2

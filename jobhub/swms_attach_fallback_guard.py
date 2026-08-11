@@ -8,6 +8,7 @@ if the helper cannot be called with the current signature.
 from __future__ import annotations
 
 from datetime import datetime
+from jobhub_time import jobhub_now
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +26,7 @@ def _fallback_attach(job_id: int, pdf_path: Path) -> None:
             "SWMS",
             Path(pdf_path).name,
             str(pdf_path),
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            jobhub_now().strftime("%Y-%m-%d %H:%M:%S"),
             "Generic SWMS generated in JobHub.",
             "application/pdf",
         ),

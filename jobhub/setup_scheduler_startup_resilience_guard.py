@@ -14,6 +14,7 @@ programming errors and non-connectivity failures still raise normally.
 from __future__ import annotations
 
 from datetime import datetime
+from jobhub_time import jobhub_now
 from typing import Any, Callable
 
 from . import setup_scheduler_crew_bridge_guard as bridge_guard
@@ -86,7 +87,7 @@ def install_setup_scheduler_startup_resilience_guard() -> bool:
             setattr(
                 bridge_guard,
                 LAST_ERROR_AT_ATTR,
-                datetime.now().isoformat(timespec="seconds"),
+                jobhub_now().isoformat(timespec="seconds"),
             )
             # The bridge installer can continue patching its runtime helpers.
             # A later read/save calls this initializer again and therefore

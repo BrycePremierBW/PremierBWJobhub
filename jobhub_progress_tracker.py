@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from jobhub_time import jobhub_now
 from io import BytesIO
 
 import pandas as pd
@@ -17,7 +18,7 @@ from jobhub_production import expected_progress, line_production_metrics
 
 
 def _now():
-    return datetime.now().isoformat(timespec="seconds")
+    return jobhub_now().isoformat(timespec="seconds")
 
 
 def _weighted_percent(row, stages):

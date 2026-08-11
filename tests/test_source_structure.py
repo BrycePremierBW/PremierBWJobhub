@@ -149,6 +149,30 @@ class SourceStructureTests(unittest.TestCase):
                         offenders.append(f"{path.relative_to(ROOT)}:{i}")
         self.assertEqual(offenders, [])
 
+    def test_no_utc_now_anywhere_in_application_source(self):
+        # datetime.now() is the Render server's UTC wall clock. All stored
+        # timestamps must flow through jobhub_now() (business-local). Explicit
+        # datetime.now(timezone.utc) is allowed: self-contained subsystems such
+        # as jobhub_v2 use it consistently.
+        offenders = []
+        for item in (
+            ROOT / "pb_jobhub_app.py",
+            ROOT / "pb_jobhub_visual_scheduler.py",
+            ROOT / "pb_planreader_app.py",
+            ROOT / "jobhub_core.py",
+            ROOT / "jobhub_feedback.py",
+            ROOT / "jobhub_enterprise.py",
+            ROOT / "jobhub_progress_tracker.py",
+            ROOT / "jobhub",
+            ROOT / "jobhub_v4",
+        ):
+            files = [p for p in item.rglob("*.py")] if item.is_dir() else [item]
+            for path in files:
+                for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                    if "datetime.now()" in line:
+                        offenders.append(f"{path.relative_to(ROOT)}:{i}")
+        self.assertEqual(offenders, [])
+
     def test_job_folder_uses_editable_schedule_and_weighted_progress(self):
         app_source = (ROOT / "pb_jobhub_app.py").read_text(encoding="utf-8")
         scheduler_source = (ROOT / "pb_jobhub_visual_scheduler.py").read_text(encoding="utf-8")

@@ -15,6 +15,7 @@ records without deleting audit history.
 from __future__ import annotations
 
 from datetime import datetime
+from jobhub_time import jobhub_now
 import json
 import os
 import platform
@@ -138,7 +139,7 @@ def _age_hours(value: Any) -> float | None:
     parsed = _parse_datetime(value)
     if parsed is None:
         return None
-    return max(0.0, (datetime.now() - parsed).total_seconds() / 3600.0)
+    return max(0.0, (jobhub_now() - parsed).total_seconds() / 3600.0)
 
 
 def _check(area: str, name: str, status: str, detail: str) -> dict[str, str]:
@@ -487,7 +488,7 @@ def _runtime_report() -> dict[str, Any]:
         "Database backend": "PostgreSQL" if bool(_app_attr("USE_POSTGRES", False)) else "SQLite",
         "Render service": str(os.getenv("RENDER_SERVICE_NAME", "") or "Not detected"),
         "Render commit": render_commit[:12] if render_commit else "Not detected",
-        "Checked at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "Checked at": jobhub_now().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
 
@@ -569,7 +570,7 @@ def _render_unresolved_errors(st: Any) -> None:
             WHERE id = ? AND COALESCE(resolved_at, '') = ''
             """,
             (
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                jobhub_now().strftime("%Y-%m-%d %H:%M:%S"),
                 _current_username(),
                 str(resolution or "").strip(),
                 options[selected],
@@ -627,7 +628,7 @@ def render_system_health_page() -> None:
     st.download_button(
         "Download health report",
         data=report_bytes,
-        file_name=f"jobhub_health_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+        file_name=f"jobhub_health_{jobhub_now().strftime('%Y%m%d_%H%M%S')}.json",
         mime="application/json",
         key="pb_download_system_health",
     )

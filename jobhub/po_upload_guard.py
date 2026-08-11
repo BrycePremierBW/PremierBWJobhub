@@ -9,6 +9,7 @@ app's hard-coded dashboard reset checks.
 from __future__ import annotations
 
 from datetime import datetime
+from jobhub_time import jobhub_now
 from pathlib import Path
 import re
 import sys
@@ -129,7 +130,7 @@ def _error(message: str) -> None:
 
 
 def _now() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return jobhub_now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _clean_filename(value: str) -> str:
@@ -341,7 +342,7 @@ def _save_uploaded_file(job_id: int, po_number: str, uploaded_file: Any) -> tupl
     job_dir.mkdir(parents=True, exist_ok=True)
     original_name = _clean_filename(getattr(uploaded_file, "name", "purchase_order.pdf"))
     prefix = _clean_filename(po_number or "PO")
-    file_name = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{prefix}_{original_name}"
+    file_name = f"{jobhub_now().strftime('%Y%m%d_%H%M%S')}_{prefix}_{original_name}"
     file_path = job_dir / file_name
     file_path.write_bytes(uploaded_file.getbuffer())
     return file_name, str(file_path)

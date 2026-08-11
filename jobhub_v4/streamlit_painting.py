@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from jobhub_time import jobhub_now
 import json
 from typing import Any
 from uuid import uuid4
@@ -657,7 +658,7 @@ def _paint_calculator(ctx: dict[str, Any], job_id: int) -> None:
                     if ctx.get("USE_POSTGRES"):
                         insert_sql += " RETURNING id"
                     cur.execute(insert_sql, (
-                        job_id, f"{job_no}-PI-01", datetime.now().date().isoformat(),
+                        job_id, f"{job_no}-PI-01", jobhub_now().date().isoformat(),
                         "Painting Intelligence", "Draft", timestamp, timestamp,
                         "Created from a manual Painting Intelligence work item.",
                     ))

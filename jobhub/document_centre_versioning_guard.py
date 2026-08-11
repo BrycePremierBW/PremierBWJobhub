@@ -16,6 +16,7 @@ Rules:
 from __future__ import annotations
 
 from datetime import datetime
+from jobhub_time import jobhub_now
 import hashlib
 import mimetypes
 from pathlib import Path
@@ -30,7 +31,7 @@ _schema_ready = False
 
 
 def _now() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return jobhub_now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def normalise_document_family_name(file_name: Any) -> str:

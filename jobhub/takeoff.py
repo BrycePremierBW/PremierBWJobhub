@@ -174,7 +174,7 @@ def next_takeoff_no(job_id):
 
 def create_takeoff_package(job_id, method="Manual", source_documents="", assumptions="", ai_notes="", notes=""):
     takeoff_no = next_takeoff_no(job_id)
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = jobhub_now().strftime("%Y-%m-%d %H:%M:%S")
     execute("""
         INSERT INTO painting_takeoff_packages
         (job_id, takeoff_no, takeoff_date, status, source_documents, generated_method, assumptions,
@@ -257,7 +257,7 @@ def recalc_takeoff_package(package_id):
         round(vals["total_paint"], 2),
         round(vals["standard_paint"], 2),
         round(vals["gloss_paint"], 2),
-        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        jobhub_now().strftime("%Y-%m-%d %H:%M:%S"),
         package_id,
     ))
 
@@ -285,7 +285,7 @@ def add_takeoff_line(package_id, area_type, location_area, substrate, labour_cat
         paint_litres,
         flags,
         notes,
-        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        jobhub_now().strftime("%Y-%m-%d %H:%M:%S"),
     ))
     recalc_takeoff_package(package_id)
 
@@ -403,7 +403,7 @@ def import_takeoff_csv_to_package(job_id, csv_file, source_name="CSV Import", no
             float(paint_litres or 0),
             flags,
             note,
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            jobhub_now().strftime("%Y-%m-%d %H:%M:%S"),
         ))
         imported += 1
 
@@ -833,7 +833,7 @@ def run_twenty_point_takeoff_check(package_id, save_result=True):
                 UPDATE painting_takeoff_packages
                 SET audit_score = ?, audit_notes = ?, audit_at = ?, updated_at = ?
                 WHERE id = ?
-            """, (score, notes, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), datetime.now().strftime("%Y-%m-%d %H:%M:%S"), package_id))
+            """, (score, notes, jobhub_now().strftime("%Y-%m-%d %H:%M:%S"), jobhub_now().strftime("%Y-%m-%d %H:%M:%S"), package_id))
         except Exception:
             pass
     return audit_df
@@ -890,7 +890,7 @@ def ensure_progress_sections_for_package(package_id, reset_values=False):
     lines_calc["m2"] = pd.to_numeric(lines_calc["m2"], errors="coerce").fillna(0)
     lines_calc["labour_hours"] = pd.to_numeric(lines_calc["labour_hours"], errors="coerce").fillna(0)
     basis_total = float(lines_calc["labour_hours"].sum()) or float(lines_calc["m2"].sum()) or 0.0
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = jobhub_now().strftime("%Y-%m-%d %H:%M:%S")
     created_count = 0
 
     for _, line in lines_calc.iterrows():
@@ -1041,7 +1041,7 @@ def update_progress_section(section_id, completed_m2, allocated_value, status, n
         WHERE id = ?
     """, (
         completed_m2, completed_percent, app_float(allocated_value), status, notes,
-        current_username(), datetime.now().strftime("%Y-%m-%d %H:%M:%S"), section_id,
+        current_username(), jobhub_now().strftime("%Y-%m-%d %H:%M:%S"), section_id,
     ))
 
 def progress_export_excel(job_id, package_id=None):

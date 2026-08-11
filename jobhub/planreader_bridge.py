@@ -18,6 +18,7 @@ import os
 import re
 import sqlite3
 from datetime import datetime
+from jobhub_time import jobhub_now
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -234,7 +235,7 @@ def ensure_bridge_schema() -> None:
 
 # -------------------------------------------------------------------- helpers
 def _now() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return jobhub_now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _f(value: Any) -> float:

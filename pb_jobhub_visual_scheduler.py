@@ -14,7 +14,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 from jobhub_feedback import error as pb_error, replay_pending as pb_replay_pending, rerun as pb_rerun, success as pb_success
-from jobhub_time import jobhub_today
+from jobhub_time import jobhub_now, jobhub_today
 
 try:
     import psycopg2
@@ -538,7 +538,7 @@ def save_scheduler_crew(
 ) -> int:
     """Create or update a saved crew and its members in one transaction."""
     member_ids = list(dict.fromkeys([int(lead_employee_id), *[int(value) for value in member_employee_ids]]))
-    now = datetime.now().isoformat(timespec="seconds")
+    now = jobhub_now().isoformat(timespec="seconds")
     with db_conn() as conn:
         cur = conn.cursor()
         if crew_id is None:
@@ -832,7 +832,7 @@ def add_assignment(
             finish_value.strftime("%H:%M"),
             site_role,
             notes.strip(),
-            datetime.now().isoformat(timespec="seconds"),
+            jobhub_now().isoformat(timespec="seconds"),
             "Day",
             work_date.isoformat(),
             work_date.isoformat(),
@@ -898,7 +898,7 @@ def replace_conflicting_assignments(
                 int(job_id), int(job_stage_id) if job_stage_id is not None else None,
                 int(employee_id), work_date.isoformat(), start_value.strftime("%H:%M"),
                 finish_value.strftime("%H:%M"), site_role, notes.strip(),
-                datetime.now().isoformat(timespec="seconds"), "Day", work_date.isoformat(),
+                jobhub_now().isoformat(timespec="seconds"), "Day", work_date.isoformat(),
                 work_date.isoformat(), float(planned_hours), created_by,
                 1 if linked_to_job_dates and job_start is not None else 0,
                 day_offset, job_start.isoformat() if job_start else None,
@@ -2347,8 +2347,8 @@ def page_leave(user: dict) -> None:
                         status,
                         reason.strip(),
                         str(user.get("username", "")) if status == "Approved" else "",
-                        datetime.now().isoformat(timespec="seconds") if status == "Approved" else None,
-                        datetime.now().isoformat(timespec="seconds"),
+                        jobhub_now().isoformat(timespec="seconds") if status == "Approved" else None,
+                        jobhub_now().isoformat(timespec="seconds"),
                     ),
                 )
                 pb_success("Leave request saved.")
@@ -2376,14 +2376,14 @@ def page_leave(user: dict) -> None:
             if c1.button("Approve", type="primary", width="stretch"):
                 execute(
                     "UPDATE staff_leave_requests SET status='Approved',reviewed_by=?,reviewed_at=? WHERE id=?",
-                    (str(user.get("username", "")), datetime.now().isoformat(timespec="seconds"), request_id),
+                    (str(user.get("username", "")), jobhub_now().isoformat(timespec="seconds"), request_id),
                 )
                 pb_success("Leave approved.")
                 pb_rerun()
             if c2.button("Reject", width="stretch"):
                 execute(
                     "UPDATE staff_leave_requests SET status='Rejected',reviewed_by=?,reviewed_at=? WHERE id=?",
-                    (str(user.get("username", "")), datetime.now().isoformat(timespec="seconds"), request_id),
+                    (str(user.get("username", "")), jobhub_now().isoformat(timespec="seconds"), request_id),
                 )
                 pb_success("Leave rejected.")
                 pb_rerun()
@@ -2677,7 +2677,7 @@ def page_sync() -> None:
                             notes=EXCLUDED.notes,
                             updated_at=EXCLUDED.updated_at
                         """,
-                        (employee_id, target, notes.strip(), datetime.now().isoformat(timespec="seconds")),
+                        (employee_id, target, notes.strip(), jobhub_now().isoformat(timespec="seconds")),
                     )
                 else:
                     execute(
@@ -2689,7 +2689,7 @@ def page_sync() -> None:
                             notes=excluded.notes,
                             updated_at=excluded.updated_at
                         """,
-                        (employee_id, target, notes.strip(), datetime.now().isoformat(timespec="seconds")),
+                        (employee_id, target, notes.strip(), jobhub_now().isoformat(timespec="seconds")),
                     )
                 pb_success("Target hours saved.")
                 pb_rerun()
@@ -2773,7 +2773,7 @@ def page_my_leave(user: dict) -> None:
                     reason.strip(),
                     "",
                     None,
-                    datetime.now().isoformat(timespec="seconds"),
+                    jobhub_now().isoformat(timespec="seconds"),
                 ),
             )
             pb_success("Leave request submitted.")

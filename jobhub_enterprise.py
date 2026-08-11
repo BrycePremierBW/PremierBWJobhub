@@ -28,7 +28,7 @@ from typing import Any, Callable
 
 import pandas as pd
 
-from jobhub_time import jobhub_today
+from jobhub_time import jobhub_now, jobhub_today
 import streamlit as st
 
 from jobhub_production import remaining_contract_labour
@@ -38,7 +38,7 @@ PLANNING_LABOUR_RATE = 60.0
 
 
 def _now() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return jobhub_now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _today() -> str:
@@ -1756,7 +1756,7 @@ def render_field_mode(ctx: dict[str, Any]) -> None:
             submit_clock = st.form_submit_button("■ Clock Off & Submit Timesheet", width="stretch")
         if submit_clock:
             try:
-                now_dt = datetime.now()
+                now_dt = jobhub_now()
                 total_hours = _clock_hours(started, now_dt, break_minutes)
                 start_dt = datetime.fromisoformat(started.replace(" ", "T"))
                 conn = ctx["connect"]()
@@ -1899,7 +1899,7 @@ def _database_table_names(ctx: dict[str, Any]) -> list[str]:
 def create_backup(ctx: dict[str, Any], include_job_files: bool, backup_type: str, created_by: str) -> Path:
     backup_dir = Path(ctx["DATA_DIR"]) / "backups"
     backup_dir.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    stamp = jobhub_now().strftime("%Y%m%d_%H%M%S")
     target = backup_dir / f"PB_JobHub_{_slug(backup_type)}_{stamp}.zip"
     tables = _database_table_names(ctx)
     manifest: dict[str, Any] = {

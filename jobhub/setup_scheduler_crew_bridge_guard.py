@@ -8,6 +8,7 @@ be used without maintaining duplicate crew lists.
 from __future__ import annotations
 
 from datetime import datetime
+from jobhub_time import jobhub_now
 import sys
 from typing import Any, Iterable
 
@@ -223,7 +224,7 @@ def _upsert_setup_crew(
         return 0
     lead_id = int(lead_employee_id)
     member_ids = list(dict.fromkeys([lead_id, *[int(value) for value in member_employee_ids]]))
-    now = datetime.now().isoformat(timespec="seconds")
+    now = jobhub_now().isoformat(timespec="seconds")
     existing = query_df("SELECT id FROM jobhub_crews WHERE LOWER(TRIM(crew_name))=LOWER(TRIM(?)) LIMIT 1", (name,))
     if existing is None or getattr(existing, "empty", True):
         if bool(getattr(scheduler, "USE_POSTGRES", False)):

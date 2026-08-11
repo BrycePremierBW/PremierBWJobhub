@@ -219,7 +219,7 @@ def import_master_checklist_to_job(job_id, job_info, equipment_df, materials_df,
     conn = connect()
     cur = conn.cursor()
 
-    imported_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    imported_at = jobhub_now().strftime("%Y-%m-%d %H:%M:%S")
 
     if update_job:
         update_fields = []
@@ -436,7 +436,7 @@ def attach_document_to_job(job_id, document_type, file_path, notes="Generated fr
         document_type,
         os.path.basename(file_path),
         file_path,
-        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        jobhub_now().strftime("%Y-%m-%d %H:%M:%S"),
         notes,
     ))
 
@@ -452,7 +452,7 @@ def save_uploaded_job_document(job_id, uploaded_file, document_type, notes=""):
     os.makedirs(documents_folder, exist_ok=True)
 
     original_name = safe_file_name(uploaded_file.name)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    timestamp = jobhub_now().strftime("%Y%m%d_%H%M%S_%f")
     stored_file_name = f"{timestamp}_{original_name}"
     file_path = os.path.join(documents_folder, stored_file_name)
 
@@ -526,7 +526,7 @@ def save_converted_drawing_image(job_id, source_pdf_name, page_index, image_byte
 
     stem = os.path.splitext(safe_file_name(source_pdf_name))[0]
     ext = "jpg" if str(image_format).upper() in ["JPG", "JPEG"] else "png"
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    timestamp = jobhub_now().strftime("%Y%m%d_%H%M%S_%f")
     stored_file_name = f"{timestamp}_{stem}_page_{page_index + 1:03d}.{ext}"
     file_path = os.path.join(documents_folder, stored_file_name)
     with open(file_path, "wb") as f:
@@ -1399,7 +1399,7 @@ def generate_variation_form_pdf(job_id, requested_by="", description="", reason=
         f"{safe_file_name(job_no)}_{variation_no}_variation_form_fillable.pdf"
     )
 
-    created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    created_at = jobhub_now().strftime("%Y-%m-%d %H:%M:%S")
     today_text = str(jobhub_today())
 
     execute("""

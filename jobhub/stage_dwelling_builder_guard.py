@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from jobhub_time import jobhub_now
 import sys
 from typing import Any
 
@@ -107,7 +108,7 @@ def _safe_rerun(st: Any) -> None:
 
 
 def _now() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return jobhub_now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:

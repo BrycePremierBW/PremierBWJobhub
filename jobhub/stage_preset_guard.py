@@ -13,6 +13,7 @@ import os
 import sys
 from dataclasses import dataclass
 from datetime import datetime
+from jobhub_time import jobhub_now
 from pathlib import Path
 from typing import Any, Callable
 
@@ -159,7 +160,7 @@ def _save_custom_preset(section: str, stage_name: str, percent: float) -> bool:
             )
             if item_key == key:
                 item["percent"] = clean_percent
-                item["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                item["updated_at"] = jobhub_now().strftime("%Y-%m-%d %H:%M:%S")
                 updated = True
                 break
         if not updated:
@@ -168,7 +169,7 @@ def _save_custom_preset(section: str, stage_name: str, percent: float) -> bool:
                     "section": section,
                     "stage_name": clean_name,
                     "percent": clean_percent,
-                    "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "created_at": jobhub_now().strftime("%Y-%m-%d %H:%M:%S"),
                 }
             )
         payload["custom_stages"] = items

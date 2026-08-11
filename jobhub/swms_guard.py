@@ -7,6 +7,7 @@ import re
 import sys
 import textwrap
 from datetime import datetime
+from jobhub_time import jobhub_now
 from pathlib import Path
 from typing import Any
 
@@ -162,9 +163,9 @@ def _make_swms_pdf(job_id: int, principal: str, description: str, prepared_by: s
     address = str(job.get("site_address") or "")
     builder = str(job.get("builder_client") or "")
     leading_hand = str(job.get("leading_hand") or "Site Supervisor")
-    swms_no = f"SWMS-{job_no}-{datetime.now().strftime('%Y%m%d')}"
+    swms_no = f"SWMS-{job_no}-{jobhub_now().strftime('%Y%m%d')}"
     folder = _job_folder(job_id, job_no)
-    pdf_path = folder / f"{_safe_name(job_no)}_generic_swms_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+    pdf_path = folder / f"{_safe_name(job_no)}_generic_swms_{jobhub_now().strftime('%Y%m%d_%H%M%S')}.pdf"
 
     page_w, page_h = A4
     margin = 18 * mm
@@ -197,7 +198,7 @@ def _make_swms_pdf(job_id: int, principal: str, description: str, prepared_by: s
     y -= 12 * mm
     col_w = (page_w - 2 * margin - 8 * mm) / 2
     left = [("Principal Contractor", principal or builder), ("Project", f"{job_no} - {job_name}".strip(" -")), ("Project Address", address), ("Job Description", description or "Painting and decorating works")]
-    right = [("SWMS #", swms_no), ("Date Prepared", datetime.now().strftime("%Y-%m-%d")), ("Prepared By", prepared_by), ("Responsible Person", leading_hand)]
+    right = [("SWMS #", swms_no), ("Date Prepared", jobhub_now().strftime("%Y-%m-%d")), ("Prepared By", prepared_by), ("Responsible Person", leading_hand)]
     y_left = y_right = y
     for label, value in left:
         y_left = field(label, value, margin, y_left, col_w)
@@ -298,7 +299,7 @@ def _attach(job_id: int, pdf_path: Path) -> None:
         _execute("""
             INSERT INTO job_documents (job_id,document_type,file_name,file_path,created_at,notes,mime_type)
             VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (int(job_id), "SWMS", pdf_path.name, str(pdf_path), datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "Generic SWMS generated in JobHub.", "application/pdf"))
+        """, (int(job_id), "SWMS", pdf_path.name, str(pdf_path), jobhub_now().strftime("%Y-%m-%d %H:%M:%S"), "Generic SWMS generated in JobHub.", "application/pdf"))
 
 
 def create_swms_for_job(job_id: int, principal: str, description: str, prepared_by: str, notes: str) -> int:
@@ -306,9 +307,9 @@ def create_swms_for_job(job_id: int, principal: str, description: str, prepared_
     pdf_path = _make_swms_pdf(job_id, principal, description, prepared_by, notes)
     _attach(job_id, pdf_path)
     job = _job(job_id)
-    swms_no = f"SWMS-{job.get('job_no') or job_id}-{datetime.now().strftime('%Y%m%d')}"
+    swms_no = f"SWMS-{job.get('job_no') or job_id}-{jobhub_now().strftime('%Y%m%d')}"
     title = f"Generic Painting SWMS - {job.get('job_no') or job_id}"
-    created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    created_at = jobhub_now().strftime("%Y-%m-%d %H:%M:%S")
     _execute("""
         INSERT INTO job_swms (job_id,title,swms_no,principal_contractor,job_description,file_name,file_path,status,created_at,created_by,notes)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -426,7 +427,7 @@ def render_swms_panel(employee_mode: bool = True, key_prefix: str = "employee_sw
             accepted = st.checkbox(ACK_TEXT, key=f"{key_prefix}_ack_{swms_id}")
             if st.button("Sign / acknowledge this SWMS", type="primary", disabled=not accepted or not sig.strip(), key=f"{key_prefix}_sign_{swms_id}"):
                 try:
-                    signed_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    signed_at = jobhub_now().strftime("%Y-%m-%d %H:%M:%S")
                     _execute("""
                         INSERT INTO job_swms_signatures
                         (job_swms_id,job_id,employee_id,employee_name,signed_by_user_id,signature_text,general_induction_card,acknowledgement_text,signed_at,notes)

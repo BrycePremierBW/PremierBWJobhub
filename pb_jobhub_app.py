@@ -25,7 +25,7 @@ except Exception:
 from pypdf import PdfReader, PdfWriter
 import streamlit as st
 from jobhub_feedback import error as pb_error, replay_pending as pb_replay_pending, rerun as pb_rerun, success as pb_success
-from jobhub_time import jobhub_today
+from jobhub_time import jobhub_now, jobhub_today
 from pb_jobhub_visual_scheduler import (
     assignment_rows,
     has_approved_leave,
@@ -1289,7 +1289,7 @@ if str(os.getenv("SHOW_STORAGE_CHECK", "")).strip().lower() in ["1", "true", "ye
         test_file_path = os.path.join(DATA_DIR, "persistent_test.txt")
         if st.button("Test Persistent Disk", key="storage_check_test_button"):
             with open(test_file_path, "a", encoding="utf-8") as test_file:
-                test_file.write(f"Test saved at {datetime.now()}\n")
+                test_file.write(f"Test saved at {jobhub_now()}\n")
             pb_success("Test file saved.")
 
         if os.path.exists(test_file_path):
@@ -2524,7 +2524,7 @@ def apply_schema_migrations():
                         "reversed_unapproved": legacy_reversed,
                         "ambiguous_for_review": legacy_ambiguous,
                     }, sort_keys=True),
-                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    jobhub_now().strftime("%Y-%m-%d %H:%M:%S"),
                 ))
 
             cur.execute(
@@ -2618,7 +2618,7 @@ def apply_schema_migrations():
 
             cur.execute(
                 "INSERT INTO schema_migrations (migration_id, applied_at) VALUES (?, ?)",
-                (migration_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+                (migration_id, jobhub_now().strftime("%Y-%m-%d %H:%M:%S")),
             )
 
         migration_id = "20260807_timesheet_site_location_v1"
@@ -2627,7 +2627,7 @@ def apply_schema_migrations():
 
             cur.execute(
                 "INSERT INTO schema_migrations (migration_id, applied_at) VALUES (?, ?)",
-                (migration_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+                (migration_id, jobhub_now().strftime("%Y-%m-%d %H:%M:%S")),
             )
 
         takeoff_migration_id = "20260725_takeoff_job_pack_v1"
@@ -2670,7 +2670,7 @@ def apply_schema_migrations():
             )
             cur.execute(
                 "INSERT INTO schema_migrations (migration_id, applied_at) VALUES (?, ?)",
-                (takeoff_migration_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+                (takeoff_migration_id, jobhub_now().strftime("%Y-%m-%d %H:%M:%S")),
             )
 
         material_policy_migration_id = "20260727_job_material_policy_notifications_v1"
@@ -2714,7 +2714,7 @@ def apply_schema_migrations():
             )
             cur.execute(
                 "INSERT INTO schema_migrations (migration_id, applied_at) VALUES (?, ?)",
-                (material_policy_migration_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+                (material_policy_migration_id, jobhub_now().strftime("%Y-%m-%d %H:%M:%S")),
             )
 
         production_target_migration_id = "20260802_production_target_budget_overheads_v1"
@@ -2761,7 +2761,7 @@ def apply_schema_migrations():
                 )
                 """
             )
-            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            now = jobhub_now().strftime("%Y-%m-%d %H:%M:%S")
             settings = [
                 ("overhead_wages", "Wage overhead", "Monthly overhead", 16000.0, "$ / month", 1),
                 ("overhead_vehicles", "Cars / vehicles", "Monthly overhead", 600.0, "$ / month", 2),
@@ -2862,7 +2862,7 @@ def apply_schema_migrations():
                         totals["total_inc_gst"], estimate_row[0],
                     ),
                 )
-            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            now = jobhub_now().strftime("%Y-%m-%d %H:%M:%S")
             cur.execute(
                 "INSERT INTO schema_migrations (migration_id, applied_at) VALUES (?, ?)",
                 (simple_pricing_migration_id, now),
@@ -2885,7 +2885,7 @@ def apply_schema_migrations():
                 CREATE INDEX IF NOT EXISTS idx_job_comments_job_created
                 ON job_comments (job_id, created_at)
             """)
-            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            now = jobhub_now().strftime("%Y-%m-%d %H:%M:%S")
             cur.execute(
                 "INSERT INTO schema_migrations (migration_id, applied_at) VALUES (?, ?)",
                 (job_comments_migration_id, now),
@@ -2899,7 +2899,7 @@ def apply_schema_migrations():
                 "viewer_scope",
                 "TEXT DEFAULT 'crew'",
             )
-            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            now = jobhub_now().strftime("%Y-%m-%d %H:%M:%S")
             cur.execute(
                 "INSERT INTO schema_migrations (migration_id, applied_at) VALUES (?, ?)",
                 (document_viewer_migration_id, now),
@@ -2913,7 +2913,7 @@ def apply_schema_migrations():
                 "file_data",
                 "BYTEA" if USE_POSTGRES else "BLOB",
             )
-            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            now = jobhub_now().strftime("%Y-%m-%d %H:%M:%S")
             cur.execute(
                 "INSERT INTO schema_migrations (migration_id, applied_at) VALUES (?, ?)",
                 (file_data_migration_id, now),
@@ -3042,7 +3042,7 @@ def record_audit_event(action, entity_type, entity_id="", details=None):
             str(entity_type or ""),
             str(entity_id or ""),
             json.dumps(details or {}, default=str, sort_keys=True),
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            jobhub_now().strftime("%Y-%m-%d %H:%M:%S"),
         ))
     except Exception:
         # Auditing must not hide the original user action or error.
@@ -3139,7 +3139,7 @@ def create_management_notifications(
             return 0
         user = get_current_user() or {}
         created_by = str(user.get("employee_name") or user.get("username") or "JobHub")
-        created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        created_at = jobhub_now().strftime("%Y-%m-%d %H:%M:%S")
         conn = connect()
         try:
             cur = conn.cursor()
@@ -3260,7 +3260,7 @@ def send_phone_push(
     if launch_url:
         payload["url"] = str(launch_url)
 
-    sent_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    sent_at = jobhub_now().strftime("%Y-%m-%d %H:%M:%S")
     status = "failed"
     provider_message_id = ""
     response_text = ""
@@ -3329,7 +3329,7 @@ def create_user_notifications(
         return 0
     user = get_current_user() or {}
     created_by = str(user.get("employee_name") or user.get("username") or "JobHub")
-    created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    created_at = jobhub_now().strftime("%Y-%m-%d %H:%M:%S")
     rows = [
         (
             user_id,
@@ -3598,7 +3598,7 @@ def render_employee_requests(employee_id):
         return
     open_count = int(requests_df[requests_df["Status"].isin(["Requested", "In Progress"])].shape[0])
     overdue_count = 0
-    now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now_text = jobhub_now().strftime("%Y-%m-%d %H:%M:%S")
     if "Due" in requests_df:
         overdue_count = int(
             (
@@ -3683,7 +3683,7 @@ def render_employee_requests(employee_id):
                 except Exception as exc:
                     photo_failures.append(f"{uploaded.name}: {exc}")
             completed_at = (
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                jobhub_now().strftime("%Y-%m-%d %H:%M:%S")
                 if response_status in {"Completed", "Unable to Complete"}
                 else ""
             )
@@ -3872,7 +3872,7 @@ def staff_requests_page():
                                 priority,
                                 due_at,
                                 "Requested",
-                                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                jobhub_now().strftime("%Y-%m-%d %H:%M:%S"),
                             ),
                         )
                         conn.commit()
@@ -3993,7 +3993,7 @@ def staff_requests_page():
     ):
         execute(
             "UPDATE staff_requests SET status='Cancelled',completed_at=?,completed_by=? WHERE id=?",
-            (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), current_username(), request_id),
+            (jobhub_now().strftime("%Y-%m-%d %H:%M:%S"), current_username(), request_id),
         )
         pb_success("Request cancelled.")
         pb_rerun()
@@ -4032,7 +4032,7 @@ def notify_overdue_staff_requests():
         ORDER BY r.due_at,r.id
         LIMIT 25
         """,
-        (datetime.now().strftime("%Y-%m-%d %H:%M:%S"),),
+        (jobhub_now().strftime("%Y-%m-%d %H:%M:%S"),),
     )
     for _, row in overdue.iterrows():
         create_user_notifications(
@@ -4054,7 +4054,7 @@ def mark_notification_read(notification_id, user_id):
         SET read_at = ?
         WHERE id = ? AND recipient_user_id = ?
     """, (
-        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        jobhub_now().strftime("%Y-%m-%d %H:%M:%S"),
         int(notification_id),
         int(user_id),
     ))
@@ -4113,7 +4113,7 @@ def render_sidebar_notifications():
                 WHERE recipient_user_id = ?
                   AND COALESCE(read_at, '') = ''
             """, (
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                jobhub_now().strftime("%Y-%m-%d %H:%M:%S"),
                 int(user_id),
             ))
             pb_success("All notifications marked as read.")
@@ -4761,7 +4761,7 @@ def import_master_checklist_to_job(job_id, job_info, equipment_df, materials_df,
     conn = connect()
     cur = conn.cursor()
 
-    imported_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    imported_at = jobhub_now().strftime("%Y-%m-%d %H:%M:%S")
 
     if update_job:
         update_fields = []
@@ -5017,7 +5017,7 @@ def attach_document_to_job(job_id, document_type, file_path, notes="Generated fr
         document_type,
         os.path.basename(file_path),
         file_path,
-        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        jobhub_now().strftime("%Y-%m-%d %H:%M:%S"),
         notes,
         resolved_mime,
         file_data,
@@ -5134,7 +5134,7 @@ def upload_job_document(job_id, uploaded_file, document_type, notes="", viewer_s
             str(document_type or "Document"),
             file_name,
             destination,
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            jobhub_now().strftime("%Y-%m-%d %H:%M:%S"),
             str(notes or ""),
             mime,
             str(viewer_scope or "crew"),
@@ -5407,7 +5407,7 @@ def generate_variation_form_pdf(job_id, requested_by="", description="", reason=
         f"{safe_file_name(job_no)}_{variation_no}_variation_form_fillable.pdf"
     )
 
-    created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    created_at = jobhub_now().strftime("%Y-%m-%d %H:%M:%S")
     today_text = jobhub_today().isoformat()
 
     execute("""
@@ -5567,7 +5567,7 @@ def _archive_deleted_job_files(job_number):
     archive_root = Path(EXPORTS_DIR).resolve() / "deleted_jobs"
     archive_root.mkdir(parents=True, exist_ok=True)
     destination = archive_root / (
-        f"{safe_file_name(job_number)}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        f"{safe_file_name(job_number)}_{jobhub_now().strftime('%Y%m%d_%H%M%S')}"
     )
     shutil.move(str(source), str(destination))
     return str(destination)
@@ -5663,7 +5663,7 @@ def seed_app_users():
                 0,
                 "",
                 1,
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                jobhub_now().strftime("%Y-%m-%d %H:%M:%S"),
             ))
         elif bootstrap_password and not bootstrap_errors:
             # A secure environment value can recover an existing admin account
@@ -5685,7 +5685,7 @@ def seed_app_users():
                     WHERE id = ?
                 """, (
                     hash_password(bootstrap_password),
-                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    jobhub_now().strftime("%Y-%m-%d %H:%M:%S"),
                     int(existing[0]),
                 ))
 
@@ -5742,7 +5742,7 @@ def _login_audit(username, success, reason):
             str(username or "").strip(),
             1 if success else 0,
             str(reason or "")[:250],
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            jobhub_now().strftime("%Y-%m-%d %H:%M:%S"),
         ))
     except Exception:
         pass
@@ -5778,7 +5778,7 @@ def force_password_change():
                 WHERE id = ?
             """, (
                 hash_password(new_password),
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                jobhub_now().strftime("%Y-%m-%d %H:%M:%S"),
                 int(user["id"]),
             ))
             st.session_state["user"]["must_change_password"] = False
@@ -5874,7 +5874,7 @@ def require_login():
             else:
                 row = user_df.iloc[0]
                 locked_until = _parse_timestamp(row["locked_until"])
-                if locked_until and locked_until > datetime.now():
+                if locked_until and locked_until > jobhub_now():
                     _login_audit(username, False, "temporarily_locked")
                     pb_error("This account is temporarily locked. Try again later or contact an administrator.")
                 elif int(row["active"] or 0) != 1:
@@ -5890,7 +5890,7 @@ def require_login():
                     failed_count = int(row["failed_login_count"] or 0) + 1
                     new_lock = ""
                     if failed_count >= 5:
-                        new_lock = (datetime.now() + timedelta(minutes=15)).isoformat(timespec="seconds")
+                        new_lock = (jobhub_now() + timedelta(minutes=15)).isoformat(timespec="seconds")
                         failed_count = 0
                     execute("""
                         UPDATE app_users
@@ -5914,7 +5914,7 @@ def require_login():
                         WHERE id = ?
                     """, (
                         upgraded_hash,
-                        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        jobhub_now().strftime("%Y-%m-%d %H:%M:%S"),
                         int(row["id"]),
                     ))
                     user_dict = {
@@ -6514,7 +6514,7 @@ def employee_portal():
                             WHERE id = ?
                         """, (
                             hash_password(new_password),
-                            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            jobhub_now().strftime("%Y-%m-%d %H:%M:%S"),
                             user["id"],
                         ))
                         record_audit_event("password_changed", "app_user", user["id"])
@@ -6744,7 +6744,7 @@ def user_access_page():
                 selected_access_job_id,
                 selected_access_employee_id,
                 current_user.get("username", ""),
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                jobhub_now().strftime("%Y-%m-%d %H:%M:%S"),
             ))
             record_audit_event(
                 "employee_job_access_granted",
@@ -6876,7 +6876,7 @@ def user_access_page():
                                     1,
                                     notes,
                                     1,
-                                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                    jobhub_now().strftime("%Y-%m-%d %H:%M:%S"),
                                 ))
                                 record_audit_event(
                                     "user_created",
@@ -6955,7 +6955,7 @@ def user_access_page():
                                     WHERE id = ?
                                 """, (
                                     hash_password(new_password),
-                                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                    jobhub_now().strftime("%Y-%m-%d %H:%M:%S"),
                                     selected_user_id,
                                 ))
                                 record_audit_event(
@@ -7295,7 +7295,7 @@ def save_photo_to_job_folder(job_id, uploaded_file, max_size=(1600, 1600), quali
 
     original_name = safe_file_name(uploaded_file.name)
     base_name = os.path.splitext(original_name)[0]
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    timestamp = jobhub_now().strftime("%Y%m%d_%H%M%S_%f")
 
     file_name = f"{timestamp}_{base_name}.jpg"
     file_path = os.path.join(photos_folder, file_name)
@@ -7365,7 +7365,7 @@ def save_job_photo(
         category,
         caption,
         uploaded_by,
-        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        jobhub_now().strftime("%Y-%m-%d %H:%M:%S"),
         notes,
         int(job_stage_id) if job_stage_id else None,
         int(stage_progress_update_id) if stage_progress_update_id else None,
@@ -8000,7 +8000,7 @@ def save_timesheet_entry(
 ):
     user = get_current_user() or {}
     submitted_by = user.get("username", "")
-    submitted_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    submitted_at = jobhub_now().strftime("%Y-%m-%d %H:%M:%S")
     conn = connect()
     try:
         cur = conn.cursor()
@@ -8104,7 +8104,7 @@ def set_timesheet_status(timesheet_id, status):
         job_id, employee_id, work_date, start_time, finish_time, break_minutes, total_hours, notes, hourly_rate = row
         user = get_current_user() or {}
         approved_by = str(user.get("username") or "")
-        approved_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        approved_at = jobhub_now().strftime("%Y-%m-%d %H:%M:%S")
         cur.execute("""
             UPDATE timesheet_entries
             SET status = ?, approved_by = ?, approved_at = ?
@@ -9999,7 +9999,7 @@ def import_estimating_rate_dataframe(source_df, replace_all=False):
     conn = connect()
     inserted = 0
     updated = 0
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = jobhub_now().strftime("%Y-%m-%d %H:%M:%S")
     try:
         cur = conn.cursor()
         if replace_all:
@@ -10262,10 +10262,10 @@ def estimating_rate_library_page():
             selected_id = rate_options[selected_label]
             b1, b2, b3 = st.columns(3)
             if b1.button("Set Active", key="set_rate_active"):
-                execute("UPDATE estimating_rates SET active = 1, updated_at = ? WHERE id = ?", (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), selected_id))
+                execute("UPDATE estimating_rates SET active = 1, updated_at = ? WHERE id = ?", (jobhub_now().strftime("%Y-%m-%d %H:%M:%S"), selected_id))
                 pb_rerun()
             if b2.button("Set Inactive", key="set_rate_inactive"):
-                execute("UPDATE estimating_rates SET active = 0, updated_at = ? WHERE id = ?", (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), selected_id))
+                execute("UPDATE estimating_rates SET active = 0, updated_at = ? WHERE id = ?", (jobhub_now().strftime("%Y-%m-%d %H:%M:%S"), selected_id))
                 pb_rerun()
             confirm_delete = st.checkbox("Confirm permanent deletion", key="confirm_rate_delete")
             if b3.button("Delete Rate", key="delete_rate_button"):
@@ -11738,7 +11738,7 @@ def import_takeoff_job_pack(
     summary = parsed["summary"]
     pack_id = _takeoff_text(summary.get("pack_id"), "job-pack")[:120]
     revision = _takeoff_text(summary.get("revision"), "1")[:60]
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = jobhub_now().strftime("%Y-%m-%d %H:%M:%S")
     imported_by = current_username()
     pack_folder = None
     extracted_paths = {}
@@ -11779,7 +11779,7 @@ def import_takeoff_job_pack(
         safe_revision = safe_file_name(revision)[:40]
         pack_folder = Path(get_job_folder(job_no)) / "job_packs" / f"{safe_pack}_rev_{safe_revision}"
         if pack_folder.exists():
-            pack_folder = pack_folder.parent / f"{pack_folder.name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            pack_folder = pack_folder.parent / f"{pack_folder.name}_{jobhub_now().strftime('%Y%m%d_%H%M%S')}"
         pack_folder.mkdir(parents=True, exist_ok=False)
 
         source_zip_path = pack_folder / safe_file_name(parsed.get("source_name") or "job_pack.zip")
@@ -12217,7 +12217,7 @@ def attach_intake_package_to_job(
     summary = parsed["summary"]
     pack_id = _takeoff_text(summary.get("pack_id"), "smart-intake")[:120]
     revision = _takeoff_text(summary.get("revision"), "1")[:60]
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = jobhub_now().strftime("%Y-%m-%d %H:%M:%S")
     imported_by = current_username()
     conn = connect()
     pack_folder = None
@@ -12247,7 +12247,7 @@ def attach_intake_package_to_job(
 
         safe_pack = safe_file_name(pack_id)[:80]
         pack_folder = Path(get_job_folder(job_no)) / "job_packs" / (
-            f"{safe_pack}_intake_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            f"{safe_pack}_intake_{jobhub_now().strftime('%Y%m%d_%H%M%S')}"
         )
         pack_folder.mkdir(parents=True, exist_ok=False)
         source_zip_path = pack_folder / safe_file_name(parsed.get("source_name") or "smart_intake.zip")
@@ -13858,7 +13858,7 @@ def recalc_estimate_totals(estimate_id):
         totals["total_ex_gst"],
         totals["gst_amount"],
         totals["total_inc_gst"],
-        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        jobhub_now().strftime("%Y-%m-%d %H:%M:%S"),
         estimate_id,
     ))
 
@@ -13916,7 +13916,7 @@ def snapshot_estimate_rate_register(estimate_id):
     job_id, entries = build_estimate_rate_register_entries(estimate_id)
     if job_id <= 0 or not entries:
         return
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = jobhub_now().strftime("%Y-%m-%d %H:%M:%S")
     user = get_current_user() or {}
     changed_by = str(
         user.get("username") or user.get("employee_name") or current_role() or "estimator"
@@ -14027,7 +14027,7 @@ def render_estimate_archive_delete_controls(selected_estimate_id, current):
                         SET archived = 1, archived_at = ?, archived_by = ?
                         WHERE id = ?
                     """, (
-                        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        jobhub_now().strftime("%Y-%m-%d %H:%M:%S"),
                         archived_by,
                         selected_estimate_id,
                     ))
@@ -14328,7 +14328,7 @@ def estimate_working_sheet_page():
             notes = st.text_area("Initial Notes")
             created = st.form_submit_button("Create Estimate Working Sheet")
             if created:
-                now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                now = jobhub_now().strftime("%Y-%m-%d %H:%M:%S")
                 execute("""
                     INSERT INTO estimate_working_sheets
                     (job_id, estimate_no, estimate_date, revision, status, labour_hours, labour_rate,
@@ -14595,7 +14595,7 @@ def estimate_working_sheet_page():
                 labour_cost_per_hour, material_markup_percent,
                 floor_area_base_rate, ceiling_surcharge_2700, ceiling_surcharge_3000,
                 preview["total_ex_gst"], preview["gst_amount"], preview["total_inc_gst"],
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"), notes, selected_estimate_id,
+                jobhub_now().strftime("%Y-%m-%d %H:%M:%S"), notes, selected_estimate_id,
             ))
             record_audit_event(
                 "estimate_pricing_updated",
@@ -16155,7 +16155,7 @@ def save_app_builder_note(topic, note, source="Manual / AI"):
     execute("""
         INSERT INTO app_builder_notes (topic, note, source, created_at)
         VALUES (?, ?, ?, ?)
-    """, (topic, note, source, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    """, (topic, note, source, jobhub_now().strftime("%Y-%m-%d %H:%M:%S")))
 
 
 
@@ -16292,7 +16292,7 @@ def self_edit_apply_replacements(replacements):
 
     backup_root = Path(tempfile.gettempdir()) / "pb_jobhub_self_edit_backups"
     backup_root.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    stamp = jobhub_now().strftime("%Y%m%d_%H%M%S")
 
     backup_map = {}
 
@@ -16369,8 +16369,8 @@ def save_app_code_change(title, request, ai_response, patch_json, target_files, 
         patch_json,
         target_files,
         status,
-        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        datetime.now().strftime("%Y-%m-%d %H:%M:%S") if status == "Applied" else "",
+        jobhub_now().strftime("%Y-%m-%d %H:%M:%S"),
+        jobhub_now().strftime("%Y-%m-%d %H:%M:%S") if status == "Applied" else "",
         result_message,
     ))
 
@@ -16941,10 +16941,10 @@ def save_learning_source(topic, url, summary="", active=1):
         topic,
         url,
         int(active),
-        datetime.now().strftime("%Y-%m-%d %H:%M:%S") if summary else "",
+        jobhub_now().strftime("%Y-%m-%d %H:%M:%S") if summary else "",
         summary,
         "",
-        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        jobhub_now().strftime("%Y-%m-%d %H:%M:%S"),
     ))
 
 
@@ -17189,7 +17189,7 @@ def app_builder_ai_page():
                         else:
                             execute(
                                 "UPDATE app_learning_sources SET last_checked = ?, last_summary = ? WHERE id = ?",
-                                (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), summary, int(row["ID"]))
+                                (jobhub_now().strftime("%Y-%m-%d %H:%M:%S"), summary, int(row["ID"]))
                             )
                             pb_success("Refreshed and saved.")
 
@@ -17809,7 +17809,7 @@ def pb_control_budget_lock(df):
             float(quoted_labour_hours), float(quoted_labour_cost), float(quoted_materials),
             float(quoted_access), float(quoted_subbies), float(quoted_sundries), 0.0,
             measurement_basis, float(measured_quantity), float(target_value),
-            float(DEFAULT_DAY_HOURS), datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            float(DEFAULT_DAY_HOURS), jobhub_now().strftime("%Y-%m-%d %H:%M:%S"),
             current_username(), notes,
         )
         if existing.empty:
@@ -17883,7 +17883,7 @@ def pb_control_variations():
                 INSERT INTO job_variations
                 (job_id, variation_no, description, reason, amount_ex_gst, status, sent_date, approved_date, approved_by, notes, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (job_id, variation_no, description, reason, amount, status, sent_date, approved_date, approved_by, notes, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+            """, (job_id, variation_no, description, reason, amount, status, sent_date, approved_date, approved_by, notes, jobhub_now().strftime("%Y-%m-%d %H:%M:%S")))
             pb_success("Variation saved.")
             refresh()
 
@@ -17932,7 +17932,7 @@ def pb_control_invoice_claims():
                 INSERT INTO invoice_claims
                 (job_id, claim_no, description, amount_ex_gst, invoice_date, due_date, paid_date, status, notes, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (job_id, claim_no, description, amount, invoice_date, due_date, paid_date, status, notes, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+            """, (job_id, claim_no, description, amount, invoice_date, due_date, paid_date, status, notes, jobhub_now().strftime("%Y-%m-%d %H:%M:%S")))
             pb_success("Invoice / claim saved.")
             refresh()
 
@@ -17979,7 +17979,7 @@ def pb_control_staff_schedule():
                 INSERT INTO staff_schedule
                 (job_id, employee_id, schedule_date, start_time, finish_time, site_role, notes, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (job_options[selected_job], employee_options[selected_employee], schedule_date, start_time, finish_time, site_role, notes, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+            """, (job_options[selected_job], employee_options[selected_employee], schedule_date, start_time, finish_time, site_role, notes, jobhub_now().strftime("%Y-%m-%d %H:%M:%S")))
             pb_success("Schedule entry saved.")
             refresh()
 
@@ -18380,7 +18380,7 @@ def add_job_comment(job_id, author_name, author_role, comment):
             str(author_name or "JobHub"),
             str(author_role or ""),
             comment,
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            jobhub_now().strftime("%Y-%m-%d %H:%M:%S"),
         ),
     )
     return True
@@ -18627,7 +18627,7 @@ def operating_setting_values():
 
 
 def save_operating_settings(values):
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = jobhub_now().strftime("%Y-%m-%d %H:%M:%S")
     for key, details in OPERATING_SETTING_DEFAULTS.items():
         label, group, _, unit, order = details
         execute(
@@ -19329,7 +19329,7 @@ def lock_estimate_baseline(estimate_id, baseline_name, notes=""):
         columns = [description[0] for description in cur.description]
         estimate = dict(zip(columns, row))
         job_id = int(estimate["job_id"])
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        now = jobhub_now().strftime("%Y-%m-%d %H:%M:%S")
         cur.execute("UPDATE estimate_baselines SET active=0 WHERE job_id=?", (job_id,))
         baseline_id = _insert_and_get_id(
             cur,
@@ -19637,7 +19637,7 @@ def render_job_purchase_orders_panel(job_id):
             ).empty:
                 pb_error("This job already has that PO Number.")
             else:
-                now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                now = jobhub_now().strftime("%Y-%m-%d %H:%M:%S")
                 execute(
                     """
                     INSERT INTO job_purchase_orders
@@ -19745,7 +19745,7 @@ def render_job_purchase_orders_panel(job_id):
                         edit_po_status,
                         edit_received.isoformat() if edit_received else "",
                         edit_po_notes.strip(),
-                        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        jobhub_now().strftime("%Y-%m-%d %H:%M:%S"),
                         po_id,
                         job_id,
                     ),
@@ -19866,7 +19866,7 @@ def render_job_stage_templates_panel(job_id, stages):
                     conn = connect()
                     try:
                         cur = conn.cursor()
-                        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        now = jobhub_now().strftime("%Y-%m-%d %H:%M:%S")
                         template_id = _insert_and_get_id(
                             cur,
                             """
@@ -19961,7 +19961,7 @@ def render_job_stage_templates_panel(job_id, stages):
                 str(value or "").strip().casefold()
                 for value in stages.get("Stage Name", pd.Series(dtype=str)).tolist()
             }
-            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            now = jobhub_now().strftime("%Y-%m-%d %H:%M:%S")
             added = 0
             for _, item in items.iterrows():
                 name = str(item["Stage"] or "").strip()
@@ -20145,7 +20145,7 @@ def render_stage_updates_panel(job_id, employee_mode=False, key_prefix="stage_up
         elif blocker_type != "None" and blocker_status == "Active" and not blocker_notes.strip():
             pb_error("Add details explaining the active blocker.")
         else:
-            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            now = jobhub_now().strftime("%Y-%m-%d %H:%M:%S")
             conn = connect()
             try:
                 cur = conn.cursor()
@@ -20509,7 +20509,7 @@ def render_operational_alerts_panel(job_id):
                     int(job_id),
                     int(selected["job_stage_id"]) if selected["job_stage_id"] is not None else None,
                     str(selected["alert_key"]),
-                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    jobhub_now().strftime("%Y-%m-%d %H:%M:%S"),
                     current_username(),
                     acknowledgement_note.strip(),
                 ),
@@ -20599,7 +20599,7 @@ def render_stage_progress_claims_panel(job_id):
                 try:
                     cur = conn.cursor()
                     total = float(selected_claims["Claim Now Ex GST"].fillna(0).sum())
-                    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    now = jobhub_now().strftime("%Y-%m-%d %H:%M:%S")
                     claim_id = _insert_and_get_id(
                         cur,
                         """
@@ -20844,7 +20844,7 @@ def render_job_stages_panel(job_id):
             ).empty:
                 pb_error("This job already has a stage with that name.")
             else:
-                now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                now = jobhub_now().strftime("%Y-%m-%d %H:%M:%S")
                 execute(
                     """
                     INSERT INTO job_stages
@@ -21032,7 +21032,7 @@ def render_job_stages_panel(job_id):
                     edit_end.isoformat() if edit_end else "",
                     float(edit_budget),
                     edit_notes.strip(),
-                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    jobhub_now().strftime("%Y-%m-%d %H:%M:%S"),
                     stage_id,
                     job_id,
                 ),
@@ -22834,7 +22834,7 @@ elif menu == "Jobs":
                         row_version = COALESCE(row_version, 1) + 1
                     WHERE id = ?
                 """, (
-                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    jobhub_now().strftime("%Y-%m-%d %H:%M:%S"),
                     str(user.get("username") or ""),
                     selected_id,
                 ))
@@ -22852,7 +22852,7 @@ elif menu == "Jobs":
                             row_version = COALESCE(row_version, 1) + 1
                         WHERE id = ?
                     """, (
-                        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        jobhub_now().strftime("%Y-%m-%d %H:%M:%S"),
                         str(user.get("username") or ""),
                         selected_id,
                     ))
@@ -23923,7 +23923,7 @@ elif menu == "Material Costs":
                         )
                         execute(
                             "UPDATE purchase_orders SET status = ?, updated_at = ? WHERE id = ?",
-                            ("Received", datetime.now().strftime("%Y-%m-%d %H:%M:%S"), selected_order_id),
+                            ("Received", jobhub_now().strftime("%Y-%m-%d %H:%M:%S"), selected_order_id),
                         )
                         record_audit_event(
                             "purchase_order_marked_delivered",

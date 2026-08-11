@@ -7,6 +7,7 @@ import re
 import shutil
 import time
 from datetime import datetime
+from jobhub_time import jobhub_now
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -132,7 +133,7 @@ def safe_name(value: str, fallback: str = "file") -> str:
 
 
 def now_stamp() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return jobhub_now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def money(v: Any) -> str:
@@ -2688,7 +2689,7 @@ def create_or_select_job() -> str:
     mode = st.sidebar.radio("Job mode", ["Open existing", "Create new"], label_visibility="collapsed")
     if mode == "Create new" or not jobs:
         with st.sidebar.form("new_job_form"):
-            job_no = st.text_input("Job no", value=f"PB-{datetime.now().strftime('%y%m%d')}")
+            job_no = st.text_input("Job no", value=f"PB-{jobhub_now().strftime('%y%m%d')}")
             job_name = st.text_input("Job name", value="New plan import")
             builder = st.text_input("Builder / client", value="")
             address = st.text_input("Site address", value="")

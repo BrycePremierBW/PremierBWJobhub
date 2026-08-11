@@ -6,7 +6,7 @@ Generated from the previously working JobHub monolith.
 from __future__ import annotations
 
 from .runtime import *
-from jobhub_time import jobhub_today
+from jobhub_time import jobhub_now, jobhub_today
 
 
 def pb_float(value, default=0.0):
@@ -322,14 +322,14 @@ def pb_control_budget_lock(df):
                 (job_id, quoted_labour_hours, quoted_labour_cost, quoted_materials, quoted_access_equipment,
                  quoted_subcontractors, quoted_sundries, target_gp_percent, locked_at, locked_by, notes)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (job_id, quoted_labour_hours, quoted_labour_cost, quoted_materials, quoted_access, quoted_subbies, quoted_sundries, target_gp, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), current_username(), notes))
+            """, (job_id, quoted_labour_hours, quoted_labour_cost, quoted_materials, quoted_access, quoted_subbies, quoted_sundries, target_gp, jobhub_now().strftime("%Y-%m-%d %H:%M:%S"), current_username(), notes))
         else:
             execute("""
                 UPDATE job_budgets
                 SET quoted_labour_hours = ?, quoted_labour_cost = ?, quoted_materials = ?, quoted_access_equipment = ?,
                     quoted_subcontractors = ?, quoted_sundries = ?, target_gp_percent = ?, locked_at = ?, locked_by = ?, notes = ?
                 WHERE job_id = ?
-            """, (quoted_labour_hours, quoted_labour_cost, quoted_materials, quoted_access, quoted_subbies, quoted_sundries, target_gp, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), current_username(), notes, job_id))
+            """, (quoted_labour_hours, quoted_labour_cost, quoted_materials, quoted_access, quoted_subbies, quoted_sundries, target_gp, jobhub_now().strftime("%Y-%m-%d %H:%M:%S"), current_username(), notes, job_id))
         st.success("Job budget saved.")
         refresh()
 
@@ -385,7 +385,7 @@ def pb_control_variations():
                 INSERT INTO job_variations
                 (job_id, variation_no, description, reason, amount_ex_gst, status, sent_date, approved_date, approved_by, notes, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (job_id, variation_no, description, reason, amount, status, sent_date, approved_date, approved_by, notes, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+            """, (job_id, variation_no, description, reason, amount, status, sent_date, approved_date, approved_by, notes, jobhub_now().strftime("%Y-%m-%d %H:%M:%S")))
             st.success("Variation saved.")
             refresh()
 
@@ -439,7 +439,7 @@ def pb_control_invoice_claims():
                 INSERT INTO invoice_claims
                 (job_id, claim_no, description, amount_ex_gst, invoice_date, due_date, paid_date, status, notes, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (job_id, claim_no, description, amount, invoice_date, due_date, paid_date, status, notes, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+            """, (job_id, claim_no, description, amount, invoice_date, due_date, paid_date, status, notes, jobhub_now().strftime("%Y-%m-%d %H:%M:%S")))
             st.success("Invoice / claim saved.")
             refresh()
 
@@ -541,7 +541,7 @@ def pb_control_staff_schedule():
                         finish_time,
                         site_role,
                         notes,
-                        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        jobhub_now().strftime("%Y-%m-%d %H:%M:%S"),
                         period_type,
                         period_start,
                         period_end,

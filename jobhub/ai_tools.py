@@ -197,7 +197,7 @@ def save_app_builder_note(topic, note, source="Manual / AI"):
     execute("""
         INSERT INTO app_builder_notes (topic, note, source, created_at)
         VALUES (?, ?, ?, ?)
-    """, (topic, note, source, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    """, (topic, note, source, jobhub_now().strftime("%Y-%m-%d %H:%M:%S")))
 
 
 
@@ -316,7 +316,7 @@ def self_edit_apply_replacements(replacements):
 
     backup_root = Path(tempfile.gettempdir()) / "pb_jobhub_self_edit_backups"
     backup_root.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    stamp = jobhub_now().strftime("%Y%m%d_%H%M%S")
 
     touched_files = set()
 
@@ -378,8 +378,8 @@ def save_app_code_change(title, request, ai_response, patch_json, target_files, 
         patch_json,
         target_files,
         status,
-        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        datetime.now().strftime("%Y-%m-%d %H:%M:%S") if status == "Applied" else "",
+        jobhub_now().strftime("%Y-%m-%d %H:%M:%S"),
+        jobhub_now().strftime("%Y-%m-%d %H:%M:%S") if status == "Applied" else "",
         result_message,
     ))
 
@@ -857,10 +857,10 @@ def save_learning_source(topic, url, summary="", active=1):
         topic,
         url,
         int(active),
-        datetime.now().strftime("%Y-%m-%d %H:%M:%S") if summary else "",
+        jobhub_now().strftime("%Y-%m-%d %H:%M:%S") if summary else "",
         summary,
         "",
-        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        jobhub_now().strftime("%Y-%m-%d %H:%M:%S"),
     ))
 
 def summarise_url_into_learning(topic, url):
@@ -1084,7 +1084,7 @@ def app_builder_ai_page():
                         else:
                             execute(
                                 "UPDATE app_learning_sources SET last_checked = ?, last_summary = ? WHERE id = ?",
-                                (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), summary, int(row["ID"]))
+                                (jobhub_now().strftime("%Y-%m-%d %H:%M:%S"), summary, int(row["ID"]))
                             )
                             st.success("Refreshed and saved.")
 

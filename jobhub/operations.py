@@ -37,7 +37,7 @@ def save_photo_to_job_folder(job_id, uploaded_file, max_size=(1600, 1600), quali
 
     original_name = safe_photo_file_name(uploaded_file.name)
     base_name = os.path.splitext(original_name)[0]
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    timestamp = jobhub_now().strftime("%Y%m%d_%H%M%S_%f")
 
     file_name = f"{timestamp}_{base_name}.jpg"
     file_path = os.path.join(photos_folder, file_name)
@@ -87,7 +87,7 @@ def save_job_photo(job_id, uploaded_file, category, caption, notes):
         category,
         caption,
         uploaded_by,
-        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        jobhub_now().strftime("%Y-%m-%d %H:%M:%S"),
         notes,
     ))
 
@@ -231,7 +231,7 @@ def calculate_hours_from_times(start_time, finish_time, break_minutes):
 def save_timesheet_entry(job_id, employee_id, work_date, start_time, finish_time, break_minutes, total_hours, work_type, notes, period_type="Single Day", period_start="", period_end=""):
     user = get_current_user() or {}
     submitted_by = user.get("username", "")
-    submitted_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    submitted_at = jobhub_now().strftime("%Y-%m-%d %H:%M:%S")
 
     period_type = str(period_type or "Single Day")
     period_start = str(period_start or work_date)

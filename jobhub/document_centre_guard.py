@@ -14,7 +14,7 @@ import re
 import sys
 from typing import Any
 
-from jobhub_time import jobhub_today
+from jobhub_time import jobhub_now, jobhub_today
 from .runtime import DATA_DIR, JOB_FILES_DIR
 
 
@@ -170,7 +170,7 @@ def _slug(value: Any, fallback: str = "general") -> str:
 
 
 def _now() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return jobhub_now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _current_user() -> dict[str, Any]:
@@ -407,7 +407,7 @@ def _store_one(
     original_name = _safe_name(getattr(upload, "name", "document"), "document")
     stem = _safe_name(Path(original_name).stem, "document")
     suffix = Path(original_name).suffix.lower()
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    timestamp = jobhub_now().strftime("%Y%m%d_%H%M%S_%f")
     stored_name = f"{timestamp}_{stem}{suffix}"
 
     if job_id is not None and job_record is not None:
