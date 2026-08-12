@@ -8,9 +8,10 @@ import jobhub.blip_integration_guard as blip
 
 
 class _Response:
-    def __init__(self, payload, status_code=200):
+    def __init__(self, payload, status_code=200, headers=None):
         self.payload = payload
         self.status_code = status_code
+        self.headers = headers or {}
 
     def raise_for_status(self):
         if self.status_code >= 400:
@@ -27,7 +28,7 @@ class _Session:
         self.clocking_calls = 0
 
     def post(self, url, **kwargs):
-        self.calls.append(("POST", url, kwargs))
+        self.calls.append((url, kwargs))
         if url.endswith("/connect/token"):
             return _Response({"access_token": "token-x"})
         if "/employees/" in url:
@@ -63,10 +64,6 @@ class _Session:
             )
         raise AssertionError(f"Unexpected URL: {url}")
 
-    def get(self, url, **kwargs):
-        self.calls.append(("GET", url, kwargs))
-        raise AssertionError(f"Unexpected GET URL: {url}")
-
 
 class _422Session(_Session):
     def post(self, url, **kwargs):
@@ -86,7 +83,7 @@ class _Retry500Session(_Session):
         if url.endswith("/connect/token"):
             return _Response({"access_token": "token-x"})
         if "/employees/" in url and self.failures < 2:
-            self.calls.append(("POST", url, kwargs))
+            self.calls.append((url, kwargs))
             self.failures += 1
             return _Response(
                 {
@@ -97,33 +94,6 @@ class _Retry500Session(_Session):
                 500,
             )
         return super().post(url, **kwargs)
-
-
-class _GetFallbackSession(_Session):
-    def post(self, url, **kwargs):
-        if url.endswith("/connect/token"):
-            return _Response({"access_token": "token-x"})
-        if "/employees/" in url:
-            self.calls.append(("POST", url, kwargs))
-            return _Response({}, 500)
-        return super().post(url, **kwargs)
-
-    def get(self, url, **kwargs):
-        self.calls.append(("GET", url, kwargs))
-        if "/employees/" in url:
-            return _Response(
-                {
-                    "items": [
-                        {
-                            "id": "emp-get-1",
-                            "name": {"givenName": "GET", "familyName": "Fallback"},
-                            "email": "get@example.com",
-                        }
-                    ],
-                    "continuationToken": None,
-                }
-            )
-        raise AssertionError(f"Unexpected GET URL: {url}")
 
 
 class _RepeatingTokenEmployeeSession(_Session):
@@ -172,7 +142,7 @@ class _Permanent500Session(_Session):
         if url.endswith("/connect/token"):
             return _Response({"access_token": "token-x"})
         if "/employees/" in url:
-            self.calls.append(("POST", url, kwargs))
+            self.calls.append((url, kwargs))
             return _Response(
                 {
                     "title": "Internal Server Error",
@@ -180,19 +150,9 @@ class _Permanent500Session(_Session):
                     "status": 500,
                 },
                 500,
+                headers={"X-Correlation-ID": "corr-123", "X-Request-ID": "req-456"},
             )
         return super().post(url, **kwargs)
-
-    def get(self, url, **kwargs):
-        self.calls.append(("GET", url, kwargs))
-        return _Response(
-            {
-                "title": "Service Unavailable",
-                "detail": "Employee API unavailable.",
-                "status": 503,
-            },
-            503,
-        )
 
 
 class BrightHRRequestCompatibilityTests(unittest.TestCase):
@@ -207,9 +167,6 @@ class BrightHRRequestCompatibilityTests(unittest.TestCase):
             blip.ENV_SYNC_TO: "2026-08-12",
         }
 
-    def _employee_calls(self, session):
-        return [call for call in session.calls if "/employees/" in call[1]]
-
     def test_employee_first_request_has_no_body_and_next_has_only_token(self):
         session = _Session()
         with patch.dict(os.environ, self.env, clear=False):
@@ -217,14 +174,13 @@ class BrightHRRequestCompatibilityTests(unittest.TestCase):
             employees = blip._fetch_employees_with_token(session, token)
 
         self.assertEqual(len(employees), 1)
-        employee_calls = self._employee_calls(session)
+        employee_calls = [(url, kwargs) for url, kwargs in session.calls if "/employees/" in url]
         self.assertEqual(len(employee_calls), 2)
-        self.assertEqual(employee_calls[0][0], "POST")
-        self.assertNotIn("json", employee_calls[0][2])
-        self.assertNotIn("data", employee_calls[0][2])
-        self.assertNotIn("Content-Type", employee_calls[0][2]["headers"])
-        self.assertEqual(employee_calls[1][2]["json"], {"continuationToken": "emp-next"})
-        self.assertNotIn("pageSize", employee_calls[1][2]["json"])
+        self.assertNotIn("json", employee_calls[0][1])
+        self.assertNotIn("data", employee_calls[0][1])
+        self.assertNotIn("Content-Type", employee_calls[0][1]["headers"])
+        self.assertEqual(employee_calls[1][1]["json"], {"continuationToken": "emp-next"})
+        self.assertNotIn("pageSize", employee_calls[1][1]["json"])
 
     def test_blip_query_uses_filters_without_page_size(self):
         session = _Session()
@@ -232,19 +188,19 @@ class BrightHRRequestCompatibilityTests(unittest.TestCase):
             rows = list(blip._iter_attendance_records(session))
 
         self.assertEqual(len(rows), 1)
-        clocking_calls = [call for call in session.calls if "/blip/" in call[1]]
+        clocking_calls = [(url, kwargs) for url, kwargs in session.calls if "/blip/" in url]
         self.assertEqual(len(clocking_calls), 1)
-        body = clocking_calls[0][2]["json"]
+        body = clocking_calls[0][1]["json"]
         self.assertNotIn("pageSize", body)
         self.assertEqual(body["filters"]["employeeId"], "emp-1")
         self.assertEqual(body["filters"]["from"], "2026-08-01T00:00:00Z")
         self.assertEqual(body["filters"]["to"], "2026-08-12T00:00:00Z")
 
-    def test_422_identifies_employee_query_phase_without_get_fallback(self):
+    def test_422_identifies_employee_query_phase(self):
         session = _422Session()
         with patch.dict(os.environ, self.env, clear=False):
             token = blip._request_token(session)
-            with self.assertRaisesRegex(RuntimeError, r"BrightHR employee query POST failed with HTTP 422"):
+            with self.assertRaisesRegex(RuntimeError, r"BrightHR employee query failed with HTTP 422"):
                 blip._fetch_employees_with_token(session, token)
 
     def test_employee_query_retries_transient_500_then_recovers(self):
@@ -258,26 +214,15 @@ class BrightHRRequestCompatibilityTests(unittest.TestCase):
         self.assertEqual(len(employees), 1)
         self.assertEqual(session.failures, 2)
         self.assertEqual(sleeper.call_count, 2)
-        employee_calls = self._employee_calls(session)
-        self.assertTrue(all(call[0] == "POST" for call in employee_calls))
-        self.assertNotIn("json", employee_calls[0][2])
-        self.assertNotIn("json", employee_calls[1][2])
-        self.assertNotIn("json", employee_calls[2][2])
+        employee_calls = [(url, kwargs) for url, kwargs in session.calls if "/employees/" in url]
+        # Two transient failures + successful first page + continuation page.
+        self.assertEqual(len(employee_calls), 4)
+        for _, kwargs in employee_calls[:3]:
+            self.assertNotIn("json", kwargs)
+            self.assertNotIn("data", kwargs)
+        self.assertEqual(employee_calls[3][1]["json"], {"continuationToken": "emp-next"})
 
-    def test_repeated_post_500_uses_api_catalogue_get_fallback(self):
-        session = _GetFallbackSession()
-        with patch.dict(os.environ, self.env, clear=False), patch(
-            "jobhub.blip_request_compat_guard.time.sleep", return_value=None
-        ):
-            token = blip._request_token(session)
-            employees = blip._fetch_employees_with_token(session, token)
-
-        self.assertEqual([item["id"] for item in employees], ["emp-get-1"])
-        employee_calls = self._employee_calls(session)
-        self.assertEqual([call[0] for call in employee_calls], ["POST", "POST", "POST", "GET"])
-        self.assertNotIn("json", employee_calls[-1][2])
-
-    def test_post_and_get_server_failures_identify_provisioning_boundary(self):
+    def test_permanent_500_surfaces_provider_reference_and_server_boundary(self):
         session = _Permanent500Session()
         with patch.dict(os.environ, self.env, clear=False), patch(
             "jobhub.blip_request_compat_guard.time.sleep", return_value=None
@@ -285,9 +230,12 @@ class BrightHRRequestCompatibilityTests(unittest.TestCase):
             token = blip._request_token(session)
             with self.assertRaisesRegex(
                 RuntimeError,
-                r"employee query POST failed with HTTP 500.*GET fallback also failed.*HTTP 503.*OAuth token acquisition succeeded",
+                r"BrightHR employee query failed with HTTP 500.*Internal Server Error.*corr-123.*req-456.*server-side processing failure",
             ):
                 blip._fetch_employees_with_token(session, token)
+
+        employee_calls = [(url, kwargs) for url, kwargs in session.calls if "/employees/" in url]
+        self.assertEqual(len(employee_calls), 3)
 
     def test_employee_query_stops_when_token_repeats(self):
         session = _RepeatingTokenEmployeeSession()
