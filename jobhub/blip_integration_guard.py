@@ -1,15 +1,17 @@
 """BrightHR Blip attendance integration for Premier Brushworks JobHub.
 
 Blip remains the attendance source. JobHub stages imported attendance, requires
-explicit BrightHR employee/location mappings, and only publishes completed,
-mapped sessions into the existing JobHub timesheet table.
+explicit BrightHR employee mappings, and only publishes completed sessions that
+a manager has explicitly assigned to a JobHub job during review. Blip clockings
+do not include a site/location field, so job assignment is a deliberate
+review-time step rather than an automatic guess.
 
 Secrets are read only from environment variables and are never persisted.
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import os
@@ -26,9 +28,12 @@ PATCH_MARKER = "_pb_blip_integration_guard"
 ENV_CLIENT_ID = "BRIGHTHR_CLIENT_ID"
 ENV_CLIENT_SECRET = "BRIGHTHR_CLIENT_SECRET"
 ENV_TOKEN_URL = "BRIGHTHR_TOKEN_URL"
+ENV_EMPLOYEES_URL = "BRIGHTHR_EMPLOYEES_URL"
 ENV_ATTENDANCE_URL = "BRIGHTHR_BLIP_ATTENDANCE_URL"
 ENV_TOKEN_AUTH_MODE = "BRIGHTHR_TOKEN_AUTH_MODE"
 ENV_SCOPE = "BRIGHTHR_SCOPE"
+ENV_SYNC_FROM = "BRIGHTHR_SYNC_FROM"
+ENV_SYNC_TO = "BRIGHTHR_SYNC_TO"
 
 _ALLOWED_ROLES = {"manager", "admin", "administrator", "owner"}
 
@@ -164,19 +169,6 @@ def _ensure_schema() -> None:
     )
     _execute(
         f"""
-        CREATE TABLE IF NOT EXISTS blip_location_job_map (
-            id {pk},
-            provider_location_id TEXT NOT NULL UNIQUE,
-            provider_location_name TEXT,
-            job_id INTEGER,
-            active INTEGER NOT NULL DEFAULT 1,
-            updated_at TEXT NOT NULL,
-            updated_by TEXT
-        )
-        """
-    )
-    _execute(
-        f"""
         CREATE TABLE IF NOT EXISTS blip_attendance_entries (
             id {pk},
             provider_event_id TEXT UNIQUE,
@@ -220,7 +212,6 @@ def _ensure_schema() -> None:
     for statement in (
         "CREATE INDEX IF NOT EXISTS idx_blip_attendance_status ON blip_attendance_entries(status, imported_at)",
         "CREATE INDEX IF NOT EXISTS idx_blip_attendance_employee ON blip_attendance_entries(provider_employee_id, work_date)",
-        "CREATE INDEX IF NOT EXISTS idx_blip_attendance_location ON blip_attendance_entries(provider_location_id, work_date)",
         "CREATE INDEX IF NOT EXISTS idx_blip_attendance_published ON blip_attendance_entries(published_timesheet_id)",
     ):
         _execute(statement)
@@ -231,6 +222,7 @@ def configuration_state() -> dict[str, bool]:
         ENV_CLIENT_ID: bool(os.environ.get(ENV_CLIENT_ID, "").strip()),
         ENV_CLIENT_SECRET: bool(os.environ.get(ENV_CLIENT_SECRET, "").strip()),
         ENV_TOKEN_URL: bool(os.environ.get(ENV_TOKEN_URL, "").strip()),
+        ENV_EMPLOYEES_URL: bool(os.environ.get(ENV_EMPLOYEES_URL, "").strip()),
         ENV_ATTENDANCE_URL: bool(os.environ.get(ENV_ATTENDANCE_URL, "").strip()),
     }
 
@@ -281,18 +273,107 @@ def _request_token(session: Any = requests) -> str:
     return token
 
 
-def _fetch_attendance_payload(session: Any = requests) -> Any:
+def _authorized_headers(token: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+
+
+def _fetch_employees_with_token(session: Any, token: str) -> list[dict[str, str]]:
+    """Enumerate BrightHR employees via POST /employees/v1/query."""
+    endpoint = os.environ.get(ENV_EMPLOYEES_URL, "").strip()
+    if not endpoint:
+        raise RuntimeError("BRIGHTHR_EMPLOYEES_URL is not configured.")
+    employees: list[dict[str, str]] = []
+    continuation: Any = None
+    while True:
+        body: dict[str, Any] = {"pageSize": 100}
+        if continuation:
+            body["continuationToken"] = continuation
+        response = session.post(
+            endpoint,
+            json=body,
+            headers=_authorized_headers(token),
+            timeout=45,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        items = payload.get("items") if isinstance(payload, Mapping) else None
+        for item in items or []:
+            if not isinstance(item, Mapping):
+                continue
+            name_obj = item.get("name") if isinstance(item.get("name"), Mapping) else {}
+            given = _string(name_obj.get("givenName"))
+            family = _string(name_obj.get("familyName"))
+            employee_id = _string(item.get("id"))
+            if not employee_id:
+                continue
+            employees.append(
+                {
+                    "id": employee_id,
+                    "name": _string(" ".join(part for part in (given, family) if part)),
+                    "email": _string(item.get("email")),
+                }
+            )
+        continuation = payload.get("continuationToken") if isinstance(payload, Mapping) else None
+        if not continuation:
+            break
+    return employees
+
+
+def _fetch_attendance_payload(session: Any = requests) -> list[Mapping[str, Any]]:
+    """Fetch Blip clockings using the documented BrightHR Customer API.
+
+    The clockings endpoint (POST /blip/v1/clockings/query) is per-employee and
+    JSON-bodied, so every BrightHR employee is enumerated first and queried in
+    turn, paging through each employee's continuation token. Each clocking is
+    enriched with the employee's name/email so the review UI can display names.
+    """
     endpoint = os.environ.get(ENV_ATTENDANCE_URL, "").strip()
     if not endpoint:
         raise RuntimeError("BRIGHTHR_BLIP_ATTENDANCE_URL is not configured.")
     token = _request_token(session)
-    response = session.get(
-        endpoint,
-        headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
-        timeout=45,
-    )
-    response.raise_for_status()
-    return response.json()
+    employees = _fetch_employees_with_token(session, token)
+    if not employees:
+        return []
+
+    sync_from = os.environ.get(ENV_SYNC_FROM, "").strip()
+    sync_to = os.environ.get(ENV_SYNC_TO, "").strip()
+
+    records: list[Mapping[str, Any]] = []
+    for employee in employees:
+        continuation: Any = None
+        while True:
+            body: dict[str, Any] = {"filters": {"employeeId": employee["id"]}}
+            if sync_from:
+                body["filters"]["from"] = sync_from
+            if sync_to:
+                body["filters"]["to"] = sync_to
+            body["pageSize"] = 100
+            if continuation:
+                body["continuationToken"] = continuation
+            response = session.post(
+                endpoint,
+                json=body,
+                headers=_authorized_headers(token),
+                timeout=45,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            items = payload.get("items") if isinstance(payload, Mapping) else None
+            for item in items or []:
+                if isinstance(item, Mapping):
+                    enriched = {
+                        "employee": {
+                            "id": employee["id"],
+                            "name": employee["name"],
+                            "email": employee["email"],
+                        },
+                        **item,
+                    }
+                    records.append(enriched)
+            continuation = payload.get("continuationToken") if isinstance(payload, Mapping) else None
+            if not continuation:
+                break
+    return records
 
 
 def _dig(record: Mapping[str, Any], *paths: str) -> Any:
@@ -337,6 +418,61 @@ def _date_part(explicit: Any, start: Any) -> str:
     return match.group(0) if match else ""
 
 
+def _dt(value: Any) -> datetime | None:
+    text = _string(value)
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _zone(tz_value: Any) -> timezone | None:
+    """Resolve an IANA name (or simple +/-hh:mm offset) to a timezone."""
+    text = _string(tz_value)
+    if not text:
+        return None
+    try:
+        from zoneinfo import ZoneInfo
+
+        return ZoneInfo(text)  # type: ignore[return-value]
+    except Exception:
+        pass
+    match = re.match(r"^([+-]?)(\d{1,2}):(\d{2})$", text)
+    if match:
+        try:
+            sign = -1 if match.group(1) == "-" else 1
+            hours = int(match.group(2))
+            minutes = int(match.group(3))
+            if hours <= 14 and minutes < 60:
+                return timezone(timedelta(hours=sign * hours, minutes=sign * minutes))
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
+def _local_time(value: Any, tz_value: Any, fallback: str) -> str:
+    """Convert a UTC clocking timestamp to the recorded local timezone."""
+    parsed = _dt(value)
+    if parsed is None or parsed.tzinfo is None:
+        return fallback
+    zone = _zone(tz_value)
+    if zone is None:
+        return parsed.strftime("%H:%M")
+    return parsed.astimezone(zone).strftime("%H:%M")
+
+
+def _local_date(value: Any, tz_value: Any, fallback: str) -> str:
+    parsed = _dt(value)
+    if parsed is None or parsed.tzinfo is None:
+        return fallback
+    zone = _zone(tz_value)
+    if zone is None:
+        return parsed.strftime("%Y-%m-%d")
+    return parsed.astimezone(zone).strftime("%Y-%m-%d")
+
+
 def _break_minutes(record: Mapping[str, Any]) -> int:
     value = _dig(
         record,
@@ -347,10 +483,23 @@ def _break_minutes(record: Mapping[str, Any]) -> int:
         "break.durationMinutes",
         "break.duration_minutes",
     )
-    try:
-        return max(0, int(round(float(value or 0))))
-    except (TypeError, ValueError):
-        return 0
+    if value not in (None, ""):
+        try:
+            return max(0, int(round(float(value or 0))))
+        except (TypeError, ValueError):
+            pass
+    breaks = record.get("breaks") if isinstance(record, Mapping) else None
+    if isinstance(breaks, list):
+        total = 0
+        for break_item in breaks:
+            if not isinstance(break_item, Mapping):
+                continue
+            start = _dt(break_item.get("start"))
+            end = _dt(break_item.get("end"))
+            if start is not None and end is not None and end > start:
+                total += int((end - start).total_seconds() // 60)
+        return max(0, total)
+    return 0
 
 
 def _extract_records(payload: Any) -> list[Mapping[str, Any]]:
@@ -415,6 +564,8 @@ def normalise_blip_record(record: Mapping[str, Any]) -> dict[str, Any]:
     )
     start_raw = _dig(record, "clockIn", "clock_in", "startTime", "start_time", "start", "startedAt", "started_at")
     end_raw = _dig(record, "clockOut", "clock_out", "endTime", "end_time", "end", "endedAt", "ended_at")
+    start_tz = _dig(record, "startTimeZone", "start_time_zone", "timeZone", "timezone")
+    end_tz = _dig(record, "endTimeZone", "end_time_zone", "timeZone", "timezone")
     work_date = _date_part(_dig(record, "workDate", "work_date", "date"), start_raw)
 
     if not employee_id:
@@ -429,9 +580,9 @@ def normalise_blip_record(record: Mapping[str, Any]) -> dict[str, Any]:
         "provider_employee_email": employee_email,
         "provider_location_id": location_id,
         "provider_location_name": location_name,
-        "work_date": work_date,
-        "start_time": _time_part(start_raw),
-        "end_time": _time_part(end_raw),
+        "work_date": _local_date(start_raw, start_tz, work_date),
+        "start_time": _local_time(start_raw, start_tz, _time_part(start_raw)),
+        "end_time": _local_time(end_raw, end_tz, _time_part(end_raw)),
         "break_minutes": _break_minutes(record),
         "raw_payload": json.dumps(record, sort_keys=True, separators=(",", ":"), default=str),
     }
@@ -485,20 +636,6 @@ def _employee_mapping(provider_employee_id: str) -> dict[str, Any] | None:
     )
 
 
-def _job_mapping(provider_location_id: str) -> dict[str, Any] | None:
-    if not provider_location_id:
-        return None
-    return _one(
-        """
-        SELECT job_id
-        FROM blip_location_job_map
-        WHERE provider_location_id=? AND active=1
-        LIMIT 1
-        """,
-        (provider_location_id,),
-    )
-
-
 def _upsert_attendance(record: Mapping[str, Any]) -> str:
     row = dict(record)
     digest = source_hash(row)
@@ -512,9 +649,8 @@ def _upsert_attendance(record: Mapping[str, Any]) -> str:
         existing = _one("SELECT * FROM blip_attendance_entries WHERE source_hash=? LIMIT 1", (digest,))
 
     emp_map = _employee_mapping(_string(row.get("provider_employee_id"))) or {}
-    job_map = _job_mapping(_string(row.get("provider_location_id"))) or {}
     employee_id = emp_map.get("employee_id")
-    job_id = job_map.get("job_id")
+    job_id = existing.get("job_id") if existing else None
     published_id = existing.get("published_timesheet_id") if existing else None
     status = attendance_status(
         end_time=row.get("end_time"),
@@ -681,65 +817,26 @@ def save_employee_mapping(
     refresh_mappings()
 
 
-def save_location_mapping(
-    provider_location_id: str,
-    job_id: int,
-    *,
-    provider_name: str = "",
-    actor: str | None = None,
-) -> None:
-    _ensure_schema()
-    provider_location_id = _string(provider_location_id)
-    if not provider_location_id:
-        raise ValueError("BrightHR location ID is required.")
-    existing = _one(
-        "SELECT id FROM blip_location_job_map WHERE provider_location_id=?",
-        (provider_location_id,),
-    )
-    params = (_string(provider_name), int(job_id), _now(), _string(actor or _actor()))
-    if existing:
-        _execute(
-            """
-            UPDATE blip_location_job_map
-            SET provider_location_name=?,job_id=?,active=1,updated_at=?,updated_by=?
-            WHERE provider_location_id=?
-            """,
-            (*params, provider_location_id),
-        )
-    else:
-        _execute(
-            """
-            INSERT INTO blip_location_job_map(
-                provider_location_id,provider_location_name,job_id,active,updated_at,updated_by
-            ) VALUES(?,?,?,1,?,?)
-            """,
-            (provider_location_id, *params),
-        )
-    refresh_mappings()
-
-
 def refresh_mappings() -> None:
     _ensure_schema()
     entries = _rows(
         """
-        SELECT id,provider_employee_id,provider_location_id,end_time,published_timesheet_id
+        SELECT id,provider_employee_id,end_time,job_id,published_timesheet_id
         FROM blip_attendance_entries
         WHERE published_timesheet_id IS NULL
         """
     )
     for entry in entries:
         emp = _employee_mapping(_string(entry.get("provider_employee_id"))) or {}
-        job = _job_mapping(_string(entry.get("provider_location_id"))) or {}
         employee_id = emp.get("employee_id")
-        job_id = job.get("job_id")
         status = attendance_status(
             end_time=entry.get("end_time"),
             employee_id=employee_id,
-            job_id=job_id,
+            job_id=entry.get("job_id"),
         )
         _execute(
-            "UPDATE blip_attendance_entries SET employee_id=?,job_id=?,status=? WHERE id=?",
-            (employee_id, job_id, status, entry["id"]),
+            "UPDATE blip_attendance_entries SET employee_id=?,status=? WHERE id=?",
+            (employee_id, status, entry["id"]),
         )
 
 
@@ -872,11 +969,12 @@ def _job_label(row: Mapping[str, Any]) -> str:
 
 def _render_overview(st: Any) -> None:
     state = configuration_state()
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Client ID", "Configured" if state[ENV_CLIENT_ID] else "Missing")
     c2.metric("Client secret", "Configured" if state[ENV_CLIENT_SECRET] else "Missing")
     c3.metric("Token endpoint", "Configured" if state[ENV_TOKEN_URL] else "Missing")
-    c4.metric("Blip attendance endpoint", "Configured" if state[ENV_ATTENDANCE_URL] else "Missing")
+    c4.metric("Employees endpoint", "Configured" if state[ENV_EMPLOYEES_URL] else "Missing")
+    c5.metric("Blip attendance endpoint", "Configured" if state[ENV_ATTENDANCE_URL] else "Missing")
     st.caption("Secrets are read from Render environment variables and are not stored in JobHub.")
 
     latest = _one("SELECT * FROM blip_sync_runs ORDER BY id DESC LIMIT 1")
@@ -957,57 +1055,6 @@ def _render_employee_mapping(st: Any) -> None:
         st.dataframe(current, use_container_width=True, hide_index=True)
 
 
-def _render_location_mapping(st: Any) -> None:
-    providers = _rows(
-        """
-        SELECT provider_location_id,
-               MAX(COALESCE(provider_location_name,'')) AS provider_location_name,
-               COUNT(*) AS attendance_rows
-        FROM blip_attendance_entries
-        WHERE COALESCE(provider_location_id,'')<>''
-        GROUP BY provider_location_id
-        ORDER BY LOWER(MAX(COALESCE(provider_location_name,''))),provider_location_id
-        """
-    )
-    if not providers:
-        st.info("No BrightHR Blip locations have been discovered yet.")
-        return
-    jobs = _jobs()
-    if not jobs:
-        st.warning("JobHub has no jobs available to map.")
-        return
-
-    provider_labels = {
-        f"{row.get('provider_location_name') or row['provider_location_id']} · {row['provider_location_id']}": row
-        for row in providers
-    }
-    selected_provider_label = st.selectbox(
-        "BrightHR Blip location", list(provider_labels), key="blip_map_location_provider"
-    )
-    provider = provider_labels[selected_provider_label]
-    job_labels = {_job_label(row): row for row in jobs}
-    selected_job_label = st.selectbox("JobHub job", list(job_labels), key="blip_map_location_jobhub")
-    if st.button("Save site → job mapping", key="blip_save_location_map"):
-        target = job_labels[selected_job_label]
-        save_location_mapping(
-            _string(provider["provider_location_id"]),
-            int(target["id"]),
-            provider_name=_string(provider.get("provider_location_name")),
-        )
-        st.success("Blip location mapping saved.")
-        st.rerun()
-
-    current = _rows(
-        """
-        SELECT m.provider_location_name,j.job_no,j.job_name,j.site_address,m.updated_at,m.updated_by
-        FROM blip_location_job_map m LEFT JOIN jobs j ON j.id=m.job_id
-        WHERE m.active=1 ORDER BY LOWER(COALESCE(m.provider_location_name,'')),m.provider_location_id
-        """
-    )
-    if current:
-        st.dataframe(current, use_container_width=True, hide_index=True)
-
-
 def _render_attendance(st: Any) -> None:
     status_filter = st.selectbox(
         "Attendance status",
@@ -1019,7 +1066,7 @@ def _render_attendance(st: Any) -> None:
     rows = _rows(
         f"""
         SELECT b.id,b.work_date,b.start_time,b.end_time,b.break_minutes,b.status,
-               b.provider_employee_name,b.provider_location_name,
+               b.employee_id,b.provider_employee_name,b.provider_employee_email,
                e.name AS jobhub_employee,j.job_no,j.job_name,b.published_timesheet_id,b.imported_at
         FROM blip_attendance_entries b
         LEFT JOIN employees e ON e.id=b.employee_id
@@ -1034,6 +1081,41 @@ def _render_attendance(st: Any) -> None:
         st.info("No Blip attendance rows match this filter.")
         return
     st.dataframe(rows, use_container_width=True, hide_index=True)
+
+    unreviewed = [row for row in rows if not row.get("published_timesheet_id")]
+    if unreviewed:
+        st.subheader("Assign job")
+        st.caption("BrightHR Blip clockings carry no site field, so each attendance row is assigned to a JobHub job here, during review.")
+        job_labels = {_job_label(job): int(job["id"]) for job in _jobs()}
+        if not job_labels:
+            st.warning("JobHub has no jobs available to assign.")
+        else:
+            review_choices = {
+                f"#{row['id']} · {row.get('work_date')} {row.get('start_time')}–{row.get('end_time')} · "
+                f"{row.get('jobhub_employee') or row.get('provider_employee_name') or row.get('provider_employee_email')} · "
+                f"{row.get('job_no') or row.get('job_name') or 'no job'}": int(row["id"])
+                for row in unreviewed
+            }
+            selected_label = st.selectbox("Attendance row", list(review_choices), key="blip_review_row")
+            review_row = next(row for row in unreviewed if int(row["id"]) == review_choices[selected_label])
+            current_job_id = int(review_row["job_id"]) if review_row.get("job_id") else None
+            job_index = list(job_labels.values()).index(current_job_id) if current_job_id in job_labels.values() else 0
+            selected_job_label = st.selectbox(
+                "JobHub job", list(job_labels), index=job_index, key="blip_review_job"
+            )
+            if st.button("Save job assignment", key="blip_review_save"):
+                new_job_id = job_labels[selected_job_label]
+                new_status = attendance_status(
+                    end_time=review_row.get("end_time"),
+                    employee_id=review_row.get("employee_id"),
+                    job_id=new_job_id,
+                )
+                _execute(
+                    "UPDATE blip_attendance_entries SET job_id=?,status=? WHERE id=?",
+                    (new_job_id, new_status, int(review_row["id"])),
+                )
+                st.success("Job assignment saved.")
+                st.rerun()
 
     ready = [row for row in rows if row.get("status") == "Ready"]
     if not ready:
@@ -1082,17 +1164,15 @@ def render_blip_attendance_page() -> None:
 
     _ensure_schema()
     st.caption(
-        "Blip remains the clocking source. JobHub stages attendance first, requires explicit employee and "
-        "site-to-job mappings, and only publishes completed mapped sessions into Timesheets."
+        "Blip remains the clocking source. JobHub stages attendance first, matches BrightHR employees to "
+        "JobHub staff, and only publishes sessions a manager has explicitly assigned to a job during review."
     )
-    tabs = st.tabs(["Sync", "Employee mappings", "Site / job mappings", "Attendance review"])
+    tabs = st.tabs(["Sync", "Employee mappings", "Attendance review"])
     with tabs[0]:
         _render_overview(st)
     with tabs[1]:
         _render_employee_mapping(st)
     with tabs[2]:
-        _render_location_mapping(st)
-    with tabs[3]:
         _render_attendance(st)
 
 
