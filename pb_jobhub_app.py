@@ -401,7 +401,7 @@ def apply_pb_branding():
     st.markdown(
         """
         <style>
-        @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Nunito+Sans:opsz,wght@6..12,400;6..12,500;6..12,600;6..12,700;6..12,800&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Manrope:wght@400;500;600;700;800&display=swap');
 
         :root {
             --pb-bg: #f9f6f1;
@@ -418,13 +418,14 @@ def apply_pb_branding():
         }
 
         html, body, [class*="css"] {
-            font-family: 'Nunito Sans', 'Plus Jakarta Sans', 'Segoe UI', Arial, sans-serif;
+            font-family: 'Inter', 'Plus Jakarta Sans', 'Segoe UI', Arial, sans-serif;
             -webkit-font-smoothing: antialiased;
             -moz-osx-font-smoothing: grayscale;
         }
 
         h1, h2, h3, h4, [data-testid="stMetricLabel"] {
-            font-family: 'Plus Jakarta Sans', 'Nunito Sans', 'Segoe UI', sans-serif;
+            font-family: 'Manrope', 'Inter', 'Plus Jakarta Sans', sans-serif;
+            letter-spacing: -0.01em;
         }
 
         .stApp {
@@ -1023,35 +1024,36 @@ def apply_pb_branding():
             box-shadow: 0 5px 14px rgba(49, 39, 28, 0.05);
         }
 
-        /* Rounded, warm data tables: AG Grid (st.dataframe) and st.table. */
+        /* Clean, neutral data tables: AG Grid (st.dataframe) and st.table. */
         [data-testid="stDataFrame"], [data-testid="stTable"] {
-            border: 1px solid var(--pb-border);
-            border-radius: 18px;
+            border: 1px solid #e4e4e1;
+            border-radius: 14px;
             overflow: hidden;
-            background: #fffdfa;
-            box-shadow: 0 8px 22px rgba(49, 39, 28, 0.06);
+            background: #ffffff;
+            box-shadow: 0 6px 18px rgba(23, 23, 21, 0.06);
         }
 
         [data-testid="stDataFrame"] .ag-theme-streamlit,
         [data-testid="stDataFrame"] .ag-root-wrapper {
-            --ag-font-family: 'Nunito Sans', 'Segoe UI', sans-serif;
-            --ag-header-background-color: #f2e8db;
-            --ag-header-foreground-color: #4a3f33;
-            --ag-header-height: 46px;
+            --ag-font-family: 'Inter', 'Segoe UI', sans-serif;
+            --ag-header-background-color: #f4f4f2;
+            --ag-header-foreground-color: #3f3f3b;
+            --ag-header-height: 44px;
             --ag-row-height: 38px;
-            --ag-odd-row-background-color: #fbf7f1;
-            --ag-row-hover-color: #f7eede;
-            --ag-selected-row-background-color: #f2e2cc;
-            --ag-row-border-color: #f0e8dc;
-            --ag-border-color: #eadfd1;
+            --ag-odd-row-background-color: #fcfcfb;
+            --ag-row-hover-color: #f2f4f6;
+            --ag-selected-row-background-color: #e8edf3;
+            --ag-row-border-color: #ececea;
+            --ag-border-color: #e4e4e1;
             --ag-font-size: 14px;
-            border-radius: 18px;
+            border-radius: 14px;
             overflow: hidden;
         }
 
         [data-testid="stDataFrame"] .ag-header-cell {
-            font-weight: 700 !important;
+            font-weight: 600 !important;
             letter-spacing: 0.01em;
+            border-bottom: 2px solid #e2e2df;
         }
 
         [data-testid="stDataFrame"] .ag-row:hover {
@@ -1059,18 +1061,19 @@ def apply_pb_branding():
         }
 
         [data-testid="stTable"] thead tr th {
-            background: #f2e8db !important;
-            color: #4a3f33 !important;
-            font-weight: 700 !important;
-            border-bottom: 2px solid var(--pb-border) !important;
+            background: #f4f4f2 !important;
+            color: #3f3f3b !important;
+            font-weight: 600 !important;
+            letter-spacing: 0.01em;
+            border-bottom: 2px solid #e2e2df !important;
         }
 
         [data-testid="stTable"] tbody tr:nth-child(even) td {
-            background: #fbf7f1 !important;
+            background: #fafaf9 !important;
         }
 
         [data-testid="stTable"] tbody tr:hover td {
-            background: #f7eede !important;
+            background: #f2f4f6 !important;
         }
 
         div[data-testid="stTabs"] button {
