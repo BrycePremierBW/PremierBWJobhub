@@ -73,6 +73,44 @@ class _422Session(_Session):
         return super().post(url, **kwargs)
 
 
+class _Retry500Session(_Session):
+    def __init__(self):
+        super().__init__()
+        self.failures = 0
+
+    def post(self, url, **kwargs):
+        if url.endswith("/connect/token"):
+            return _Response({"access_token": "token-x"})
+        if "/employees/" in url and self.failures < 2:
+            self.calls.append((url, kwargs))
+            self.failures += 1
+            return _Response(
+                {
+                    "title": "Internal Server Error",
+                    "detail": "A temporary server error occurred.",
+                    "status": 500,
+                },
+                500,
+            )
+        return super().post(url, **kwargs)
+
+
+class _Permanent500Session(_Session):
+    def post(self, url, **kwargs):
+        if url.endswith("/connect/token"):
+            return _Response({"access_token": "token-x"})
+        if "/employees/" in url:
+            return _Response(
+                {
+                    "title": "Internal Server Error",
+                    "detail": "Unable to process employee query.",
+                    "status": 500,
+                },
+                500,
+            )
+        return super().post(url, **kwargs)
+
+
 class BrightHRRequestCompatibilityTests(unittest.TestCase):
     def setUp(self):
         self.env = {
@@ -85,7 +123,7 @@ class BrightHRRequestCompatibilityTests(unittest.TestCase):
             blip.ENV_SYNC_TO: "2026-08-12",
         }
 
-    def test_employee_first_request_has_no_json_body_and_next_has_only_token(self):
+    def test_employee_first_request_has_empty_json_body_and_next_has_only_token(self):
         session = _Session()
         with patch.dict(os.environ, self.env, clear=False):
             token = blip._request_token(session)
@@ -94,9 +132,10 @@ class BrightHRRequestCompatibilityTests(unittest.TestCase):
         self.assertEqual(len(employees), 1)
         employee_calls = [(url, kwargs) for url, kwargs in session.calls if "/employees/" in url]
         self.assertEqual(len(employee_calls), 2)
-        self.assertNotIn("json", employee_calls[0][1])
+        self.assertEqual(employee_calls[0][1]["json"], {})
         self.assertEqual(employee_calls[1][1]["json"], {"continuationToken": "emp-next"})
         self.assertNotIn("pageSize", employee_calls[1][1]["json"])
+        self.assertEqual(employee_calls[0][1]["headers"]["Content-Type"], "application/json")
 
     def test_blip_query_uses_filters_without_page_size(self):
         session = _Session()
@@ -117,6 +156,30 @@ class BrightHRRequestCompatibilityTests(unittest.TestCase):
         with patch.dict(os.environ, self.env, clear=False):
             token = blip._request_token(session)
             with self.assertRaisesRegex(RuntimeError, r"BrightHR employee query failed with HTTP 422"):
+                blip._fetch_employees_with_token(session, token)
+
+    def test_employee_query_retries_transient_500_then_recovers(self):
+        session = _Retry500Session()
+        with patch.dict(os.environ, self.env, clear=False), patch(
+            "jobhub.blip_request_compat_guard.time.sleep", return_value=None
+        ) as sleeper:
+            token = blip._request_token(session)
+            employees = blip._fetch_employees_with_token(session, token)
+
+        self.assertEqual(len(employees), 1)
+        self.assertEqual(session.failures, 2)
+        self.assertEqual(sleeper.call_count, 2)
+
+    def test_permanent_500_surfaces_problem_title_and_detail(self):
+        session = _Permanent500Session()
+        with patch.dict(os.environ, self.env, clear=False), patch(
+            "jobhub.blip_request_compat_guard.time.sleep", return_value=None
+        ):
+            token = blip._request_token(session)
+            with self.assertRaisesRegex(
+                RuntimeError,
+                r"BrightHR employee query failed with HTTP 500.*Internal Server Error.*Unable to process employee query",
+            ):
                 blip._fetch_employees_with_token(session, token)
 
 
