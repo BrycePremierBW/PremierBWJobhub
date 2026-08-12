@@ -8,6 +8,10 @@ fields are intentionally omitted because BrightHR supplies a default page size.
 
 This guard keeps the existing Blip staging/review/publish workflow intact and
 only replaces the two read-only BrightHR query helpers.
+
+Pagination is protected against non-progress: if BrightHR ever repeats a
+continuation token, or returns more than the page ceiling, the sync raises a
+clear error instead of looping forever.
 """
 
 from __future__ import annotations
@@ -21,6 +25,7 @@ import requests
 
 PATCH_MARKER = "_pb_blip_request_compat_guard"
 _RETRYABLE_STATUS = {500, 502, 503, 504}
+_MAX_PAGINATION_PAGES = 10_000
 
 
 def _safe_problem_text(response: Any) -> str:
@@ -63,6 +68,20 @@ def _phase_error(blip: Any, phase: str, response: Any) -> RuntimeError:
     return RuntimeError(message)
 
 
+def _ensure_pagination_progress(phase: str, seen: set[Any], continuation: Any, page_no: int) -> None:
+    """Bail out if BrightHR pagination stops making progress."""
+    if page_no > _MAX_PAGINATION_PAGES:
+        raise RuntimeError(
+            f"BrightHR {phase} returned more than {_MAX_PAGINATION_PAGES} pages; refusing to continue."
+        )
+    if continuation is not None and continuation in seen:
+        raise RuntimeError(
+            f"BrightHR {phase} returned the same continuationToken twice; refusing to loop forever."
+        )
+    if continuation is not None:
+        seen.add(continuation)
+
+
 def _post_query(blip: Any, session: Any, endpoint: str, token: str, phase: str, body: dict[str, Any]) -> Any:
     """POST one BrightHR query, retrying only transient server failures."""
     headers = {
@@ -103,7 +122,11 @@ def install_blip_request_compat_guard() -> bool:
 
         employees: list[dict[str, str]] = []
         continuation: Any = None
+        seen_tokens: set[Any] = set()
+        page_no = 0
         while True:
+            page_no += 1
+            _ensure_pagination_progress("employee query", seen_tokens, continuation, page_no)
             # Use an explicit empty JSON object on page one. This keeps the
             # documented semantics (no continuation token) while avoiding a
             # BrightHR server-side failure seen with a zero-length POST body.
@@ -145,7 +168,11 @@ def install_blip_request_compat_guard() -> bool:
 
         for employee in employees:
             continuation: Any = None
+            seen_tokens: set[Any] = set()
+            page_no = 0
             while True:
+                page_no += 1
+                _ensure_pagination_progress("Blip clocking query", seen_tokens, continuation, page_no)
                 filters: dict[str, Any] = {"employeeId": employee["id"]}
                 if sync_from:
                     filters["from"] = sync_from

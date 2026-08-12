@@ -95,6 +95,47 @@ class _Retry500Session(_Session):
         return super().post(url, **kwargs)
 
 
+class _RepeatingTokenEmployeeSession(_Session):
+    def post(self, url, **kwargs):
+        if url.endswith("/connect/token"):
+            return _Response({"access_token": "token-x"})
+        if "/employees/" in url:
+            return _Response(
+                {
+                    "items": [
+                        {
+                            "id": "emp-1",
+                            "name": {"givenName": "Alex", "familyName": "Painter"},
+                            "email": "alex@example.com",
+                        }
+                    ],
+                    "continuationToken": "emp-next",
+                }
+            )
+        return super().post(url, **kwargs)
+
+
+class _RepeatingTokenClockSession(_Session):
+    def post(self, url, **kwargs):
+        if url.endswith("/connect/token"):
+            return _Response({"access_token": "token-x"})
+        if "/blip/" in url:
+            return _Response(
+                {
+                    "items": [
+                        {
+                            "id": "clock-1",
+                            "employeeId": "emp-1",
+                            "start": "2026-08-12T00:00:00Z",
+                            "end": "2026-08-12T08:00:00Z",
+                        }
+                    ],
+                    "continuationToken": "clk-next",
+                }
+            )
+        return super().post(url, **kwargs)
+
+
 class _Permanent500Session(_Session):
     def post(self, url, **kwargs):
         if url.endswith("/connect/token"):
@@ -181,6 +222,19 @@ class BrightHRRequestCompatibilityTests(unittest.TestCase):
                 r"BrightHR employee query failed with HTTP 500.*Internal Server Error.*Unable to process employee query",
             ):
                 blip._fetch_employees_with_token(session, token)
+
+    def test_employee_query_stops_when_token_repeats(self):
+        session = _RepeatingTokenEmployeeSession()
+        with patch.dict(os.environ, self.env, clear=False):
+            token = blip._request_token(session)
+            with self.assertRaisesRegex(RuntimeError, r"same continuationToken"):
+                blip._fetch_employees_with_token(session, token)
+
+    def test_clocking_query_stops_when_token_repeats(self):
+        session = _RepeatingTokenClockSession()
+        with patch.dict(os.environ, self.env, clear=False):
+            with self.assertRaisesRegex(RuntimeError, r"same continuationToken"):
+                list(blip._iter_attendance_records(session))
 
 
 if __name__ == "__main__":
