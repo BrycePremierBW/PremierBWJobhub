@@ -226,7 +226,7 @@ class BrightHRBlipIntegrationTests(unittest.TestCase):
         clocking_calls = [kwargs for url, kwargs in session.calls if "/blip/" in url]
         self.assertEqual(len(clocking_calls), 2)
         self.assertEqual(clocking_calls[0]["json"]["filters"]["employeeId"], "emp-1")
-        self.assertEqual(clocking_calls[0]["json"]["pageSize"], 100)
+        self.assertNotIn("pageSize", clocking_calls[0]["json"])
         self.assertEqual(clocking_calls[1]["json"]["continuationToken"], "clk-next")
 
     def test_datetime_filter_normalises_date_only(self):
