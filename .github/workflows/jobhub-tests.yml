@@ -32,7 +32,7 @@ jobs:
           python-version: "3.13.5"
           cache: pip
       - name: Install dependencies
-        run: pip install -r requirements.txt pytest sqlglot
+        run: pip install -r requirements.txt pytest sqlglot ruff
       - name: Compile application modules
         run: >-
           python -m compileall -q
@@ -44,6 +44,8 @@ jobs:
           jobhub
           jobhub_v2
           jobhub_v4
+      - name: Check undefined names and local-scope errors
+        run: ruff check . --select F821,F823
       - name: Run JobHub tests
         run: python -m unittest discover -s tests -p "test_*.py" -v
       - name: Run PostgreSQL integration smoke

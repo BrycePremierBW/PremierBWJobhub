@@ -35,17 +35,37 @@ class IntegrationHealthGuardTests(unittest.TestCase):
             "Email notifications",
             "Offline synchronisation",
             "External AI",
+            "BrightHR / Blip",
             "Self-editing code",
             "ONESIGNAL_APP_ID",
             "ONESIGNAL_REST_API_KEY",
+            "APP_BASE_URL",
             "JOBHUB_PUBLIC_URL",
             "JOBHUB_EMAIL_NOTIFICATIONS_ENABLED",
             "JOBHUB_OFFLINE_SYNC_ENABLED",
             "JOBHUB_ALLOW_EXTERNAL_AI",
             "JOBHUB_ENABLE_SELF_EDIT",
+            "BRIGHTHR_CLIENT_ID",
+            "BRIGHTHR_CLIENT_SECRET",
+            "BRIGHTHR_TOKEN_URL",
+            "BRIGHTHR_EMPLOYEES_URL",
+            "BRIGHTHR_BLIP_ATTENDANCE_URL",
         ]
         for marker in required:
             self.assertIn(marker, source)
+
+    def test_render_public_url_is_recognised_by_health_check(self):
+        source = MODULE_PATH.read_text(encoding="utf-8")
+        public_url_block = source[source.index("public_url = _configured_any("):source.index("checks.append(\n        _check(\n            \"Public JobHub URL\"")]
+        self.assertIn('"APP_BASE_URL"', public_url_block)
+        self.assertIn('"RENDER_EXTERNAL_URL"', public_url_block)
+
+    def test_bright_hr_configuration_is_secret_safe(self):
+        source = MODULE_PATH.read_text(encoding="utf-8")
+        self.assertIn("def _bright_hr_configuration", source)
+        self.assertIn('"BrightHR client secret configured": "Yes"', source)
+        self.assertNotIn('os.getenv("BRIGHTHR_CLIENT_SECRET")', source)
+        self.assertNotIn('metrics["BrightHR client secret"]', source)
 
     def test_report_only_exposes_configuration_state(self):
         source = MODULE_PATH.read_text(encoding="utf-8")
@@ -65,6 +85,13 @@ class IntegrationHealthGuardTests(unittest.TestCase):
         self.assertIn("elif one_signal_app or one_signal_key", source)
         self.assertIn('push_status = "Critical"', source)
         self.assertIn("both the app ID and REST API key are required", source)
+
+    def test_partial_bright_hr_configuration_is_critical(self):
+        source = MODULE_PATH.read_text(encoding="utf-8")
+        block = source[source.index("def _bright_hr_configuration"):source.index("def integration_health_report")]
+        self.assertIn('status = "Critical"', block)
+        self.assertIn("BrightHR/Blip is only partly configured", block)
+        self.assertIn("missing =", block)
 
     def test_health_status_is_recalculated_after_integrations_are_added(self):
         source = MODULE_PATH.read_text(encoding="utf-8")
