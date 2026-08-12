@@ -164,7 +164,7 @@ class BrightHRRequestCompatibilityTests(unittest.TestCase):
             blip.ENV_SYNC_TO: "2026-08-12",
         }
 
-    def test_employee_first_request_has_empty_json_body_and_next_has_only_token(self):
+    def test_employee_first_request_has_no_body_and_next_has_only_token(self):
         session = _Session()
         with patch.dict(os.environ, self.env, clear=False):
             token = blip._request_token(session)
@@ -173,10 +173,11 @@ class BrightHRRequestCompatibilityTests(unittest.TestCase):
         self.assertEqual(len(employees), 1)
         employee_calls = [(url, kwargs) for url, kwargs in session.calls if "/employees/" in url]
         self.assertEqual(len(employee_calls), 2)
-        self.assertEqual(employee_calls[0][1]["json"], {})
+        self.assertNotIn("json", employee_calls[0][1])
+        self.assertNotIn("data", employee_calls[0][1])
+        self.assertNotIn("Content-Type", employee_calls[0][1]["headers"])
         self.assertEqual(employee_calls[1][1]["json"], {"continuationToken": "emp-next"})
         self.assertNotIn("pageSize", employee_calls[1][1]["json"])
-        self.assertEqual(employee_calls[0][1]["headers"]["Content-Type"], "application/json")
 
     def test_blip_query_uses_filters_without_page_size(self):
         session = _Session()
@@ -210,6 +211,10 @@ class BrightHRRequestCompatibilityTests(unittest.TestCase):
         self.assertEqual(len(employees), 1)
         self.assertEqual(session.failures, 2)
         self.assertEqual(sleeper.call_count, 2)
+        employee_calls = [(url, kwargs) for url, kwargs in session.calls if "/employees/" in url]
+        self.assertNotIn("json", employee_calls[0][1])
+        self.assertNotIn("json", employee_calls[1][1])
+        self.assertNotIn("json", employee_calls[2][1])
 
     def test_permanent_500_surfaces_problem_title_and_detail(self):
         session = _Permanent500Session()
