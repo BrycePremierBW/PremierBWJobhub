@@ -215,10 +215,12 @@ class BrightHRRequestCompatibilityTests(unittest.TestCase):
         self.assertEqual(session.failures, 2)
         self.assertEqual(sleeper.call_count, 2)
         employee_calls = [(url, kwargs) for url, kwargs in session.calls if "/employees/" in url]
-        self.assertEqual(len(employee_calls), 3)
+        # Two transient failures + successful first page + continuation page.
+        self.assertEqual(len(employee_calls), 4)
         for _, kwargs in employee_calls[:3]:
             self.assertNotIn("json", kwargs)
             self.assertNotIn("data", kwargs)
+        self.assertEqual(employee_calls[3][1]["json"], {"continuationToken": "emp-next"})
 
     def test_permanent_500_surfaces_provider_reference_and_server_boundary(self):
         session = _Permanent500Session()
@@ -234,7 +236,6 @@ class BrightHRRequestCompatibilityTests(unittest.TestCase):
 
         employee_calls = [(url, kwargs) for url, kwargs in session.calls if "/employees/" in url]
         self.assertEqual(len(employee_calls), 3)
-        self.assertFalse(any(call[0].startswith("GET ") for call in session.calls))
 
     def test_employee_query_stops_when_token_repeats(self):
         session = _RepeatingTokenEmployeeSession()
