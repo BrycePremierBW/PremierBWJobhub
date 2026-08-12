@@ -2,6 +2,8 @@ import os
 import unittest
 from unittest.mock import patch
 
+import requests
+
 from jobhub.blip_integration_guard import (
     ENV_ATTENDANCE_URL,
     ENV_CLIENT_ID,
@@ -10,6 +12,7 @@ from jobhub.blip_integration_guard import (
     ENV_TOKEN_AUTH_MODE,
     ENV_TOKEN_URL,
     _fetch_attendance_payload,
+    _normalise_datetime_filter,
     _request_token,
     _safe_error,
     attendance_status,
@@ -225,6 +228,24 @@ class BrightHRBlipIntegrationTests(unittest.TestCase):
         self.assertEqual(clocking_calls[0]["json"]["filters"]["employeeId"], "emp-1")
         self.assertEqual(clocking_calls[0]["json"]["pageSize"], 100)
         self.assertEqual(clocking_calls[1]["json"]["continuationToken"], "clk-next")
+
+    def test_datetime_filter_normalises_date_only(self):
+        self.assertEqual(_normalise_datetime_filter("2026-08-01"), "2026-08-01T00:00:00Z")
+        self.assertEqual(
+            _normalise_datetime_filter("2026-08-01T07:00:00Z"),
+            "2026-08-01T07:00:00Z",
+        )
+        self.assertEqual(_normalise_datetime_filter("  "), "")
+
+    def test_safe_error_includes_validation_details(self):
+        response = _Response(
+            {"errors": {"from": ["The value is not a valid DateTime"]}},
+            status_code=422,
+        )
+        message = _safe_error(requests.HTTPError("validation", response=response))
+        self.assertIn("422", message)
+        self.assertIn("from", message)
+        self.assertIn("DateTime", message)
 
     def test_safe_error_redacts_endpoint(self):
         message = _safe_error(RuntimeError("failed at https://secret.example/path token=abc"))

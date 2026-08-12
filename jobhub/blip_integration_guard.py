@@ -236,11 +236,44 @@ def _safe_error(exc: BaseException) -> str:
     if isinstance(exc, requests.HTTPError):
         response = getattr(exc, "response", None)
         status = getattr(response, "status_code", None)
-        return f"BrightHR request failed with HTTP {status}." if status else "BrightHR request failed."
+        summary = f"BrightHR request failed with HTTP {status}." if status else "BrightHR request failed."
+        detail = _problem_detail(response)
+        return f"{summary} {detail}" if detail else summary
     text = str(exc or "").strip()
     text = re.sub(r"https?://\S+", "[endpoint]", text)
     text = re.sub(r"(?i)(client_secret|authorization|bearer|token)\s*[:=]\s*\S+", r"\1=[redacted]", text)
     return text[:300] or exc.__class__.__name__
+
+
+def _problem_detail(response: Any) -> str:
+    try:
+        payload = response.json()
+    except Exception:
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    errors = payload.get("errors")
+    if not isinstance(errors, dict):
+        return ""
+    parts = []
+    for field, messages in errors.items():
+        if isinstance(messages, list):
+            parts.append(f"{field}: {'; '.join(_string(message) for message in messages[:3])}")
+        else:
+            parts.append(f"{field}: {_string(messages)}")
+    text = " ".join(parts)
+    text = re.sub(r"https?://\S+", "[endpoint]", text)
+    return text[:300]
+
+
+def _normalise_datetime_filter(value: Any) -> str:
+    """BrightHR clocking filters require a full date-time, not a date-only value."""
+    text = _string(value)
+    if not text:
+        return ""
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+        return f"{text}T00:00:00Z"
+    return text
 
 
 def _request_token(session: Any = requests) -> str:
@@ -335,8 +368,8 @@ def _fetch_attendance_payload(session: Any = requests) -> list[Mapping[str, Any]
     if not employees:
         return []
 
-    sync_from = os.environ.get(ENV_SYNC_FROM, "").strip()
-    sync_to = os.environ.get(ENV_SYNC_TO, "").strip()
+    sync_from = _normalise_datetime_filter(os.environ.get(ENV_SYNC_FROM, "").strip())
+    sync_to = _normalise_datetime_filter(os.environ.get(ENV_SYNC_TO, "").strip())
 
     records: list[Mapping[str, Any]] = []
     for employee in employees:
@@ -976,6 +1009,12 @@ def _render_overview(st: Any) -> None:
     c4.metric("Employees endpoint", "Configured" if state[ENV_EMPLOYEES_URL] else "Missing")
     c5.metric("Blip attendance endpoint", "Configured" if state[ENV_ATTENDANCE_URL] else "Missing")
     st.caption("Secrets are read from Render environment variables and are not stored in JobHub.")
+    if state[ENV_ATTENDANCE_URL]:
+        st.caption(
+            "Set BRIGHTHR_SYNC_FROM / BRIGHTHR_SYNC_TO (e.g. 2026-08-01 / 2026-08-12, range at most 31 days, "
+            "no more than 90 days in the past) to pull a historical window. Without a range only currently "
+            "active clockings are returned."
+        )
 
     latest = _one("SELECT * FROM blip_sync_runs ORDER BY id DESC LIMIT 1")
     if latest:

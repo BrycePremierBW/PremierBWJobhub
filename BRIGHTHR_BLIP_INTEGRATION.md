@@ -24,7 +24,7 @@ Configure these on the JobHub Render web service. Do not put credentials in GitH
 - `BRIGHTHR_BLIP_ATTENDANCE_URL` — the BrightHR Customer API clockings query endpoint (`https://api.bright.hr/blip/v1/clockings/query`).
 - `BRIGHTHR_TOKEN_AUTH_MODE` — optional; `body` (default) or `basic`, depending on the BrightHR OAuth client configuration.
 - `BRIGHTHR_SCOPE` — optional OAuth scope when required by the BrightHR client.
-- `BRIGHTHR_SYNC_FROM` / `BRIGHTHR_SYNC_TO` — optional ISO-8601 range filters applied to clocking queries.
+- `BRIGHTHR_SYNC_FROM` / `BRIGHTHR_SYNC_TO` — optional date range applied to clocking queries. Date-only values like `2026-08-01` are accepted (normalised to `2026-08-01T00:00:00Z`). The range must be at most 31 days wide and no more than 90 days in the past. Without a range, BrightHR returns only currently active clockings.
 
 The token, employee and clocking URLs are intentionally configuration, rather than hard-coded guesses. BrightHR API tenants/versions must use the endpoint details supplied by BrightHR.
 
