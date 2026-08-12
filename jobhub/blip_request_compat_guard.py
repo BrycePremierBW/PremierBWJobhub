@@ -1,10 +1,10 @@
 """BrightHR Customer API request-body compatibility patch.
 
-BrightHR's employee query uses continuation-token pagination. The live API has
-proved sensitive to the exact POST body shape, so JobHub sends an empty JSON
-object for the first page and only a continuationToken on later pages. Blip
-clocking requests use their endpoint-specific filters object. Generic pagination
-fields are intentionally omitted because BrightHR supplies a default page size.
+BrightHR's employee query uses continuation-token pagination. Per BrightHR's
+published pagination guide, the first List Employees request is a POST with no
+request body; only subsequent pages send a JSON object containing the returned
+continuationToken. Blip clocking requests use their endpoint-specific filters
+object. Generic pagination fields are intentionally omitted.
 
 This guard keeps the existing Blip staging/review/publish workflow intact and
 only replaces the two read-only BrightHR query helpers.
@@ -82,20 +82,30 @@ def _ensure_pagination_progress(phase: str, seen: set[Any], continuation: Any, p
         seen.add(continuation)
 
 
-def _post_query(blip: Any, session: Any, endpoint: str, token: str, phase: str, body: dict[str, Any]) -> Any:
+def _post_query(
+    blip: Any,
+    session: Any,
+    endpoint: str,
+    token: str,
+    phase: str,
+    body: dict[str, Any] | None,
+) -> Any:
     """POST one BrightHR query, retrying only transient server failures."""
     headers = {
         "Authorization": f"Bearer {token}",
         "Accept": "application/json",
-        "Content-Type": "application/json",
     }
+    kwargs: dict[str, Any] = {
+        "headers": headers,
+        "timeout": 45,
+    }
+    if body is not None:
+        # BrightHR documents JSON only when a request body is present. requests
+        # adds Content-Type: application/json automatically for json= payloads.
+        kwargs["json"] = body
+
     for attempt in range(3):
-        response = session.post(
-            endpoint,
-            json=body,
-            headers=headers,
-            timeout=45,
-        )
+        response = session.post(endpoint, **kwargs)
         status = int(getattr(response, "status_code", 0) or 0)
         if status in _RETRYABLE_STATUS and attempt < 2:
             time.sleep(0.5 * (attempt + 1))
@@ -127,12 +137,11 @@ def install_blip_request_compat_guard() -> bool:
         while True:
             page_no += 1
             _ensure_pagination_progress("employee query", seen_tokens, continuation, page_no)
-            # Use an explicit empty JSON object on page one. This keeps the
-            # documented semantics (no continuation token) while avoiding a
-            # BrightHR server-side failure seen with a zero-length POST body.
-            body: dict[str, Any] = {}
-            if continuation:
-                body["continuationToken"] = continuation
+
+            # BrightHR's official List Employees example sends the first POST
+            # with no request body at all. Only later pages carry the returned
+            # continuation token in a JSON object.
+            body = {"continuationToken": continuation} if continuation else None
             payload = _post_query(blip, session, endpoint, token, "employee query", body)
             items = payload.get("items") if isinstance(payload, Mapping) else None
             for item in items or []:
