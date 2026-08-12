@@ -352,8 +352,8 @@ def _fetch_employees_with_token(session: Any, token: str) -> list[dict[str, str]
     return employees
 
 
-def _fetch_attendance_payload(session: Any = requests) -> list[Mapping[str, Any]]:
-    """Fetch Blip clockings using the documented BrightHR Customer API.
+def _iter_attendance_records(session: Any = requests):
+    """Yield Blip clockings one page at a time to bound memory usage.
 
     The clockings endpoint (POST /blip/v1/clockings/query) is per-employee and
     JSON-bodied, so every BrightHR employee is enumerated first and queried in
@@ -365,13 +365,10 @@ def _fetch_attendance_payload(session: Any = requests) -> list[Mapping[str, Any]
         raise RuntimeError("BRIGHTHR_BLIP_ATTENDANCE_URL is not configured.")
     token = _request_token(session)
     employees = _fetch_employees_with_token(session, token)
-    if not employees:
-        return []
 
     sync_from = _normalise_datetime_filter(os.environ.get(ENV_SYNC_FROM, "").strip())
     sync_to = _normalise_datetime_filter(os.environ.get(ENV_SYNC_TO, "").strip())
 
-    records: list[Mapping[str, Any]] = []
     for employee in employees:
         continuation: Any = None
         while True:
@@ -394,7 +391,7 @@ def _fetch_attendance_payload(session: Any = requests) -> list[Mapping[str, Any]
             items = payload.get("items") if isinstance(payload, Mapping) else None
             for item in items or []:
                 if isinstance(item, Mapping):
-                    enriched = {
+                    yield {
                         "employee": {
                             "id": employee["id"],
                             "name": employee["name"],
@@ -402,11 +399,14 @@ def _fetch_attendance_payload(session: Any = requests) -> list[Mapping[str, Any]
                         },
                         **item,
                     }
-                    records.append(enriched)
             continuation = payload.get("continuationToken") if isinstance(payload, Mapping) else None
             if not continuation:
                 break
-    return records
+
+
+def _fetch_attendance_payload(session: Any = requests) -> list[Mapping[str, Any]]:
+    """Fetch all Blip clockings into a list (used by tests and small tenants)."""
+    return list(_iter_attendance_records(session))
 
 
 def _dig(record: Mapping[str, Any], *paths: str) -> Any:
@@ -764,13 +764,24 @@ def sync_blip(session: Any = requests) -> dict[str, int]:
     run_id = int(run["id"]) if run else None
 
     try:
-        records = normalise_blip_records(_fetch_attendance_payload(session))
         inserted = 0
         updated = 0
-        for record in records:
-            outcome = _upsert_attendance(record)
+        skipped = 0
+        fetched = 0
+        first_error: ValueError | None = None
+        for record in _iter_attendance_records(session):
+            fetched += 1
+            try:
+                outcome = _upsert_attendance(normalise_blip_record(record))
+            except ValueError as exc:
+                skipped += 1
+                if first_error is None:
+                    first_error = exc
+                continue
             inserted += int(outcome == "inserted")
             updated += int(outcome == "updated")
+        if fetched and not inserted and not updated and first_error is not None:
+            raise ValueError("No usable BrightHR attendance records: " + str(first_error))
         unmatched = int(
             (_one(
                 """
@@ -787,10 +798,10 @@ def sync_blip(session: Any = requests) -> dict[str, int]:
                     updated_count=?,unmatched_count=?,error_message=NULL
                 WHERE id=?
                 """,
-                (_now(), len(records), inserted, updated, unmatched, run_id),
+                (_now(), fetched, inserted, updated, unmatched, run_id),
             )
         return {
-            "fetched": len(records),
+            "fetched": fetched,
             "inserted": inserted,
             "updated": updated,
             "unmatched": unmatched,
