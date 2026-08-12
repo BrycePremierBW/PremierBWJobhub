@@ -22445,6 +22445,7 @@ elif role == "manager":
         "Wages": "Wages",
         "Timesheets": "Timesheets",
         "Job Photos": "Job Photos",
+        "Blip Attendance": "Blip Attendance",
     }
     ai_menu_map = {
         "JobHub AI Assistant": "JobHub AI Assistant",
@@ -22488,6 +22489,7 @@ else:
         "Wages": "Wages",
         "Timesheets": "Timesheets",
         "Job Photos": "Job Photos",
+        "Blip Attendance": "Blip Attendance",
     }
     ai_menu_map = {
         "JobHub AI Assistant": "JobHub AI Assistant",
