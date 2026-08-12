@@ -2,8 +2,8 @@
 
 The base System Health page verifies the database, storage, archives, recovery
 readiness and core data. This guard extends the same report with configuration
-readiness for optional services that cannot be exercised by repository tests:
-web push, public URLs, email delivery, offline sync and external AI.
+readiness for optional services that cannot be exercised safely by repository
+tests: public URLs, push, email, offline sync, external AI and BrightHR/Blip.
 
 Only configured/not-configured state is reported. Secret values are never
 included in the report or rendered to the page.
@@ -41,6 +41,36 @@ def _check(name: str, status: str, detail: str) -> dict[str, str]:
     return system_health_guard._check("Integrations", name, status, detail)
 
 
+def _bright_hr_configuration() -> tuple[str, str, dict[str, str]]:
+    """Return BrightHR readiness without reading secret values into the report."""
+    required = (
+        "BRIGHTHR_CLIENT_ID",
+        "BRIGHTHR_CLIENT_SECRET",
+        "BRIGHTHR_TOKEN_URL",
+        "BRIGHTHR_EMPLOYEES_URL",
+        "BRIGHTHR_BLIP_ATTENDANCE_URL",
+    )
+    configured = {name: _configured(name) for name in required}
+    count = sum(configured.values())
+    if count == len(required):
+        status = "Healthy"
+        detail = "BrightHR/Blip credentials and required API endpoints are configured."
+    elif count:
+        status = "Critical"
+        missing = [name for name, present in configured.items() if not present]
+        detail = "BrightHR/Blip is only partly configured; missing: " + ", ".join(missing) + "."
+    else:
+        status = "Info"
+        detail = "BrightHR/Blip integration is not configured in this runtime."
+    metrics = {
+        "BrightHR client configured": "Yes" if configured["BRIGHTHR_CLIENT_ID"] else "No",
+        "BrightHR client secret configured": "Yes" if configured["BRIGHTHR_CLIENT_SECRET"] else "No",
+        "BrightHR employee endpoint configured": "Yes" if configured["BRIGHTHR_EMPLOYEES_URL"] else "No",
+        "BrightHR Blip endpoint configured": "Yes" if configured["BRIGHTHR_BLIP_ATTENDANCE_URL"] else "No",
+    }
+    return status, detail, metrics
+
+
 def integration_health_report() -> tuple[list[dict[str, str]], dict[str, Any]]:
     checks: list[dict[str, str]] = []
     metrics: dict[str, Any] = {}
@@ -67,7 +97,10 @@ def integration_health_report() -> tuple[list[dict[str, str]], dict[str, Any]]:
         )
     metrics["Database URL configured"] = "Yes" if database_url else "No"
 
+    # APP_BASE_URL is the explicit production setting in render.yaml. Keep the
+    # Render-provided aliases too so staging/preview services are diagnosed.
     public_url = _configured_any(
+        "APP_BASE_URL",
         "JOBHUB_PUBLIC_URL",
         "RENDER_EXTERNAL_URL",
         "RENDER_SERVICE_URL",
@@ -153,6 +186,10 @@ def integration_health_report() -> tuple[list[dict[str, str]], dict[str, Any]]:
     checks.append(_check("External AI", ai_status, ai_detail))
     metrics["External AI enabled"] = "Yes" if external_ai_enabled else "No"
     metrics["AI provider"] = ai_provider or "none"
+
+    bright_status, bright_detail, bright_metrics = _bright_hr_configuration()
+    checks.append(_check("BrightHR / Blip", bright_status, bright_detail))
+    metrics.update(bright_metrics)
 
     self_edit_enabled = _enabled("JOBHUB_ENABLE_SELF_EDIT")
     checks.append(
