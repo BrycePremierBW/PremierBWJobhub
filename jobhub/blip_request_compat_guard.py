@@ -1,10 +1,10 @@
 """BrightHR Customer API request-body compatibility patch.
 
-BrightHR's employee query examples send no JSON body on the first request and
-only a continuationToken on subsequent pages.  The Blip clockings endpoint is
-queried with a filters object.  Do not add generic pagination fields such as
-pageSize to these requests unless BrightHR explicitly documents them for the
-endpoint: the live API rejects an unexpected root request shape with HTTP 422.
+BrightHR's employee query uses continuation-token pagination. The live API has
+proved sensitive to the exact POST body shape, so JobHub sends an empty JSON
+object for the first page and only a continuationToken on later pages. Blip
+clocking requests use their endpoint-specific filters object. Generic pagination
+fields are intentionally omitted because BrightHR supplies a default page size.
 
 This guard keeps the existing Blip staging/review/publish workflow intact and
 only replaces the two read-only BrightHR query helpers.
@@ -13,41 +13,80 @@ only replaces the two read-only BrightHR query helpers.
 from __future__ import annotations
 
 import os
+import re
+import time
 from typing import Any, Mapping
 
 import requests
 
 PATCH_MARKER = "_pb_blip_request_compat_guard"
+_RETRYABLE_STATUS = {500, 502, 503, 504}
+
+
+def _safe_problem_text(response: Any) -> str:
+    """Return BrightHR RFC-7807 title/detail without leaking URLs or credentials."""
+    try:
+        payload = response.json()
+    except Exception:
+        return ""
+    if not isinstance(payload, Mapping):
+        return ""
+
+    parts: list[str] = []
+    for key in ("title", "detail"):
+        value = str(payload.get(key) or "").strip()
+        if value and value not in parts:
+            parts.append(value)
+    text = " ".join(parts)
+    text = re.sub(r"https?://\S+", "[endpoint]", text)
+    text = re.sub(r"(?i)(client_secret|authorization|bearer|token)\s*[:=]\s*\S+", r"\1=[redacted]", text)
+    return text[:300]
 
 
 def _phase_error(blip: Any, phase: str, response: Any) -> RuntimeError:
     """Build a safe, operator-useful API error without exposing endpoints/tokens."""
     status = getattr(response, "status_code", None)
     message = f"BrightHR {phase} failed with HTTP {status}." if status else f"BrightHR {phase} failed."
+
+    details: list[str] = []
+    problem = _safe_problem_text(response)
+    if problem:
+        details.append(problem)
     try:
-        detail = blip._problem_detail(response)
+        validation = blip._problem_detail(response)
     except Exception:
-        detail = ""
-    if detail:
-        message = f"{message} {detail}"
+        validation = ""
+    if validation and validation not in details:
+        details.append(validation)
+    if details:
+        message = f"{message} {' '.join(details)}"
     return RuntimeError(message)
 
 
-def _post_query(blip: Any, session: Any, endpoint: str, token: str, phase: str, body: dict[str, Any] | None) -> Any:
+def _post_query(blip: Any, session: Any, endpoint: str, token: str, phase: str, body: dict[str, Any]) -> Any:
+    """POST one BrightHR query, retrying only transient server failures."""
     headers = {
         "Authorization": f"Bearer {token}",
         "Accept": "application/json",
+        "Content-Type": "application/json",
     }
-    kwargs: dict[str, Any] = {"headers": headers, "timeout": 45}
-    if body is not None:
-        # requests sets application/json automatically when json= is supplied.
-        kwargs["json"] = body
-    response = session.post(endpoint, **kwargs)
-    try:
-        response.raise_for_status()
-    except requests.HTTPError:
-        raise _phase_error(blip, phase, response) from None
-    return response.json()
+    for attempt in range(3):
+        response = session.post(
+            endpoint,
+            json=body,
+            headers=headers,
+            timeout=45,
+        )
+        status = int(getattr(response, "status_code", 0) or 0)
+        if status in _RETRYABLE_STATUS and attempt < 2:
+            time.sleep(0.5 * (attempt + 1))
+            continue
+        try:
+            response.raise_for_status()
+        except requests.HTTPError:
+            raise _phase_error(blip, phase, response) from None
+        return response.json()
+    raise RuntimeError(f"BrightHR {phase} failed after retries.")
 
 
 def install_blip_request_compat_guard() -> bool:
@@ -65,9 +104,12 @@ def install_blip_request_compat_guard() -> bool:
         employees: list[dict[str, str]] = []
         continuation: Any = None
         while True:
-            # BrightHR's documented first employee query has no body.  Only send
-            # the continuation token after the API actually returns one.
-            body = {"continuationToken": continuation} if continuation else None
+            # Use an explicit empty JSON object on page one. This keeps the
+            # documented semantics (no continuation token) while avoiding a
+            # BrightHR server-side failure seen with a zero-length POST body.
+            body: dict[str, Any] = {}
+            if continuation:
+                body["continuationToken"] = continuation
             payload = _post_query(blip, session, endpoint, token, "employee query", body)
             items = payload.get("items") if isinstance(payload, Mapping) else None
             for item in items or []:
@@ -104,9 +146,6 @@ def install_blip_request_compat_guard() -> bool:
         for employee in employees:
             continuation: Any = None
             while True:
-                # The live Blip endpoint expects the endpoint-specific filters
-                # object.  Do not add pageSize: it can make the request fail
-                # deserialisation at the root ($) with HTTP 422.
                 filters: dict[str, Any] = {"employeeId": employee["id"]}
                 if sync_from:
                     filters["from"] = sync_from
