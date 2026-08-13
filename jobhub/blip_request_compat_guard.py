@@ -13,6 +13,7 @@ trace server-side failures without exposing credentials or endpoint URLs.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import time
@@ -34,22 +35,46 @@ _SUPPORT_HEADER_NAMES = (
 
 
 def _safe_problem_text(response: Any) -> str:
+    """Return a bounded, redacted description of a BrightHR error response."""
+    payload: Any = None
     try:
         payload = response.json()
     except Exception:
-        return ""
+        pass
+
+    if payload is None:
+        raw = str(getattr(response, "text", "") or "").strip()
+        if not raw:
+            return ""
+        try:
+            payload = json.loads(raw)
+        except Exception:
+            return _redact(raw)
+
     if not isinstance(payload, Mapping):
-        return ""
+        return _redact(str(payload or ""))
 
     parts: list[str] = []
     for key in ("title", "detail"):
         value = str(payload.get(key) or "").strip()
         if value and value not in parts:
             parts.append(value)
-    text = " ".join(parts)
+    problem_type = payload.get("type")
+    if isinstance(problem_type, str):
+        problem_type = problem_type.strip().rstrip("/")
+        if problem_type and problem_type != "about:blank":
+            identifier = problem_type.rsplit("/", 1)[-1].rsplit(":", 1)[-1]
+            identifier = re.sub(r"[^A-Za-z0-9._-]", "", identifier)
+            if identifier:
+                parts.append(f"type={identifier}")
+
+    return _redact(" ".join(parts))
+
+
+def _redact(text: str) -> str:
     text = re.sub(r"https?://\S+", "[endpoint]", text)
     text = re.sub(
-        r"(?i)(client_secret|authorization|bearer|token)\s*[:=]\s*\S+",
+        r"(?i)(client_secret|access_token|authorization|bearer|token)\s*\"?\s*[:=]\s*\"?(?:bearer\s+)?[^\"',\s}]+",
         r"\1=[redacted]",
         text,
     )

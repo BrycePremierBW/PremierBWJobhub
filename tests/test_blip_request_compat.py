@@ -8,16 +8,19 @@ import jobhub.blip_integration_guard as blip
 
 
 class _Response:
-    def __init__(self, payload, status_code=200, headers=None):
+    def __init__(self, payload, status_code=200, headers=None, text=None):
         self.payload = payload
         self.status_code = status_code
         self.headers = headers or {}
+        self.text = text
 
     def raise_for_status(self):
         if self.status_code >= 400:
             raise requests.HTTPError("request failed", response=self)
 
     def json(self):
+        if self.payload is None:
+            raise ValueError("no JSON body")
         return self.payload
 
 
@@ -145,12 +148,28 @@ class _Permanent500Session(_Session):
             self.calls.append((url, kwargs))
             return _Response(
                 {
+                    "type": "https://api.bright.hr/problems/internal-server-error",
                     "title": "Internal Server Error",
                     "detail": "Unable to process employee query.",
                     "status": 500,
                 },
                 500,
                 headers={"X-Correlation-ID": "corr-123", "X-Request-ID": "req-456"},
+            )
+        return super().post(url, **kwargs)
+
+
+class _RawBody500Session(_Session):
+    def post(self, url, **kwargs):
+        if url.endswith("/connect/token"):
+            return _Response({"access_token": "token-x"})
+        if "/employees/" in url:
+            self.calls.append((url, kwargs))
+            return _Response(
+                None,
+                500,
+                headers={"X-Correlation-ID": "corr-raw"},
+                text='Service unavailable: https://api.bright.hr incident, authorization: Bearer abc123',
             )
         return super().post(url, **kwargs)
 
@@ -230,12 +249,28 @@ class BrightHRRequestCompatibilityTests(unittest.TestCase):
             token = blip._request_token(session)
             with self.assertRaisesRegex(
                 RuntimeError,
-                r"BrightHR employee query failed with HTTP 500.*Internal Server Error.*corr-123.*req-456.*server-side processing failure",
+                r"BrightHR employee query failed with HTTP 500.*Internal Server Error.*type=internal-server-error.*corr-123.*req-456.*server-side processing failure",
             ):
                 blip._fetch_employees_with_token(session, token)
 
         employee_calls = [(url, kwargs) for url, kwargs in session.calls if "/employees/" in url]
         self.assertEqual(len(employee_calls), 3)
+
+    def test_raw_text_500_surfaces_redacted_body(self):
+        session = _RawBody500Session()
+        with patch.dict(os.environ, self.env, clear=False), patch(
+            "jobhub.blip_request_compat_guard.time.sleep", return_value=None
+        ):
+            token = blip._request_token(session)
+            with self.assertRaises(RuntimeError) as ctx:
+                blip._fetch_employees_with_token(session, token)
+
+        message = str(ctx.exception)
+        self.assertIn("Service unavailable", message)
+        self.assertIn("[endpoint]", message)
+        self.assertIn("authorization=[redacted]", message)
+        self.assertIn("corr-raw", message)
+        self.assertNotIn("abc123", message)
 
     def test_employee_query_stops_when_token_repeats(self):
         session = _RepeatingTokenEmployeeSession()
