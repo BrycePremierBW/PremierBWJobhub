@@ -42,6 +42,7 @@ daysheet_id, daysheet_no = app.create_extras_daysheet(
 )
 print("SHEET_NO:" + daysheet_no)
 assert daysheet_no == "EXT-001", daysheet_no
+assert isinstance(daysheet_id, int) and isinstance(daysheet_no, str), (type(daysheet_id), type(daysheet_no))
 
 # Same crew member reuses their editable draft sheet.
 reused = app.find_editable_extras_daysheet(job_id, created_by="Extras Crew")
