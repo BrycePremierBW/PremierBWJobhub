@@ -1111,6 +1111,47 @@ def init_db():
     """)
 
     cur.execute("""
+    CREATE TABLE IF NOT EXISTS job_extra_daysheets (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_id INTEGER,
+        daysheet_no TEXT,
+        sheet_date TEXT,
+        area TEXT,
+        employee_name TEXT,
+        created_by TEXT,
+        status TEXT DEFAULT 'Draft',
+        notes TEXT,
+        total_ex_gst REAL DEFAULT 0,
+        created_at TEXT,
+        updated_at TEXT,
+        FOREIGN KEY(job_id) REFERENCES jobs(id)
+    )
+    """)
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_job_extra_daysheets_job "
+        "ON job_extra_daysheets(job_id, id)"
+    )
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS job_extra_daysheet_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        daysheet_id INTEGER NOT NULL,
+        sort_order INTEGER NOT NULL DEFAULT 1,
+        description TEXT,
+        qty REAL DEFAULT 0,
+        unit TEXT,
+        unit_price_ex_gst REAL DEFAULT 0,
+        amount_ex_gst REAL DEFAULT 0,
+        variation_no TEXT,
+        notes TEXT,
+        FOREIGN KEY(daysheet_id) REFERENCES job_extra_daysheets(id) ON DELETE CASCADE
+    )
+    """)
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_job_extra_daysheet_items_sheet "
+        "ON job_extra_daysheet_items(daysheet_id, sort_order, id)"
+    )
+
+    cur.execute("""
     CREATE TABLE IF NOT EXISTS invoice_claims (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         job_id INTEGER,

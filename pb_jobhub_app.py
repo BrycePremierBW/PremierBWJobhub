@@ -2240,6 +2240,47 @@ def init_db():
     """)
 
     cur.execute("""
+    CREATE TABLE IF NOT EXISTS job_extra_daysheets (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_id INTEGER,
+        daysheet_no TEXT,
+        sheet_date TEXT,
+        area TEXT,
+        employee_name TEXT,
+        created_by TEXT,
+        status TEXT DEFAULT 'Draft',
+        notes TEXT,
+        total_ex_gst REAL DEFAULT 0,
+        created_at TEXT,
+        updated_at TEXT,
+        FOREIGN KEY(job_id) REFERENCES jobs(id)
+    )
+    """)
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_job_extra_daysheets_job "
+        "ON job_extra_daysheets(job_id, id)"
+    )
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS job_extra_daysheet_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        daysheet_id INTEGER NOT NULL,
+        sort_order INTEGER NOT NULL DEFAULT 1,
+        description TEXT,
+        qty REAL DEFAULT 0,
+        unit TEXT,
+        unit_price_ex_gst REAL DEFAULT 0,
+        amount_ex_gst REAL DEFAULT 0,
+        variation_no TEXT,
+        notes TEXT,
+        FOREIGN KEY(daysheet_id) REFERENCES job_extra_daysheets(id) ON DELETE CASCADE
+    )
+    """)
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_job_extra_daysheet_items_sheet "
+        "ON job_extra_daysheet_items(daysheet_id, sort_order, id)"
+    )
+
+    cur.execute("""
     CREATE TABLE IF NOT EXISTS invoice_claims (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         job_id INTEGER,
@@ -5095,13 +5136,13 @@ def fill_pdf_template(template_path, output_path, field_values):
     return output_path
 
 
-def attach_document_to_job(job_id, document_type, file_path, notes="Generated from JobHub", mime_type=""):
+def attach_document_to_job(job_id, document_type, file_path, notes="Generated from JobHub", mime_type="", viewer_scope="crew"):
     resolved_mime = str(mime_type or mimetypes.guess_type(str(file_path))[0] or "application/octet-stream")
     file_data = _read_document_bytes(file_path)
     execute("""
         INSERT INTO job_documents
-        (job_id, document_type, file_name, file_path, created_at, notes, mime_type, file_data)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        (job_id, document_type, file_name, file_path, created_at, notes, mime_type, file_data, viewer_scope)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         job_id,
         document_type,
@@ -5111,6 +5152,7 @@ def attach_document_to_job(job_id, document_type, file_path, notes="Generated fr
         notes,
         resolved_mime,
         file_data,
+        viewer_scope,
     ))
 
 
@@ -5558,6 +5600,576 @@ def generate_variation_form_pdf(job_id, requested_by="", description="", reason=
 
     return output_path, variation_no
 
+
+def get_extras_daysheets(job_id):
+    return df_query("""
+        SELECT * FROM job_extra_daysheets
+        WHERE job_id = ?
+        ORDER BY id DESC
+    """, (job_id,))
+
+
+def get_extras_daysheet(daysheet_id):
+    df = df_query("""
+        SELECT d.*,
+               j.job_no,
+               j.job_name,
+               j.site_address,
+               COALESCE(bc.name, '') AS builder_client
+        FROM job_extra_daysheets d
+        JOIN jobs j ON j.id = d.job_id
+        LEFT JOIN builders_clients bc ON bc.id = j.builder_client_id
+        WHERE d.id = ?
+    """, (daysheet_id,))
+    return None if df.empty else df.iloc[0].to_dict()
+
+
+def get_extras_daysheet_items(daysheet_id):
+    return df_query("""
+        SELECT * FROM job_extra_daysheet_items
+        WHERE daysheet_id = ?
+        ORDER BY sort_order, id
+    """, (daysheet_id,))
+
+
+def _extras_daysheet_total(daysheet_id):
+    df = df_query("""
+        SELECT COALESCE(SUM(amount_ex_gst), 0) AS total
+        FROM job_extra_daysheet_items
+        WHERE daysheet_id = ?
+    """, (daysheet_id,))
+    return float(df.iloc[0]["total"] or 0) if not df.empty else 0.0
+
+
+def _recalculate_extras_daysheet(daysheet_id):
+    total = _extras_daysheet_total(daysheet_id)
+    execute("""
+        UPDATE job_extra_daysheets
+        SET total_ex_gst = ?, updated_at = ?
+        WHERE id = ?
+    """, (total, jobhub_now().strftime("%Y-%m-%d %H:%M:%S"), daysheet_id))
+
+
+def find_editable_extras_daysheet(job_id, created_by=""):
+    if created_by:
+        df = df_query("""
+            SELECT id FROM job_extra_daysheets
+            WHERE job_id = ? AND created_by = ? AND status = 'Draft'
+            ORDER BY id DESC
+            LIMIT 1
+        """, (job_id, created_by))
+        if not df.empty:
+            return int(df.iloc[0]["id"])
+    df = df_query("""
+        SELECT id FROM job_extra_daysheets
+        WHERE job_id = ? AND status = 'Draft'
+        ORDER BY id DESC
+        LIMIT 1
+    """, (job_id,))
+    return None if df.empty else int(df.iloc[0]["id"])
+
+
+def create_extras_daysheet(job_id, created_by="", employee_name="", sheet_date="", area="", notes=""):
+    count_df = df_query("SELECT daysheet_no FROM job_extra_daysheets")
+    daysheet_no = next_scoped_number(
+        count_df["daysheet_no"].tolist() if not count_df.empty else [],
+        "EXT",
+    )
+    if not sheet_date:
+        sheet_date = jobhub_today().isoformat()
+    now_text = jobhub_now().strftime("%Y-%m-%d %H:%M:%S")
+    execute("""
+        INSERT INTO job_extra_daysheets
+        (job_id, daysheet_no, sheet_date, area, employee_name, created_by,
+         status, notes, total_ex_gst, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, 'Draft', ?, 0, ?, ?)
+    """, (
+        job_id,
+        daysheet_no,
+        sheet_date,
+        area,
+        employee_name,
+        created_by,
+        notes,
+        now_text,
+        now_text,
+    ))
+    daysheet_df = df_query(
+        "SELECT id FROM job_extra_daysheets WHERE daysheet_no = ?",
+        (daysheet_no,),
+    )
+    return int(daysheet_df.iloc[0]["id"]), daysheet_no
+
+
+def update_extras_daysheet_meta(daysheet_id, sheet_date=None, area=None, employee_name=None, notes=None, status=None):
+    updates = []
+    params = []
+    for column, value in (
+        ("sheet_date", sheet_date),
+        ("area", area),
+        ("employee_name", employee_name),
+        ("notes", notes),
+        ("status", status),
+    ):
+        if value is not None:
+            updates.append(f"{column} = ?")
+            params.append(value)
+    if not updates:
+        return
+    updates.append("updated_at = ?")
+    params.append(jobhub_now().strftime("%Y-%m-%d %H:%M:%S"))
+    params.append(daysheet_id)
+    execute(f"UPDATE job_extra_daysheets SET {', '.join(updates)} WHERE id = ?", tuple(params))
+
+
+def save_extras_daysheet_item(
+    daysheet_id,
+    description,
+    qty=0,
+    unit="",
+    unit_price_ex_gst=0,
+    variation_no="",
+    notes="",
+    item_id=None,
+):
+    try:
+        qty = float(qty or 0)
+    except (TypeError, ValueError):
+        qty = 0
+    try:
+        unit_price = float(unit_price_ex_gst or 0)
+    except (TypeError, ValueError):
+        unit_price = 0
+    amount = round(qty * unit_price, 2)
+    if item_id:
+        execute("""
+            UPDATE job_extra_daysheet_items
+            SET description = ?, qty = ?, unit = ?, unit_price_ex_gst = ?,
+                amount_ex_gst = ?, variation_no = ?, notes = ?
+            WHERE id = ? AND daysheet_id = ?
+        """, (
+            description, qty, unit, unit_price, amount, variation_no, notes,
+            item_id, daysheet_id,
+        ))
+    else:
+        sort_df = df_query("""
+            SELECT COALESCE(MAX(sort_order), 0) AS m
+            FROM job_extra_daysheet_items
+            WHERE daysheet_id = ?
+        """, (daysheet_id,))
+        sort_order = int(sort_df.iloc[0]["m"]) + 1 if not sort_df.empty else 1
+        execute("""
+            INSERT INTO job_extra_daysheet_items
+            (daysheet_id, sort_order, description, qty, unit, unit_price_ex_gst,
+             amount_ex_gst, variation_no, notes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            daysheet_id, sort_order, description, qty, unit, unit_price,
+            amount, variation_no, notes,
+        ))
+    _recalculate_extras_daysheet(daysheet_id)
+
+
+def delete_extras_daysheet_item(daysheet_id, item_id):
+    execute("""
+        DELETE FROM job_extra_daysheet_items
+        WHERE id = ? AND daysheet_id = ?
+    """, (item_id, daysheet_id))
+    _recalculate_extras_daysheet(daysheet_id)
+
+
+def add_approved_variations_to_daysheet(daysheet_id, job_id):
+    """Copy approved job variations into the extras day sheet as line items."""
+    existing = get_extras_daysheet_items(daysheet_id)
+    existing_var_nos = {
+        str(value or "") for value in (existing["variation_no"].tolist() if not existing.empty else [])
+    }
+    variations = df_query("""
+        SELECT variation_no, description, amount_ex_gst
+        FROM job_variations
+        WHERE job_id = ? AND LOWER(COALESCE(status, '')) = 'approved'
+        ORDER BY variation_no
+    """, (job_id,))
+    added = 0
+    for _, row in variations.iterrows():
+        variation_no = str(row.get("variation_no") or "").strip()
+        if variation_no and variation_no in existing_var_nos:
+            continue
+        save_extras_daysheet_item(
+            daysheet_id,
+            description=str(row.get("description") or ""),
+            qty=1,
+            unit="",
+            unit_price_ex_gst=float(row.get("amount_ex_gst") or 0),
+            variation_no=variation_no,
+        )
+        added += 1
+    return added
+
+
+def generate_extras_daysheet_pdf(daysheet_id, include_pricing=True):
+    sheet = get_extras_daysheet(daysheet_id)
+    if not sheet:
+        raise ValueError("Extras day sheet not found.")
+    items = get_extras_daysheet_items(daysheet_id)
+
+    job_no = str(sheet.get("job_no") or f"job_{sheet['job_id']}")
+    job_folder = get_job_folder(job_no)
+    output_path = os.path.join(
+        job_folder,
+        f"{safe_file_name(job_no)}_{safe_file_name(str(sheet.get('daysheet_no') or 'EXT'))}_extras_day_sheet.pdf",
+    )
+
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.platypus import (
+        Paragraph,
+        SimpleDocTemplate,
+        Spacer,
+        Table,
+        TableStyle,
+    )
+
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "ExtrasTitle", parent=styles["Title"], fontSize=16, spaceAfter=4,
+    )
+    doc_label_style = ParagraphStyle(
+        "DocLabel", parent=styles["Normal"], fontSize=10, leading=13,
+    )
+    cell_style = ParagraphStyle(
+        "ExtrasCell", parent=styles["Normal"], fontSize=9, leading=11,
+    )
+    head_cell = ParagraphStyle(
+        "ExtrasHead", parent=cell_style, fontName="Helvetica-Bold",
+        textColor=colors.white, alignment=1,
+    )
+
+    def money(value):
+        return f"${float(value or 0):,.2f}"
+
+    doc = SimpleDocTemplate(
+        output_path,
+        pagesize=A4,
+        leftMargin=15 * mm,
+        rightMargin=15 * mm,
+        topMargin=15 * mm,
+        bottomMargin=15 * mm,
+        title=f"Extras Day Sheet {sheet.get('daysheet_no', '')}",
+    )
+
+    header = Table(
+        [
+            [
+                Paragraph("PB PREMIER BUILDING WORKS", doc_label_style),
+                Paragraph(
+                    f"EXTRAS DAY SHEET<br/><font size=9>{sheet.get('daysheet_no', '')}</font>",
+                    title_style,
+                ),
+            ]
+        ],
+        colWidths=[90 * mm, 90 * mm],
+    )
+    header.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+    ]))
+
+    info_rows = [
+        ("Job No", str(sheet.get("job_no") or "")),
+        ("Job Name", str(sheet.get("job_name") or "")),
+        ("Site Address", str(sheet.get("site_address") or "")),
+        ("Builder / Client", str(sheet.get("builder_client") or "")),
+        ("Date", str(sheet.get("sheet_date") or "")),
+        ("Area", str(sheet.get("area") or "")),
+        ("Prepared By", str(sheet.get("employee_name") or sheet.get("created_by") or "")),
+    ]
+    info_table = Table(
+        [[Paragraph(label, doc_label_style), Paragraph(value, cell_style)]
+         for label, value in info_rows],
+        colWidths=[35 * mm, 145 * mm],
+    )
+    info_table.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+        ("TOPPADDING", (0, 0), (-1, -1), 1),
+    ]))
+
+    item_rows = [[
+        Paragraph("#", head_cell),
+        Paragraph("Description of Extra Work / Materials", head_cell),
+        Paragraph("Qty", head_cell),
+        Paragraph("Unit", head_cell),
+    ]]
+    if include_pricing:
+        item_rows[0] += [
+            Paragraph("Unit Price (ex GST)", head_cell),
+            Paragraph("Amount (ex GST)", head_cell),
+        ]
+    for index, (_, row) in enumerate(items.iterrows(), start=1):
+        label = str(row.get("description") or "")
+        if row.get("variation_no"):
+            label = f"{label}<br/><font size=7 color='#666666'>{row.get('variation_no')}</font>"
+        item_row = [
+            Paragraph(str(index), cell_style),
+            Paragraph(label, cell_style),
+            Paragraph(f"{float(row.get('qty') or 0):g}", cell_style),
+            Paragraph(str(row.get("unit") or ""), cell_style),
+        ]
+        if include_pricing:
+            item_row += [
+                Paragraph(money(row.get("unit_price_ex_gst")), cell_style),
+                Paragraph(money(row.get("amount_ex_gst")), cell_style),
+            ]
+        item_rows.append(item_row)
+
+    if include_pricing:
+        items_table = Table(item_rows, colWidths=[10 * mm, 78 * mm, 18 * mm, 18 * mm, 34 * mm, 22 * mm])
+    else:
+        items_table = Table(item_rows, colWidths=[10 * mm, 118 * mm, 26 * mm, 26 * mm])
+    items_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1f3864")),
+        ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#888888")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f2f4f8")]),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+    ]))
+
+    subtotal = float(sheet.get("total_ex_gst") or 0)
+    gst = round(subtotal * 0.1, 2)
+    total = round(subtotal + gst, 2)
+    totals_rows = [
+        ["Subtotal (ex GST)", money(subtotal)],
+        ["GST (10%)", money(gst)],
+        ["Total", money(total)],
+    ]
+    totals_table = Table(
+        [[Paragraph(label, cell_style), Paragraph(value, cell_style)]
+         for label, value in totals_rows],
+        colWidths=[155 * mm, 25 * mm],
+    )
+    totals_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 2), (1, 2), colors.HexColor("#e8ebf3")),
+        ("LINEABOVE", (0, 0), (-1, -1), 0.4, colors.HexColor("#888888")),
+        ("FONTNAME", (0, 2), (1, 2), "Helvetica-Bold"),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+    ]))
+
+    signature_rows = [
+        ["Prepared By", "Site Foreman / Supervisor"],
+        ["", ""],
+        ["Signature", "Signature"],
+        ["", ""],
+        ["Date", "Date"],
+    ]
+    signature_table = Table(signature_rows, colWidths=[90 * mm, 90 * mm])
+    signature_table.setStyle(TableStyle([
+        ("FONTSIZE", (0, 0), (-1, -1), 9),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("TOPPADDING", (0, 0), (-1, -1), 10),
+    ]))
+
+    notes = str(sheet.get("notes") or "").strip()
+    story = [
+        header,
+        Spacer(1, 4 * mm),
+        info_table,
+        Spacer(1, 6 * mm),
+    ]
+    if not items.empty:
+        story.append(items_table)
+    else:
+        story.append(
+            Table(
+                [["No extras items entered yet."]],
+                colWidths=[180 * mm],
+            )
+        )
+    story.append(Spacer(1, 4 * mm))
+    if include_pricing:
+        story.append(totals_table)
+        story.append(Spacer(1, 12 * mm))
+    story.append(signature_table)
+    story.append(Spacer(1, 8 * mm))
+    if notes:
+        story.append(Paragraph(f"Notes: {notes}", doc_label_style))
+    doc.build(story)
+
+    attach_document_to_job(
+        int(sheet["job_id"]),
+        "Extras Day Sheet",
+        output_path,
+        notes=f"Extras day sheet {sheet.get('daysheet_no', '')} generated from JobHub.",
+        viewer_scope="admin" if include_pricing else "crew",
+    )
+    return output_path
+
+
+def render_extras_daysheet_editor(job_id, show_pricing, key_prefix, prepared_by_default="", created_by=""):
+    """Shared extras day sheet editor. Pricing (unit prices, amounts, totals) is
+    only rendered and attached to the PDF when the viewer is allowed to see it."""
+    extras_sheet_id = find_editable_extras_daysheet(job_id, created_by=created_by)
+    if extras_sheet_id is None:
+        _, extras_sheet_id = create_extras_daysheet(
+            job_id,
+            created_by=created_by,
+            employee_name=prepared_by_default,
+        )
+    extras_sheet = get_extras_daysheet(extras_sheet_id)
+
+    with st.form(f"{key_prefix}_extras_sheet_meta_{extras_sheet_id}"):
+        meta_col_a, meta_col_b = st.columns(2)
+        with meta_col_a:
+            extras_sheet_date = st.date_input(
+                "Sheet Date",
+                value=jobhub_today(),
+                key=f"{key_prefix}_extras_date_{extras_sheet_id}",
+            )
+            extras_area = st.text_input(
+                "Area / Location",
+                key=f"{key_prefix}_extras_area_{extras_sheet_id}",
+            )
+        with meta_col_b:
+            extras_prepared_by = st.text_input(
+                "Prepared By",
+                value=extras_sheet.get("employee_name") or "",
+                key=f"{key_prefix}_extras_prep_{extras_sheet_id}",
+            )
+            extras_notes = st.text_input(
+                "Notes",
+                value=extras_sheet.get("notes") or "",
+                key=f"{key_prefix}_extras_notes_{extras_sheet_id}",
+            )
+        save_meta = st.form_submit_button("Save Sheet Details")
+
+    if save_meta:
+        update_extras_daysheet_meta(
+            extras_sheet_id,
+            sheet_date=extras_sheet_date.isoformat(),
+            area=extras_area,
+            employee_name=extras_prepared_by,
+            notes=extras_notes,
+        )
+        pb_success("Extras day sheet details saved.")
+        refresh()
+
+    extras_items = get_extras_daysheet_items(extras_sheet_id)
+    if not extras_items.empty:
+        item_view = extras_items[
+            ["sort_order", "description", "qty", "unit"] +
+            (["unit_price_ex_gst", "amount_ex_gst"] if show_pricing else [])
+        ].copy()
+        item_view.columns = (
+            ["#", "Description", "Qty", "Unit", "Unit Price (ex GST)", "Amount (ex GST)"]
+            if show_pricing
+            else ["#", "Description", "Qty", "Unit"]
+        )
+        st.dataframe(item_view, width="stretch", hide_index=True)
+    if show_pricing:
+        st.caption(f"Current total: ${float(extras_sheet.get('total_ex_gst') or 0):,.2f} ex GST")
+
+    with st.form(f"{key_prefix}_extras_add_item_{extras_sheet_id}"):
+        st.markdown("#### Add Extras Line")
+        add_description = st.text_input(
+            "Description of extra work / materials",
+            key=f"{key_prefix}_extras_desc_{extras_sheet_id}",
+        )
+        qty_col, unit_col, price_col = st.columns(3)
+        with qty_col:
+            add_qty = st.number_input(
+                "Qty", min_value=0.0, value=1.0, step=1.0,
+                key=f"{key_prefix}_extras_qty_{extras_sheet_id}",
+            )
+        with unit_col:
+            add_unit = st.text_input(
+                "Unit", placeholder="e.g. hrs, m2, lm, each",
+                key=f"{key_prefix}_extras_unit_{extras_sheet_id}",
+            )
+        with price_col:
+            if show_pricing:
+                add_price = st.number_input(
+                    "Unit Price (ex GST)", min_value=0.0, value=0.0, step=10.0,
+                    key=f"{key_prefix}_extras_price_{extras_sheet_id}",
+                )
+            else:
+                st.caption("Pricing is entered by management only.")
+                add_price = 0.0
+        add_item = st.form_submit_button("Add Line")
+
+    if add_item:
+        if not str(add_description or "").strip():
+            pb_error("Enter a description for the extras line.")
+        else:
+            save_extras_daysheet_item(
+                extras_sheet_id,
+                description=add_description,
+                qty=add_qty,
+                unit=add_unit,
+                unit_price_ex_gst=add_price,
+            )
+            pb_success("Extras line added.")
+            refresh()
+
+    if not extras_items.empty:
+        remove_options = {
+            f"{int(row.get('id'))} - {str(row.get('description') or '')[:60]}": int(row.get("id"))
+            for _, row in extras_items.iterrows()
+        }
+        if remove_options:
+            remove_choice = st.selectbox(
+                "Remove extras line",
+                list(remove_options.keys()),
+                key=f"{key_prefix}_extras_remove_{extras_sheet_id}",
+            )
+            if st.button(
+                "Remove Selected Line",
+                key=f"{key_prefix}_extras_remove_btn_{extras_sheet_id}",
+            ):
+                delete_extras_daysheet_item(extras_sheet_id, remove_options[remove_choice])
+                pb_success("Extras line removed.")
+                refresh()
+
+    if show_pricing:
+        if st.button(
+            "Load Approved Variations",
+            key=f"{key_prefix}_extras_load_var_{extras_sheet_id}",
+        ):
+            added = add_approved_variations_to_daysheet(extras_sheet_id, job_id)
+            if added:
+                pb_success(f"Added {added} approved variation(s) to the extras day sheet.")
+                refresh()
+            else:
+                st.info("No approved variations were available to add.")
+
+    if st.button(
+        "Generate Extras Day Sheet PDF",
+        key=f"{key_prefix}_generate_extras_{job_id}",
+        type="primary",
+    ):
+        try:
+            pdf_path = generate_extras_daysheet_pdf(extras_sheet_id, include_pricing=show_pricing)
+            if show_pricing:
+                pb_success("Extras Day Sheet generated with pricing and attached to this job (admin view only).")
+            else:
+                pb_success("Extras Day Sheet generated and attached to this job.")
+            with open(pdf_path, "rb") as f:
+                st.download_button(
+                    "Download Extras Day Sheet",
+                    data=f,
+                    file_name=os.path.basename(pdf_path),
+                    mime="application/pdf",
+                    key=f"{key_prefix}_download_extras_{job_id}",
+                )
+        except Exception as e:
+            pb_error(f"Could not generate Extras Day Sheet: {e}")
+
+
 JOB_DIRECT_CHILD_TABLES = (
     "wage_entries",
     "timesheet_entries",
@@ -5569,6 +6181,7 @@ JOB_DIRECT_CHILD_TABLES = (
     "job_documents",
     "job_budgets",
     "job_variations",
+    "job_extra_daysheets",
     "invoice_claims",
     "staff_schedule",
     "job_employee_access",
@@ -5613,6 +6226,10 @@ def _delete_job_rows(cur, job_id):
     cur.execute("""
         DELETE FROM invoice_claim_items
         WHERE invoice_claim_id IN (SELECT id FROM invoice_claims WHERE job_id=?)
+    """, (job_id,))
+    cur.execute("""
+        DELETE FROM job_extra_daysheet_items
+        WHERE daysheet_id IN (SELECT id FROM job_extra_daysheets WHERE job_id=?)
     """, (job_id,))
     cur.execute("DELETE FROM job_alert_acknowledgements WHERE job_id=?", (job_id,))
     cur.execute("UPDATE job_photos SET stage_progress_update_id=NULL WHERE job_id=?", (job_id,))
@@ -6575,6 +7192,22 @@ def employee_portal():
                         mime="application/pdf",
                         key=f"employee_download_variation_{selected_job_id}_{variation_no}",
                     )
+
+            st.divider()
+
+            st.markdown("### Extras Day Sheet")
+            st.caption(
+                "Record extra work or materials for the job and generate a signed "
+                "extras day sheet PDF that gets attached to the job. "
+                "Pricing is entered by management only."
+            )
+            render_extras_daysheet_editor(
+                selected_job_id,
+                show_pricing=is_admin(),
+                key_prefix="employee",
+                prepared_by_default=employee_name or "",
+                created_by=employee_name or user.get("username", ""),
+            )
     with tab_password:
         st.subheader("Change My Password")
         with st.form("employee_change_password"):
@@ -21894,6 +22527,21 @@ def render_job_linked_info(job_id, expanded=True):
             st.info("No claims or invoices saved for this job.")
         else:
             st.dataframe(claims_df, width="stretch", hide_index=True)
+
+        st.divider()
+
+        st.markdown("### Extras Day Sheets")
+        st.caption(
+            "Extras day sheets raised by the crew. Pricing is entered here by "
+            "management and the priced PDF is visible to admins only."
+        )
+        render_extras_daysheet_editor(
+            job_id,
+            show_pricing=True,
+            key_prefix="admin",
+            prepared_by_default=current_username(),
+            created_by=current_username(),
+        )
 
         st.divider()
 
