@@ -6016,7 +6016,7 @@ def render_extras_daysheet_editor(job_id, show_pricing, key_prefix, prepared_by_
     only rendered and attached to the PDF when the viewer is allowed to see it."""
     extras_sheet_id = find_editable_extras_daysheet(job_id, created_by=created_by)
     if extras_sheet_id is None:
-        _, extras_sheet_id = create_extras_daysheet(
+        extras_sheet_id, _ = create_extras_daysheet(
             job_id,
             created_by=created_by,
             employee_name=prepared_by_default,
