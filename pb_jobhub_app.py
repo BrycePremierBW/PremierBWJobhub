@@ -8428,10 +8428,11 @@ def render_missed_timesheet_catchup(
 ):
     """Quick catch-up for scheduled shifts with no timesheet yet.
 
-    By default (admin view) the roster's start/finish and job/stage are pre-filled
-    so an admin can generate a shift on an employee's behalf. In ``manual_entry``
-    mode (employee view) nothing is auto-populated: the employee chooses the job
-    and the hours themselves, so the entry is entirely their selection.
+    Every missed shift lets the user pick the job (and stage) the work actually
+    happened at. In ``manual_entry`` mode (employee view) the employee chooses the
+    job and the hours themselves. Otherwise (admin view) the roster's job, start
+    and finish are pre-filled so a shift can be generated on the employee's
+    behalf, and the job can be changed to another job before submitting.
     """
     if not employee_id:
         st.info("Select an employee to see missed timesheets.")
@@ -8479,18 +8480,21 @@ def render_missed_timesheet_catchup(
 
     work_type_options = ["Painting", "Prep", "Spraying", "Touch-ups", "Travel", "Site Setup", "Other"]
 
-    job_stage_options = {}
-    if manual_entry:
-        job_stage_options = get_job_stage_options(get_employee_job_options(employee_id))
-        existing_job_ids = {int(choice["job_id"]) for choice in job_stage_options.values()}
-        for item in missed:
-            missed_job_id = int(item["job_id"] or 0)
-            if missed_job_id and missed_job_id not in existing_job_ids:
-                job_label = f"{item['job_no']} - {item['job_name']}".strip(" -")
-                job_stage_options.update(
-                    get_job_stage_options({job_label: missed_job_id})
-                )
-                existing_job_ids.add(missed_job_id)
+    base_job_options = (
+        get_employee_job_options(employee_id)
+        if manual_entry
+        else get_job_options()
+    )
+    job_stage_options = get_job_stage_options(base_job_options)
+    existing_job_ids = {int(choice["job_id"]) for choice in job_stage_options.values()}
+    for item in missed:
+        missed_job_id = int(item["job_id"] or 0)
+        if missed_job_id and missed_job_id not in existing_job_ids:
+            job_label = f"{item['job_no']} - {item['job_name']}".strip(" -")
+            job_stage_options.update(
+                get_job_stage_options({job_label: missed_job_id})
+            )
+            existing_job_ids.add(missed_job_id)
 
     site_by_job = {}
     job_ids_for_sites = {
@@ -8535,11 +8539,11 @@ def render_missed_timesheet_catchup(
             )
 
             selected_choice = None
+            if not job_stage_options:
+                st.info("No jobs are available to record this day against.")
+                continue
             if manual_entry:
                 # All user selection: no job, stage or hours are pre-filled.
-                if not job_stage_options:
-                    st.info("No assigned jobs are available to record this day against.")
-                    continue
                 select_labels = ["Select job / stage..."] + list(job_stage_options.keys())
                 selected_job_stage = st.selectbox(
                     "Job / Stage",
@@ -8555,6 +8559,32 @@ def render_missed_timesheet_catchup(
                 default_start = time(7, 0)
                 default_finish = time(15, 0)
             else:
+                # The roster's job is pre-selected but can be changed to any other
+                # job (and stage) the shift actually happened at.
+                select_labels = list(job_stage_options.keys())
+                default_index = 0
+                for option_index, option_label in enumerate(select_labels):
+                    option = job_stage_options[option_label]
+                    if (
+                        int(option["job_id"]) == int(item["job_id"] or 0)
+                        and (
+                            (option["job_stage_id"] is None and item["stage_id"] is None)
+                            or (
+                                option["job_stage_id"] is not None
+                                and option["job_stage_id"] == item["stage_id"]
+                            )
+                        )
+                    ):
+                        default_index = option_index
+                        break
+                selected_job_stage = st.selectbox(
+                    "Job / Stage",
+                    select_labels,
+                    index=default_index,
+                    key=f"{row_key}_job_stage",
+                    help="The job (and stage) this shift was actually worked on. Change it if the roster shows the wrong job.",
+                )
+                selected_choice = job_stage_options[selected_job_stage]
                 try:
                     default_start = datetime.strptime(item["start_time"], "%H:%M").time()
                 except ValueError:
@@ -8616,7 +8646,7 @@ def render_missed_timesheet_catchup(
                 "Site / Location",
                 value=site_by_job.get(
                     int(selected_choice["job_id"])
-                    if manual_entry and selected_choice is not None
+                    if selected_choice is not None
                     else int(item["job_id"] or 0),
                     "",
                 ),
@@ -8651,25 +8681,18 @@ def render_missed_timesheet_catchup(
                 f"Submit timesheet for {selected_work_date.isoformat()}",
                 key=f"{row_key}_submit",
                 width="stretch",
-                disabled=(
-                    bool(manual_entry and selected_choice is None)
-                    or total_hours <= 0
-                ),
+                disabled=(bool(selected_choice is None) or total_hours <= 0),
             )
             if submit_button:
                 if total_hours <= 0:
                     pb_error(f"Shift for {selected_work_date.isoformat()} has zero or negative hours. Fix the times first.")
                     continue
-                if manual_entry and selected_choice is None:
+                if selected_choice is None:
                     pb_error(f"Select the job and stage worked on {selected_work_date.isoformat()} first.")
                     continue
                 try:
                     save_timesheet_entry(
-                        job_id=(
-                            int(selected_choice["job_id"])
-                            if manual_entry and selected_choice is not None
-                            else item["job_id"]
-                        ),
+                        job_id=int(selected_choice["job_id"]),
                         employee_id=int(employee_id),
                         work_date=selected_work_date.isoformat(),
                         start_time=start_value.strftime("%H:%M"),
@@ -8678,11 +8701,7 @@ def render_missed_timesheet_catchup(
                         total_hours=total_hours,
                         work_type=selected_work_type,
                         notes=selected_notes,
-                        job_stage_id=(
-                            selected_choice["job_stage_id"]
-                            if manual_entry and selected_choice is not None
-                            else item["stage_id"]
-                        ),
+                        job_stage_id=selected_choice["job_stage_id"],
                         site_location=site_value,
                     )
                     submitted_count += 1
@@ -10364,7 +10383,7 @@ def timesheets_page(employee_restricted=False):
             st.caption(
                 "Scheduled shifts that never received a timesheet. Send the employee a "
                 "reminder to log their own hours, or backdate a timesheet on their behalf "
-                "with the rostered details pre-filled (the work date is editable)."
+                "with the rostered details pre-filled (the work date and job are editable)."
             )
             admin_employee_options = get_employee_options(active_only=True)
             if not admin_employee_options:

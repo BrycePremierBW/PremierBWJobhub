@@ -129,6 +129,13 @@ class JobFolderEditsIntegrationTest(unittest.TestCase):
         self.assertIn("manual_entry=False", app_source)
         self.assertIn("Select job / stage...", app_source)
 
+        # Admin catch-up pre-fills the roster's job but lets it be changed to
+        # another job before the timesheet is submitted.
+        self.assertIn("base_job_options = (", app_source)
+        self.assertIn("else get_job_options()", app_source)
+        self.assertIn("The roster's job is pre-selected but can be changed", app_source)
+        self.assertIn('help="The job (and stage) this shift was actually worked on. Change it if the roster shows the wrong job."', app_source)
+
         # Simplified employee timesheet form.
         self.assertIn("def timesheet_entry_form(", app_source)
         self.assertIn("simple=False", app_source)
