@@ -128,13 +128,11 @@ def render_material_costs():
                     custom_unit_price = c5.number_input("Unit Price Ex GST", min_value=0.0, step=1.0)
 
                     custom_colour = st.text_input("Colour / Finish")
-                    display_product_name = custom_product_name
                     display_unit_price = custom_unit_price or 0
                     default_supplier = custom_supplier
 
                 else:
                     st.caption(f"This entry will be saved against **{job_label}** using **{matched_code} — {matched_name}**.")
-                    display_product_name = matched_name
                     display_unit_price = matched_price
                     default_supplier = matched_supplier
 

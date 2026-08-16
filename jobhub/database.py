@@ -101,7 +101,6 @@ def adapt_sql_for_postgres(sql):
     if not USE_POSTGRES:
         return sql
 
-    original_sql = sql
     s = sql.strip()
 
     # PostgreSQL alias names with spaces need double quotes, not single quotes.

@@ -512,12 +512,6 @@ def generate_ai_takeoff_lines(job_id, selected_doc_ids=None, extra_scope_notes="
         return None, "No readable PDF text was found in the selected documents. Upload text-based plans/specs or add lines manually.", warnings
 
     job = get_job_details_for_pdf(job_id) or {}
-    system_text = """
-You are a professional painting estimator for Premier Brushworks. Create a painting take-off draft from the provided plans/specs text.
-Only use areas, dimensions, room schedules, wall types, finishes, door/window schedules or explicit scope details that are present in the context. Do not invent quantities.
-If exact m2 cannot be calculated from the text, make a conservative line with m2 0 and explain what measurement is missing in notes.
-Return only valid JSON. No markdown. No commentary outside JSON.
-"""
     prompt = f"""
 Prepare a draft painting take-off for this job.
 

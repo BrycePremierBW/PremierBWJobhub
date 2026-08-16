@@ -202,7 +202,7 @@ def job_photos_page(employee_restricted=False):
                     st.write(notes)
 
                 if not employee_restricted:
-                    delete_confirm = st.checkbox(f"Delete this photo", key=f"delete_photo_confirm_{photo_id}")
+                    delete_confirm = st.checkbox("Delete this photo", key=f"delete_photo_confirm_{photo_id}")
                     if st.button("Delete Photo", key=f"delete_photo_{photo_id}"):
                         if not delete_confirm:
                             st.error("Tick the delete checkbox first.")

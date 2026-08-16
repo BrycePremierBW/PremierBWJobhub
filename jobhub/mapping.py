@@ -452,7 +452,6 @@ def generate_building_surfaces_from_takeoff(job_id, package_id=None, reset_exist
         # Keep automatically generated sections in a horizontal row by default.
         # Only the plan-shaped mapper should create upper levels based on real Level 1/Level 2 wording.
         per_row = 10
-        level_index = 0
         pos_index = count % per_row
         row_index = count // per_row
         level_name = "Ground"
@@ -532,7 +531,6 @@ def mapper_wall_position(elevation, cursor, width, building_length, building_dep
     usable_side = building_depth * 0.92
     width = max(float(width or 1.0), 0.2)
     row_gap = 0.18
-    stack = int(cursor // 1) if cursor > 99999 else 0
     # cursor is actual running length; wrap if a facade row is filled
     elev = str(elevation or "Internal")
     if elev in ["Front", "Rear"]:

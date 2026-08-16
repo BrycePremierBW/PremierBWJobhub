@@ -191,7 +191,6 @@ def recalculate_takeoff_values(
         qty = max(float(r.get("qty_m2") or 0.0), 0.0)
         lineal = max(float(r.get("lineal_m") or 0.0), 0.0)
         coats = max(float(r.get("coats") or 0.0), 0.0)
-        work = max(qty, lineal) * (1 + waste)
         row = dict(r)
         row["paint_litres"] = litres_from_area(qty * (1 + waste), coats, coverage_m2_per_l)
         row["labour_hours"] = labour_hours_for(max(qty, lineal), row.get("labour_category"), waste_pct)
@@ -628,7 +627,6 @@ def markup_plan_image_bytes(option: Dict[str, Any], schedule_rows: List[Dict[str
         draw.text((8, height - lh - 6), legend, fill="#111111", font=body_font)
         lx = 8
         for name, hexv in sorted(colours_used):
-            w = len(name) * base
             draw.rectangle([lx, height - lh - 12, lx + 12, height - lh], fill=hexv, outline="#333333")
             lx += 18 + int(draw.textlength(name, font=body_font)) + 14
     out = io.BytesIO()

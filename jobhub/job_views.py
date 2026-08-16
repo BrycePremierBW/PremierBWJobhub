@@ -226,8 +226,6 @@ def render_job_linked_info(job_id, expanded=True):
         st.warning("Selected job could not be found.")
         return
 
-    job_no = str(job_details.iloc[0]["Job No"])
-    job_name = str(job_details.iloc[0]["Job Name"])
     pb_job_header(job_details.iloc[0])
     material_details = safe_df_query("""
     

@@ -1474,7 +1474,6 @@ def adapt_sql_for_postgres(sql):
     if not USE_POSTGRES:
         return sql
 
-    original_sql = sql
     s = sql.strip()
 
     # PostgreSQL alias names with spaces need double quotes, not single quotes.
@@ -8215,7 +8214,7 @@ def job_photos_page(employee_restricted=False):
                     st.write(notes)
 
                 if not employee_restricted:
-                    delete_confirm = st.checkbox(f"Delete this photo", key=f"delete_photo_confirm_{photo_id}")
+                    delete_confirm = st.checkbox("Delete this photo", key=f"delete_photo_confirm_{photo_id}")
                     if st.button("Delete Photo", key=f"delete_photo_{photo_id}"):
                         if not delete_confirm:
                             pb_error("Tick the delete checkbox first.")
@@ -14315,7 +14314,6 @@ def smart_intake_import_page():
     merge_into_existing = intake_action.startswith("Merge")
 
     selected_job_id = None
-    selected_job_no = ""
     if not create_new_job:
         labels = list(job_options.keys())
         selected_job_label = st.selectbox(
@@ -14324,7 +14322,6 @@ def smart_intake_import_page():
             key="smart_intake_target_job",
         )
         selected_job_id = job_options[selected_job_label]
-        selected_job_no = labels[labels.index(selected_job_label)].split(" - ", 1)[0].strip()
 
     stated_job_no = ""
     with st.expander("Job number stated in the documents (optional)", expanded=False):
@@ -20487,25 +20484,33 @@ def stage_progress_summary_dataframe(job_id):
 def get_job_stage_options(job_options):
     """Build selectable job/stage labels while keeping jobs without stages valid."""
     choices = {}
+    job_ids = [int(job_id) for job_id in job_options.values()]
+    stages_by_job = {}
+    if job_ids:
+        placeholders = ",".join("?" for _ in job_ids)
+        stages_df = safe_df_query(
+            f"""
+            SELECT id, job_id, stage_name
+            FROM job_stages
+            WHERE job_id IN ({placeholders})
+            ORDER BY sequence_order, id
+            """,
+            tuple(job_ids),
+        )
+        if stages_df is not None and not stages_df.empty:
+            for _, stage in stages_df.iterrows():
+                stages_by_job.setdefault(int(stage["job_id"]), []).append(stage)
     for job_label, job_id in job_options.items():
+        job_id = int(job_id)
         choices[f"{job_label} — Whole Job"] = {
-            "job_id": int(job_id),
+            "job_id": job_id,
             "job_stage_id": None,
             "stage_name": "Whole Job",
         }
-        stages = safe_df_query(
-            """
-            SELECT id, stage_name
-            FROM job_stages
-            WHERE job_id = ?
-            ORDER BY sequence_order, id
-            """,
-            (int(job_id),),
-        )
-        for _, stage in stages.iterrows():
+        for stage in stages_by_job.get(job_id, []):
             stage_name = str(stage["stage_name"] or "").strip()
             choices[f"{job_label} — {stage_name}"] = {
-                "job_id": int(job_id),
+                "job_id": job_id,
                 "job_stage_id": int(stage["id"]),
                 "stage_name": stage_name,
             }
@@ -21669,11 +21674,6 @@ def render_job_stages_panel(job_id):
     value_basis, value_source = job_value_basis(job_id)
 
     stage_count = len(stages)
-    active_count = (
-        int((stages["Status"].astype(str).str.casefold() != "completed").sum())
-        if not stages.empty
-        else 0
-    )
     budget_hours = float(stages["Budget Hours"].fillna(0).sum()) if not stages.empty else 0.0
     actual_hours = float(stages["Actual Hours"].fillna(0).sum()) if not stages.empty else 0.0
     percentage_total = float(stages["Job %"].fillna(0).sum()) if not stages.empty else 0.0
@@ -23056,7 +23056,7 @@ except Exception as exc:
 # existing backup before doing any work, so normal page reruns remain fast.
 try:
     ensure_daily_backup(jobhub_enterprise_context())
-except Exception as exc:
+except Exception:
     # Backup problems must never prevent staff from using JobHub.  They remain
     # visible in Operations Hub > System / Backups for administrator follow-up.
     pass
