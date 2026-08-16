@@ -24,6 +24,7 @@ except Exception:
     ThreadedConnectionPool = None
 from pypdf import PdfReader, PdfWriter
 import streamlit as st
+from jobhub_lookup_cache import notify_db_write, track_cached
 from jobhub_feedback import error as pb_error, replay_pending as pb_replay_pending, rerun as pb_rerun, success as pb_success
 from jobhub_time import jobhub_now, jobhub_today
 from pb_jobhub_visual_scheduler import (
@@ -1592,6 +1593,10 @@ class PostgresConnectionAdapter:
         return PostgresCursorAdapter(self.conn.cursor())
 
     def commit(self):
+        try:
+            notify_db_write()
+        except Exception:
+            pass
         return self.conn.commit()
 
     def rollback(self):
@@ -1622,13 +1627,34 @@ class PostgresConnectionAdapter:
         return getattr(self.conn, name)
 
 
+class _CacheTrackingConnection(sqlite3.Connection):
+    """sqlite3.Connection whose commit() invalidates cached option lists.
+
+    Every write in the app goes through ``connect()`` + ``commit()`` (including
+    raw cursor helpers that bypass ``execute``), so tracking commits here keeps
+    the lookup caches in sync without having to instrument every write site.
+    """
+
+    def commit(self):
+        super().commit()
+        try:
+            notify_db_write()
+        except Exception:
+            pass
+
+
 def connect():
     if USE_POSTGRES:
         pool = get_postgres_pool()
         raw_conn = pool.getconn()
         return PostgresConnectionAdapter(raw_conn, pool)
 
-    conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
+    conn = sqlite3.connect(
+        DB_PATH,
+        timeout=30,
+        check_same_thread=False,
+        factory=_CacheTrackingConnection,
+    )
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA busy_timeout = 30000")
     conn.execute("PRAGMA synchronous = NORMAL")
@@ -3136,6 +3162,7 @@ def execute(sql, params=()):
         raise
     finally:
         conn.close()
+    notify_db_write(sql)
 
 
 def execute_with_rowcount(sql, params=()):
@@ -3155,6 +3182,7 @@ def execute_with_rowcount(sql, params=()):
         raise
     finally:
         conn.close()
+        notify_db_write(sql)
 
 
 def record_audit_event(action, entity_type, entity_id="", details=None):
@@ -4190,12 +4218,9 @@ def mark_notification_read(notification_id, user_id):
     ))
 
 
-def render_sidebar_notifications():
-    user = get_current_user() or {}
-    user_id = user.get("id")
-    if not user_id:
-        return
-
+@track_cached
+@st.cache_data(show_spinner=False)
+def _unread_notifications_for_user(user_id):
     notifications = df_query("""
         SELECT id, event_type, title, message, created_by, created_at
         FROM app_notifications
@@ -4211,6 +4236,16 @@ def render_sidebar_notifications():
           AND COALESCE(read_at, '') = ''
     """, (int(user_id),))
     unread_count = int(unread_count_df.iloc[0]["c"] or 0) if not unread_count_df.empty else 0
+    return notifications, unread_count
+
+
+def render_sidebar_notifications():
+    user = get_current_user() or {}
+    user_id = user.get("id")
+    if not user_id:
+        return
+
+    notifications, unread_count = _unread_notifications_for_user(user_id)
 
     if not notifications.empty:
         newest = notifications.iloc[0]
@@ -4451,23 +4486,30 @@ def execute_many(sql, rows):
         raise
     finally:
         conn.close()
+        notify_db_write(sql)
 
 
 def refresh():
     pb_rerun()
 
 
+@track_cached
+@st.cache_data(show_spinner=False)
 def get_builder_options():
     df = df_query("SELECT id, name FROM builders_clients ORDER BY name")
     return {str(row["name"]): int(row["id"]) for _, row in df.iterrows()}
 
 
+@track_cached
+@st.cache_data(show_spinner=False)
 def get_employee_options(active_only=False):
     where = "WHERE status = 'Active'" if active_only else ""
     df = df_query(f"SELECT id, name FROM employees {where} ORDER BY name")
     return {str(row["name"]): int(row["id"]) for _, row in df.iterrows()}
 
 
+@track_cached
+@st.cache_data(show_spinner=False)
 def get_job_options():
     df = df_query("""
         SELECT id, job_no || ' - ' || COALESCE(job_name, '') AS label
@@ -4477,6 +4519,8 @@ def get_job_options():
     return {str(row["label"]): int(row["id"]) for _, row in df.iterrows()}
 
 
+@track_cached
+@st.cache_data(show_spinner=False)
 def get_employee_job_options(employee_id):
     """Return only jobs the employee leads, is scheduled on, or was granted."""
     if not employee_id:
@@ -4537,6 +4581,8 @@ def serialise_material_supplier_list(values):
     return json.dumps(parse_material_supplier_list(values), ensure_ascii=False)
 
 
+@track_cached
+@st.cache_data(show_spinner=False)
 def get_product_supplier_options():
     df = df_query("""
         SELECT supplier
@@ -4550,6 +4596,8 @@ def get_product_supplier_options():
     return [normalise_supplier_name(value) for value in df.get("supplier", pd.Series(dtype=str)).tolist() if normalise_supplier_name(value)]
 
 
+@track_cached
+@st.cache_data(show_spinner=False)
 def get_job_material_policy(job_id):
     df = df_query("""
         SELECT job_no, job_name,
@@ -4598,11 +4646,15 @@ def _filtered_products_dataframe(allowed_suppliers=None):
     )
 
 
+@track_cached
+@st.cache_data(show_spinner=False)
 def get_product_options(allowed_suppliers=None):
     df = _filtered_products_dataframe(allowed_suppliers)
     return {str(row["product_code"]): int(row["id"]) for _, row in df.iterrows()}
 
 
+@track_cached
+@st.cache_data(show_spinner=False)
 def get_product_name_options(allowed_suppliers=None):
     df = _filtered_products_dataframe(allowed_suppliers)
     if not df.empty:
@@ -4610,6 +4662,8 @@ def get_product_name_options(allowed_suppliers=None):
     return {f"{row['product_name']} ({row['product_code']})": int(row["id"]) for _, row in df.iterrows()}
 
 
+@track_cached
+@st.cache_data(show_spinner=False)
 def next_job_no():
     df = df_query("SELECT job_no FROM jobs WHERE job_no LIKE 'PB%' ORDER BY job_no DESC LIMIT 1")
     if df.empty:
@@ -20481,6 +20535,8 @@ def stage_progress_summary_dataframe(job_id):
     return pd.DataFrame(rows)
 
 
+@track_cached
+@st.cache_data(show_spinner=False)
 def get_job_stage_options(job_options):
     """Build selectable job/stage labels while keeping jobs without stages valid."""
     choices = {}
@@ -23166,6 +23222,38 @@ else:
         "App Builder AI": "App Builder AI",
     }
 
+# PB_JOBHUB_SUBMENU_STATE_FIX: Streamlit deletes the session value of any radio
+# that is not rendered in a rerun. Switching a top-level menu therefore snapped
+# each sub-menu back to its first option. Persist each sub-menu's last selection
+# under a non-widget key and restore it whenever the sub-menu is re-rendered.
+_PERSISTED_SUBMENU_KEYS = {
+    "management_menu": "_pb_persisted_management_menu",
+    "estimating_menu": "_pb_persisted_estimating_menu",
+    "site_operations_menu": "_pb_persisted_site_operations_menu",
+    "ai_menu": "_pb_persisted_ai_menu",
+}
+
+
+def _render_persistent_submenu_radio(widget_key, labels, radio_label, menu_map):
+    """Render a sidebar sub-menu radio, preserving its selection across menu switches."""
+    if not labels:
+        return ""
+    state = st.session_state
+    if state.get(widget_key) not in labels:
+        current = state.get(_PERSISTED_SUBMENU_KEYS[widget_key])
+        if current not in labels:
+            current = labels[0]
+        state[widget_key] = current
+    selected = st.sidebar.radio(
+        radio_label,
+        labels,
+        key=widget_key,
+        label_visibility="collapsed",
+    )
+    state[_PERSISTED_SUBMENU_KEYS[widget_key]] = selected
+    return menu_map.get(selected, selected)
+
+
 reports_menu_map = {"Reports / Export": "Reports / Export"}
 
 sidebar_reset_target = "Dashboard" if "Dashboard" in main_menu_options else main_menu_options[0]
@@ -23183,6 +23271,10 @@ if st.sidebar.button(
         "control_centre_section",
         "go_to_menu",
         "_pb_sidebar_navigation_signature",
+        "_pb_persisted_management_menu",
+        "_pb_persisted_estimating_menu",
+        "_pb_persisted_site_operations_menu",
+        "_pb_persisted_ai_menu",
     ):
         st.session_state.pop(navigation_key, None)
     st.session_state["go_to_menu"] = sidebar_reset_target
@@ -23240,55 +23332,43 @@ main_menu_choice = st.sidebar.radio("Menu", main_menu_options, key="main_menu")
 if main_menu_choice == "Management":
     st.sidebar.markdown("### Management")
     management_labels = list(management_menu_map.keys())
-    if st.session_state.get("management_menu") not in management_labels:
-        st.session_state["management_menu"] = management_labels[0] if management_labels else ""
     # PB_JOBHUB_SIDEBAR_MENU_FIX: show every option instead of using a clipped dropdown.
-    selected_management_label = st.sidebar.radio(
-        "Management Section",
+    menu = _render_persistent_submenu_radio(
+        "management_menu",
         management_labels,
-        key="management_menu",
-        label_visibility="collapsed",
+        "Management Section",
+        management_menu_map,
     )
-    menu = management_menu_map.get(selected_management_label, selected_management_label)
 elif main_menu_choice == "Estimating":
     st.sidebar.markdown("### Estimating")
     estimating_labels = list(estimating_menu_map.keys())
-    if st.session_state.get("estimating_menu") not in estimating_labels:
-        st.session_state["estimating_menu"] = estimating_labels[0] if estimating_labels else ""
     # PB_JOBHUB_SIDEBAR_MENU_FIX: show every option instead of using a clipped dropdown.
-    selected_estimating_label = st.sidebar.radio(
-        "Estimating Section",
+    menu = _render_persistent_submenu_radio(
+        "estimating_menu",
         estimating_labels,
-        key="estimating_menu",
-        label_visibility="collapsed",
+        "Estimating Section",
+        estimating_menu_map,
     )
-    menu = estimating_menu_map.get(selected_estimating_label, selected_estimating_label)
 elif main_menu_choice == "Site Operations":
     st.sidebar.markdown("### Site Operations")
     site_labels = list(site_operations_menu_map.keys())
-    if st.session_state.get("site_operations_menu") not in site_labels:
-        st.session_state["site_operations_menu"] = site_labels[0] if site_labels else ""
     # PB_JOBHUB_SIDEBAR_MENU_FIX: show every option instead of using a clipped dropdown.
-    selected_site_label = st.sidebar.radio(
-        "Site Section",
+    menu = _render_persistent_submenu_radio(
+        "site_operations_menu",
         site_labels,
-        key="site_operations_menu",
-        label_visibility="collapsed",
+        "Site Section",
+        site_operations_menu_map,
     )
-    menu = site_operations_menu_map.get(selected_site_label, selected_site_label)
 elif main_menu_choice == "AI Assistant":
     st.sidebar.markdown("### AI Assistant")
     ai_labels = list(ai_menu_map.keys())
-    if st.session_state.get("ai_menu") not in ai_labels:
-        st.session_state["ai_menu"] = ai_labels[0] if ai_labels else ""
     # PB_JOBHUB_SIDEBAR_MENU_FIX: show every option instead of using a clipped dropdown.
-    selected_ai_label = st.sidebar.radio(
-        "AI Section",
+    menu = _render_persistent_submenu_radio(
+        "ai_menu",
         ai_labels,
-        key="ai_menu",
-        label_visibility="collapsed",
+        "AI Section",
+        ai_menu_map,
     )
-    menu = ai_menu_map.get(selected_ai_label, selected_ai_label)
 elif main_menu_choice == "Reports":
     menu = "Reports / Export"
 else:

@@ -35,6 +35,9 @@ class NavigationVisibilityRegressionTests(unittest.TestCase):
         self.assertIn("window.matchMedia('(max-width: 768px)')", helper)
 
     def test_submenus_use_visible_radio_lists_not_clipped_dropdowns(self):
+        # Each sub-menu is rendered through the shared persistent-radio helper,
+        # which always uses st.sidebar.radio (a fully visible list) rather than
+        # a clipped sidebar selectbox.
         for label in (
             "Management Section",
             "Estimating Section",
@@ -43,12 +46,41 @@ class NavigationVisibilityRegressionTests(unittest.TestCase):
         ):
             self.assertRegex(
                 self.source,
-                rf"st\.sidebar\.radio\(\s*\"{re.escape(label)}\"",
+                rf"_render_persistent_submenu_radio\(\s*\"[a-z_]+\",\s*[a-z_]+,\s*\"{re.escape(label)}\"",
             )
             self.assertNotRegex(
                 self.source,
                 rf"st\.sidebar\.selectbox\(\s*\"{re.escape(label)}\"",
             )
+        start = self.source.index("def _render_persistent_submenu_radio")
+        end = self.source.index("reports_menu_map", start)
+        helper = self.source[start:end]
+        self.assertIn("st.sidebar.radio(", helper)
+        self.assertNotIn("st.sidebar.selectbox(", helper)
+
+    def test_submenu_selections_survive_top_level_menu_switches(self):
+        # Streamlit deletes the session value of any radio not rendered in a run,
+        # so switching top-level menus used to snap each sub-menu back to its first
+        # option. The shared helper must persist each selection and restore it.
+        self.assertIn("PB_JOBHUB_SUBMENU_STATE_FIX", self.source)
+        start = self.source.index("def _render_persistent_submenu_radio")
+        end = self.source.index("reports_menu_map", start)
+        helper = self.source[start:end]
+        self.assertIn("_PERSISTED_SUBMENU_KEYS[widget_key]", helper)
+        self.assertIn("state[widget_key] = current", helper)
+        self.assertIn("state[_PERSISTED_SUBMENU_KEYS[widget_key]] = selected", helper)
+
+    def test_reset_menu_clears_persisted_submenu_selections(self):
+        start = self.source.index("sidebar_reset_target")
+        end = self.source.index("hidden_route_options", start)
+        reset_block = self.source[start:end]
+        for persisted_key in (
+            "_pb_persisted_management_menu",
+            "_pb_persisted_estimating_menu",
+            "_pb_persisted_site_operations_menu",
+            "_pb_persisted_ai_menu",
+        ):
+            self.assertIn(f'"{persisted_key}"', reset_block)
 
     def test_radio_labels_can_wrap_without_clipping(self):
         self.assertRegex(

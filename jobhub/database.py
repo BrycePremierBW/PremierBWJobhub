@@ -1355,6 +1355,11 @@ def execute(sql, params=()):
         raise
     finally:
         conn.close()
+        try:
+            from jobhub_lookup_cache import notify_db_write
+            notify_db_write(sql)
+        except Exception:
+            pass
 
 def execute_many(sql, rows):
     conn = connect()
@@ -1370,6 +1375,11 @@ def execute_many(sql, rows):
         raise
     finally:
         conn.close()
+        try:
+            from jobhub_lookup_cache import notify_db_write
+            notify_db_write(sql)
+        except Exception:
+            pass
 
 def refresh():
     st.rerun()

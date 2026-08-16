@@ -15,6 +15,7 @@ import plotly.graph_objects as go
 import streamlit as st
 from jobhub_feedback import error as pb_error, replay_pending as pb_replay_pending, rerun as pb_rerun, success as pb_success
 from jobhub_time import jobhub_now, jobhub_today
+from jobhub_lookup_cache import notify_db_write
 
 try:
     import psycopg2
@@ -110,6 +111,7 @@ def execute(sql: str, params: Iterable | None = None) -> int:
         cur = conn.cursor()
         cur.execute(sql_text(sql), tuple(params or ()))
         row_id = getattr(cur, "lastrowid", None)
+        notify_db_write(sql)
         return int(row_id or 0)
 
 
@@ -121,6 +123,7 @@ def execute_many(sql: str, rows: Iterable[Iterable]) -> None:
     with db_conn() as conn:
         cur = conn.cursor()
         cur.executemany(sql_text(sql), prepared)
+        notify_db_write(sql)
 
 
 def query_df(sql: str, params: Iterable | None = None) -> pd.DataFrame:
@@ -904,6 +907,7 @@ def replace_conflicting_assignments(
                 day_offset, job_start.isoformat() if job_start else None,
             ),
         )
+    notify_db_write()
     return True, f"Replaced {len(current_ids)} conflicting booking{'s' if len(current_ids) != 1 else ''}."
 
 
@@ -961,6 +965,7 @@ def replace_conflicts_for_assignment_edit(
                 day_offset, job_start.isoformat() if job_start else None, int(assignment_id),
             ),
         )
+    notify_db_write()
     return True, f"Kept the edited booking and removed {len(current_ids)} reviewed clash{'es' if len(current_ids) != 1 else ''}."
 
 

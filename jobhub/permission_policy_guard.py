@@ -492,18 +492,19 @@ def _install_session_navigation_guard(st: Any) -> bool:
         installed = True
 
     if original_get is not None and not getattr(original_get, PATCH_MARKER, False):
+        # The main app validates sidebar values by checking whether the session
+        # value appears in its hard-coded label list. The permissions page is
+        # injected by this guard and therefore looks "unknown" to that check,
+        # which would silently reset the radio back to its first option before
+        # the injected page can render. Return a safe valid label (exactly like
+        # the setup-defaults and system-health route guards do) whenever the
+        # value is the injected label, so validation passes while the widget
+        # itself keeps the real injected value and renders the audit page.
         def guarded_get(self: Any, key: Any, default: Any = None) -> Any:
             value = original_get(self, key, default)
             key_text = str(key or "")
             if key_text in RESET_SAFE_VALUES and str(value) == PERMISSIONS_LABEL:
-                role = ""
-                try:
-                    user = original_get(self, "user", {}) or {}
-                    role = normalise_role(user.get("role", ""))
-                except Exception:
-                    role = ""
-                if not has_permission(role, "permissions.audit"):
-                    return RESET_SAFE_VALUES[key_text]
+                return RESET_SAFE_VALUES[key_text]
             return value
 
         guarded_get._pb_original_get = original_get

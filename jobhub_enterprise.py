@@ -158,6 +158,10 @@ def ensure_enterprise_schema(connect: Callable[[], Any]) -> bool:
                 job_id INTEGER NOT NULL,
                 clock_in TEXT NOT NULL,
                 clock_out TEXT,
+                clock_in_lat REAL,
+                clock_in_lng REAL,
+                clock_out_lat REAL,
+                clock_out_lng REAL,
                 break_minutes REAL DEFAULT 0,
                 travel_minutes REAL DEFAULT 0,
                 total_hours REAL DEFAULT 0,
@@ -328,6 +332,8 @@ def ensure_enterprise_schema(connect: Callable[[], Any]) -> bool:
         ]:
             cur.execute(statement)
 
+        _ensure_field_clock_gps_columns(conn)
+
         conn.commit()
         return True
     except Exception:
@@ -338,6 +344,37 @@ def ensure_enterprise_schema(connect: Callable[[], Any]) -> bool:
         raise
     finally:
         conn.close()
+
+
+def _ensure_field_clock_gps_columns(conn: Any) -> None:
+    """Add the optional GPS columns to existing field_clock_entries tables.
+
+    New databases already create them in the DDL above; this migration keeps
+    older installations working. ``ADD COLUMN IF NOT EXISTS`` is portable to
+    PostgreSQL, with a SQLite PRAGMA fallback for SQLite versions older than
+    3.35 that do not support the IF NOT EXISTS clause.
+    """
+    cur = conn.cursor()
+    for column, definition in (
+        ("clock_in_lat", "REAL"),
+        ("clock_in_lng", "REAL"),
+        ("clock_out_lat", "REAL"),
+        ("clock_out_lng", "REAL"),
+    ):
+        try:
+            cur.execute(
+                f"ALTER TABLE field_clock_entries ADD COLUMN IF NOT EXISTS {column} {definition}"
+            )
+        except Exception:
+            try:
+                cur.execute("PRAGMA table_info(field_clock_entries)")
+                existing = {row[1] for row in cur.fetchall()}
+                if column not in existing:
+                    cur.execute(
+                        f"ALTER TABLE field_clock_entries ADD COLUMN {column} {definition}"
+                    )
+            except Exception:
+                pass
 
 
 def log_error(
@@ -1667,6 +1704,145 @@ def render_job_field_forms_panel(ctx: dict[str, Any], job_id: int) -> None:
                     ctx["pb_rerun"]()
 
 
+_GPS_QUERY_PARAM = "pb_gps"
+
+
+def _gps_display(lat: Any, lng: Any) -> str:
+    """Format an optional GPS fix as a short ``lat, lng`` label (or ``""``)."""
+    try:
+        if lat is None or lng is None or pd.isna(lat) or pd.isna(lng):
+            return ""
+        return f"{float(lat):.6f}, {float(lng):.6f}"
+    except (TypeError, ValueError):
+        return ""
+
+
+def _gps_capture_html(prefix: str) -> str:
+    """Small HTML/JS that asks the browser for one GPS fix and reloads with it.
+
+    The fix is delivered back through ``?{_GPS_QUERY_PARAM}=<prefix>:lat,lng``.
+    If geolocation is unavailable or denied it reports ``unavailable`` instead.
+    """
+    return f"""
+    <div id="pb_gps_capture"></div>
+    <script>
+    (function () {{
+      var params = new URLSearchParams(window.location.search);
+      var deliver = function (value) {{
+        params.set("{_GPS_QUERY_PARAM}", "{prefix}:" + value);
+        window.location.search = params.toString();
+      }};
+      var hasGeo = false;
+      try {{ hasGeo = !!navigator.geolocation; }} catch (e) {{ hasGeo = false; }}
+      if (!hasGeo) {{
+        deliver("unavailable");
+        return;
+      }}
+      navigator.geolocation.getCurrentPosition(function (pos) {{
+        var lat = pos.coords.latitude.toFixed(6);
+        var lng = pos.coords.longitude.toFixed(6);
+        deliver(lat + "," + lng);
+      }}, function () {{
+        deliver("unavailable");
+      }}, {{ enableHighAccuracy: true, timeout: 12000, maximumAge: 0 }});
+    }})();
+    </script>
+    """
+
+
+def _ingest_gps_query_param() -> None:
+    """Consume a browser-captured ``?{_GPS_QUERY_PARAM}=<prefix>:lat,lng`` param.
+
+    Stores the fix under the prefix's widget keys so the latitude/longitude
+    inputs are pre-filled and the clock action records where the staff member
+    actually was.
+    """
+    try:
+        raw = st.query_params.get(_GPS_QUERY_PARAM)
+    except Exception:
+        raw = None
+    if not raw:
+        return
+    if isinstance(raw, (list, tuple)):
+        raw = raw[0]
+    try:
+        if _GPS_QUERY_PARAM in st.query_params:
+            del st.query_params[_GPS_QUERY_PARAM]
+    except Exception:
+        pass
+    text = str(raw)
+    prefix, sep, coords = text.partition(":")
+    lat_raw, _, lng_raw = coords.partition(",")
+    if sep and lat_raw and lng_raw:
+        try:
+            st.session_state[f"{prefix}_lat"] = float(lat_raw)
+            st.session_state[f"{prefix}_lng"] = float(lng_raw)
+            st.session_state[f"{prefix}_gps_status"] = "located"
+        except (TypeError, ValueError):
+            st.session_state[f"{prefix}_gps_status"] = "unavailable"
+    else:
+        st.session_state[f"{prefix}_gps_status"] = "unavailable"
+
+
+def _gps_capture(prefix: str, label: str) -> tuple[Any, Any]:
+    """Optional GPS inputs for a clock action.
+
+    Renders a "detect my location" button that uses the browser Geolocation API
+    plus manual latitude/longitude inputs as a fallback. Returns (lat, lng) or
+    (None, None) when the staff member did not record a fix.
+    """
+    _ingest_gps_query_param()
+    lat_key = f"{prefix}_lat"
+    lng_key = f"{prefix}_lng"
+    request_key = f"{prefix}_gps_request"
+    status_key = f"{prefix}_gps_status"
+
+    if st.button(
+        "📍 Detect my location",
+        key=f"{prefix}_detect_location",
+        help="Uses this device's GPS. Grant location permission when prompted.",
+        width="stretch",
+    ):
+        st.session_state[request_key] = True
+
+    if st.session_state.get(request_key):
+        st.session_state[request_key] = False
+        try:
+            st.iframe(_gps_capture_html(prefix), height=0)
+        except Exception:
+            st.session_state[status_key] = "unavailable"
+
+    status = str(st.session_state.get(status_key) or "")
+    if status == "located":
+        fix = _gps_display(st.session_state.get(lat_key), st.session_state.get(lng_key))
+        st.success(f"Location captured for {label}: {fix}" if fix else f"Location captured for {label}.")
+        st.session_state[status_key] = ""
+    elif status == "unavailable":
+        st.warning("Location could not be detected. Enter coordinates manually or leave blank.")
+        st.session_state[status_key] = ""
+
+    col_a, col_b = st.columns(2)
+    lat = col_a.number_input(
+        "Latitude",
+        value=None,
+        min_value=-90.0,
+        max_value=90.0,
+        format="%.6f",
+        key=lat_key,
+        help="Optional GPS latitude where you are clocking.",
+    )
+    lng = col_b.number_input(
+        "Longitude",
+        value=None,
+        min_value=-180.0,
+        max_value=180.0,
+        format="%.6f",
+        key=lng_key,
+        help="Optional GPS longitude where you are clocking.",
+    )
+    return lat, lng
+
+
 def _active_clock(ctx: dict[str, Any], employee_id: int) -> pd.DataFrame:
     return _query(
         ctx,
@@ -1726,6 +1902,8 @@ def render_field_mode(ctx: dict[str, Any]) -> None:
         selected = st.selectbox("Clock onto job", ordered_labels, key="field_mode_clock_job")
         work_type = st.selectbox("Work type", ["Painting", "Preparation", "Travel", "Supervision", "Touch-ups", "Other"], key="field_mode_work_type")
         clock_notes = st.text_input("Clock-in note", key="field_mode_clock_note")
+        with st.expander("📍 Location at clock on (optional)", expanded=False):
+            gps_lat, gps_lng = _gps_capture("field_mode_clock_in", "clock on")
         if st.button("▶ Clock On", key="field_mode_clock_on", width="stretch"):
             try:
                 job_id = jobs[selected]
@@ -1733,10 +1911,14 @@ def render_field_mode(ctx: dict[str, Any]) -> None:
                     ctx,
                     """
                     INSERT INTO field_clock_entries
-                    (employee_id, job_id, clock_in, work_type, notes, status, created_by, created_at)
-                    VALUES (?, ?, ?, ?, ?, 'Active', ?, ?)
+                    (employee_id, job_id, clock_in, work_type, notes, status, created_by, created_at,
+                     clock_in_lat, clock_in_lng)
+                    VALUES (?, ?, ?, ?, ?, 'Active', ?, ?, ?, ?)
                     """,
-                    (employee_id, job_id, _now(), work_type, clock_notes, user.get("username", ""), _now()),
+                    (
+                        employee_id, job_id, _now(), work_type, clock_notes,
+                        user.get("username", ""), _now(), gps_lat, gps_lng,
+                    ),
                 )
                 _audit(ctx, "field_clock_started", "job", job_id, {"employee_id": employee_id})
                 ctx["pb_success"](f"Clocked onto {selected}.")
@@ -1749,6 +1931,11 @@ def render_field_mode(ctx: dict[str, Any]) -> None:
         started = str(row["clock_in"])
         st.success(f"Clocked on: {row['job_no']} — {row['job_name']} at {started}")
         st.caption(_clean(row["site_address"]))
+        clock_in_fix = _gps_display(row.get("clock_in_lat"), row.get("clock_in_lng"))
+        if clock_in_fix:
+            st.caption(f"📍 Clock-in location: [{clock_in_fix}](https://www.google.com/maps?q={clock_in_fix.replace(' ', '')})")
+        with st.expander("📍 Location at clock off (optional)", expanded=False):
+            _gps_capture("field_mode_clock_off", "clock off")
         with st.form("field_mode_clock_off_form"):
             break_minutes = st.number_input("Unpaid break minutes", min_value=0.0, max_value=240.0, value=0.0, step=5.0)
             travel_minutes = st.number_input("Travel minutes included", min_value=0.0, max_value=600.0, value=0.0, step=5.0)
@@ -1756,6 +1943,8 @@ def render_field_mode(ctx: dict[str, Any]) -> None:
             submit_clock = st.form_submit_button("■ Clock Off & Submit Timesheet", width="stretch")
         if submit_clock:
             try:
+                clock_out_lat = st.session_state.get("field_mode_clock_off_lat")
+                clock_out_lng = st.session_state.get("field_mode_clock_off_lng")
                 now_dt = jobhub_now()
                 total_hours = _clock_hours(started, now_dt, break_minutes)
                 start_dt = datetime.fromisoformat(started.replace(" ", "T"))
@@ -1780,14 +1969,18 @@ def render_field_mode(ctx: dict[str, Any]) -> None:
                     """
                     UPDATE field_clock_entries
                     SET clock_out = ?, break_minutes = ?, travel_minutes = ?, total_hours = ?,
-                        notes = ?, submitted_timesheet_id = ?, status = 'Submitted'
+                        notes = ?, submitted_timesheet_id = ?, status = 'Submitted',
+                        clock_out_lat = ?, clock_out_lng = ?
                     WHERE id = ?
                     """,
-                    (_now(), break_minutes, travel_minutes, total_hours, notes, timesheet_id, int(row["id"])),
+                    (
+                        _now(), break_minutes, travel_minutes, total_hours, notes,
+                        timesheet_id, clock_out_lat, clock_out_lng, int(row["id"]),
+                    ),
                 )
                 conn.commit()
                 conn.close()
-                _audit(ctx, "field_clock_timesheet_submitted", "timesheet", timesheet_id, {"clock_id": int(row["id"]), "hours": total_hours})
+                _audit(ctx, "field_clock_timesheet_submitted", "timesheet", timesheet_id, {"clock_id": int(row["id"]), "hours": total_hours, "clock_out_lat": clock_out_lat, "clock_out_lng": clock_out_lng})
                 _notify_management(
                     ctx,
                     "timesheet_submitted",
@@ -1797,7 +1990,11 @@ def render_field_mode(ctx: dict[str, Any]) -> None:
                     "timesheet",
                     timesheet_id,
                 )
-                ctx["pb_success"](f"Clocked off and submitted {total_hours:.2f} hours successfully.")
+                clock_out_fix = _gps_display(clock_out_lat, clock_out_lng)
+                ctx["pb_success"](
+                    f"Clocked off and submitted {total_hours:.2f} hours successfully"
+                    + (f" (clock-off location: {clock_out_fix})." if clock_out_fix else ".")
+                )
                 ctx["pb_rerun"]()
             except Exception as exc:
                 try:
@@ -1870,6 +2067,39 @@ def render_field_mode(ctx: dict[str, Any]) -> None:
 
         st.markdown("#### Daily site form")
         _render_form_submission(ctx, f"field_mode_form_{job_id}", default_job_id=job_id)
+
+    st.markdown("#### My clock history (with locations)")
+    history = _query(
+        ctx,
+        """
+        SELECT j.job_no AS "Job No", j.job_name AS "Job", c.clock_in AS "Clock In",
+               c.clock_out AS "Clock Out", c.total_hours AS "Hours",
+               c.clock_in_lat AS "Clock-in Lat", c.clock_in_lng AS "Clock-in Lng",
+               c.clock_out_lat AS "Clock-out Lat", c.clock_out_lng AS "Clock-out Lng"
+        FROM field_clock_entries c
+        JOIN jobs j ON j.id = c.job_id
+        WHERE c.employee_id = ?
+        ORDER BY c.id DESC
+        LIMIT 30
+        """,
+        (employee_id,),
+    )
+    if history.empty:
+        st.info("No clock history yet.")
+    else:
+        history["Clock-in location"] = history.apply(
+            lambda r: _gps_display(r["Clock-in Lat"], r["Clock-in Lng"]), axis=1
+        )
+        history["Clock-out location"] = history.apply(
+            lambda r: _gps_display(r["Clock-out Lat"], r["Clock-out Lng"]), axis=1
+        )
+        st.dataframe(
+            history.drop(
+                columns=["Clock-in Lat", "Clock-in Lng", "Clock-out Lat", "Clock-out Lng"]
+            ),
+            hide_index=True,
+            width="stretch",
+        )
 
 
 def _database_table_names(ctx: dict[str, Any]) -> list[str]:

@@ -102,6 +102,22 @@ class PermissionPolicyGuardTests(unittest.TestCase):
         self.assertEqual(state.pop("go_to_menu", None), "Employee Portal")
         self.assertEqual(state.get("_pb_permission_denied_route"), "User Access")
 
+    def test_navigation_get_returns_safe_label_for_authorized_admins(self):
+        # When the injected permissions page is selected, the app's menu
+        # validation reads session_state.get("management_menu"). It must see a
+        # valid base label (so it does not reset the radio to its first option)
+        # while the widget itself keeps the real injected value. This mirrors the
+        # setup-defaults and system-health route guards and stops the page from
+        # snapping back to the top management option.
+        class FakeState(dict):
+            pass
+
+        state = FakeState(user={"role": "admin"}, management_menu=MODULE.PERMISSIONS_LABEL)
+        st = types.SimpleNamespace(session_state=state)
+        self.assertTrue(MODULE._install_session_navigation_guard(st))
+        self.assertEqual(state.get("management_menu"), "Builders & Clients")
+        self.assertEqual(state["management_menu"], MODULE.PERMISSIONS_LABEL)
+
     def test_guard_install_order_precedes_other_injected_management_pages(self):
         source = (ROOT / "jobhub" / "__init__.py").read_text(encoding="utf-8")
         self.assertIn("from .permission_policy_guard import install_permission_policy_guard", source)
