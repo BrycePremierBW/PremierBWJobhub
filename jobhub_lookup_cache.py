@@ -12,9 +12,29 @@ from __future__ import annotations
 _tracked = []
 
 
+def _cache_identity(fn):
+    """Return a stable identity for a cached helper across Streamlit reruns."""
+    return (
+        str(getattr(fn, "__module__", "") or ""),
+        str(getattr(fn, "__qualname__", getattr(fn, "__name__", "")) or ""),
+    )
+
+
 def track_cached(fn):
-    """Register a Streamlit-cached function so writes can clear it."""
-    _tracked.append(fn)
+    """Register one live wrapper per cached helper.
+
+    Streamlit re-executes the main script on every rerun, creating fresh wrapper
+    objects for the same helper functions. Replacing the previous wrapper keeps
+    this registry bounded instead of retaining every historical wrapper for the
+    life of the process.
+    """
+    identity = _cache_identity(fn)
+    for index, existing in enumerate(_tracked):
+        if _cache_identity(existing) == identity:
+            _tracked[index] = fn
+            break
+    else:
+        _tracked.append(fn)
     return fn
 
 
