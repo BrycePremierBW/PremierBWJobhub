@@ -50,8 +50,30 @@ class LookupCacheRegistryTests(unittest.TestCase):
 
         lookup_cache.notify_db_write("  SELECT id FROM jobs")
         lookup_cache.notify_db_write("WITH active AS (SELECT 1) SELECT * FROM active")
+        lookup_cache.notify_db_write("EXPLAIN SELECT id FROM jobs")
 
         self.assertEqual(wrapper.clear_calls, 0)
+
+    def test_mutating_cte_invalidates_caches(self):
+        wrapper = _Clearable()
+        lookup_cache.track_cached(wrapper)
+
+        lookup_cache.notify_db_write(
+            "WITH changed AS (UPDATE jobs SET status='Active' RETURNING id) "
+            "SELECT id FROM changed"
+        )
+
+        self.assertEqual(wrapper.clear_calls, 1)
+
+    def test_explain_analyze_is_treated_as_potential_write(self):
+        wrapper = _Clearable()
+        lookup_cache.track_cached(wrapper)
+
+        lookup_cache.notify_db_write(
+            "EXPLAIN ANALYZE UPDATE jobs SET status='Active' WHERE id=1"
+        )
+
+        self.assertEqual(wrapper.clear_calls, 1)
 
 
 if __name__ == "__main__":
