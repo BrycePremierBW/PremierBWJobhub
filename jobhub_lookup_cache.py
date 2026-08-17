@@ -9,7 +9,14 @@ invalidated.
 
 from __future__ import annotations
 
+import re
+
+
 _tracked = []
+_MUTATING_SQL = re.compile(
+    r"\b(?:INSERT|UPDATE|DELETE|MERGE|REPLACE|CREATE|ALTER|DROP|TRUNCATE)\b",
+    flags=re.IGNORECASE,
+)
 
 
 def _cache_identity(fn):
@@ -39,8 +46,19 @@ def track_cached(fn):
 
 
 def _is_read(sql):
-    head = " ".join(str(sql or "").split())[:24].upper()
-    return head.startswith(("SELECT", "WITH", "PRAGMA", "EXPLAIN"))
+    normalised = " ".join(str(sql or "").split())
+    upper = normalised.upper()
+    if upper.startswith(("SELECT", "PRAGMA")):
+        return True
+    if upper.startswith("EXPLAIN"):
+        # EXPLAIN without ANALYZE is planning-only. Treat EXPLAIN ANALYZE as a
+        # potential write because PostgreSQL executes the explained statement.
+        return "ANALYZE" not in upper and "ANALYSE" not in upper
+    if upper.startswith("WITH"):
+        # CTEs are not necessarily reads: PostgreSQL permits data-modifying CTEs
+        # such as WITH changed AS (UPDATE ... RETURNING ...) SELECT ... .
+        return _MUTATING_SQL.search(normalised) is None
+    return False
 
 
 def notify_db_write(sql=""):
