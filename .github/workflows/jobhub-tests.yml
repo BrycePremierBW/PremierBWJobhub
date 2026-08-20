@@ -38,6 +38,7 @@ jobs:
           python -m compileall -q
           pb_jobhub_app.py
           jobhub_enterprise.py
+          jobhub_delete_integrity.py
           pb_jobhub_visual_scheduler.py
           jobhub_feedback.py
           jobhub_core.py
@@ -52,6 +53,10 @@ jobs:
         env:
           JOBHUB_POSTGRES_CI_URL: postgresql://postgres:postgres@127.0.0.1:5432/jobhub_ci
         run: python tests/test_postgres_ci.py
+      - name: Run PostgreSQL permanent-job-delete regression
+        env:
+          JOBHUB_POSTGRES_CI_URL: postgresql://postgres:postgres@127.0.0.1:5432/jobhub_ci
+        run: PYTHONPATH=. python tests/test_job_delete_integrity_postgres.py
       - name: Run material order workflow
         run: python tests/material_order_workflow_test.py
       - name: Render every JobHub route
