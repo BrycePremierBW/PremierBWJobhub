@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from jobhub_delete_integrity import ensure_job_delete_integrity
+
 
 V4_SCHEMA_STATEMENTS = (
     """
@@ -120,3 +122,8 @@ def ensure_v4_schema(connection_factory) -> None:
     finally:
         cursor.close()
         connection.close()
+
+    # Install/reinstall the database-level guards after the linked schema exists.
+    # This keeps permanent job deletion safe even when newer modules add child rows
+    # outside pb_jobhub_app.py's original direct-child list.
+    ensure_job_delete_integrity(connection_factory)
