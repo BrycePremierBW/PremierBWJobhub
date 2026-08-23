@@ -8,6 +8,7 @@ from .database_timeout_guard import install_database_timeout_guard
 from .document_centre_guard import install_document_centre_guard
 from .document_centre_versioning_guard import install_document_centre_versioning_guard
 from .employee_portal_home_guard import install_employee_portal_home_guard
+from .employee_portal_requests_guard import install_employee_portal_requests_guard
 from .integration_health_guard import install_integration_health_guard
 from .job_folder_recent_uploads_bottom_guard import install_job_folder_recent_uploads_bottom_guard
 from .job_folder_uploaded_documents_guard import install_job_folder_uploaded_documents_guard
@@ -135,4 +136,5 @@ install_swms_attach_fallback_guard()
 install_swms_signature_index_guard()
 install_swms_visibility_guard()
 install_employee_portal_home_guard()
+install_employee_portal_requests_guard()
 install_ai_menu_guard()
