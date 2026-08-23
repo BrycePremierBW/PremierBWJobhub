@@ -1,4 +1,9 @@
-"""Uploaded documents section for JobHub job folders."""
+"""Uploaded documents section for JobHub job folders.
+
+Purchase-order documents are deliberately excluded for manager/employee roles.
+The central PO permission guard also protects other routes, but keeping the query
+out of this panel prevents restricted PO rows from even being loaded for display.
+"""
 
 from __future__ import annotations
 
@@ -20,6 +25,19 @@ def _app_attr(name: str, default: Any = None) -> Any:
         if module is not None and hasattr(module, name):
             return getattr(module, name)
     return default
+
+
+def _current_role(st: Any) -> str:
+    current_role = _app_attr("current_role")
+    if callable(current_role):
+        try:
+            return str(current_role() or "").strip().lower()
+        except Exception:
+            pass
+    try:
+        return str((st.session_state.get("user") or {}).get("role") or "").strip().lower()
+    except Exception:
+        return ""
 
 
 def _use_postgres() -> bool:
@@ -179,8 +197,9 @@ def render_uploaded_documents_panel() -> None:
     if not jobs:
         return
 
+    admin = _current_role(st) == "admin"
     with st.expander("Uploaded Documents", expanded=False):
-        st.caption("View uploaded POs, SWMS, forms and other job documents saved against each job folder.")
+        st.caption("View plans, specs, SWMS, forms and other uploaded documents saved against each job folder.")
         selected_job = st.selectbox(
             "Job folder documents",
             list(jobs),
@@ -188,7 +207,8 @@ def render_uploaded_documents_panel() -> None:
         )
         job_id = jobs[selected_job]
         docs = _documents_for_job(job_id)
-        pos = _purchase_orders_for_job(job_id)
+        # Never query purchase-order rows for non-admin sessions.
+        pos = _purchase_orders_for_job(job_id) if admin else None
 
         if docs is None or getattr(docs, "empty", True):
             st.info("No uploaded documents found for this job yet.")
@@ -198,7 +218,7 @@ def render_uploaded_documents_panel() -> None:
             st.dataframe(display_docs, width="stretch", hide_index=True)
             _render_download_buttons(st, docs, "job_docs")
 
-        if pos is not None and not getattr(pos, "empty", True):
+        if admin and pos is not None and not getattr(pos, "empty", True):
             st.markdown("#### Purchase orders")
             display_pos = pos.drop(columns=["Path"], errors="ignore")
             st.dataframe(display_pos, width="stretch", hide_index=True)
@@ -229,5 +249,4 @@ def install_job_folder_uploaded_documents_guard() -> bool:
     st = _st()
     if st is None:
         return False
-    installed = _patch_header(st)
-    return installed
+    return _patch_header(st)
