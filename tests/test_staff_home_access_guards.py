@@ -28,10 +28,26 @@ def test_management_navigation_is_one_dashboard():
 
 
 def test_purchase_order_labels_are_admin_only():
-    options = ["Overview", "Purchase Orders", "Upload PO", "Timesheets", "Shared PO", "Photos"]
+    options = [
+        "Job Control",
+        "Purchasing",
+        "Purchase Orders",
+        "Upload PO",
+        "Timesheets",
+        "Shared PO",
+        "Photos",
+    ]
     assert filter_po_options(options, True) == options
-    assert filter_po_options(options, False) == ["Overview", "Timesheets", "Photos"]
-    for value in ("Purchase Orders", "Upload PO", "PO Number", "Shared PO", "purchase_order_id"):
+    assert filter_po_options(options, False) == ["Job Control", "Timesheets", "Photos"]
+    for value in (
+        "Purchasing",
+        "Procurement",
+        "Purchase Orders",
+        "Upload PO",
+        "PO Number",
+        "Shared PO",
+        "purchase_order_id",
+    ):
         assert is_po_sensitive_text(value)
     assert not is_po_sensitive_text("Employee Portal")
     assert not is_po_sensitive_text("Photos")
