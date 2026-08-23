@@ -159,4 +159,6 @@ def install_navigation_simplifier_guard() -> bool:
     st = _st()
     if st is None:
         return False
-    return bool(_patch_sidebar_radio(st) or _patch_subheader(st))
+    sidebar_installed = _patch_sidebar_radio(st)
+    dashboard_installed = _patch_subheader(st)
+    return bool(sidebar_installed or dashboard_installed)
