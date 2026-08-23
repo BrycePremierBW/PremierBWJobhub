@@ -2,8 +2,8 @@
 
 Premier Brushworks requires purchase orders to be visible only to JobHub admin
 accounts.  This guard is deliberately broader than hiding the Upload PO menu: it
-also suppresses direct PO controls, uploads, downloads, headings and PO-backed
-tables when a manager or employee is signed in.
+also suppresses direct PO controls, purchasing routes, uploads, downloads,
+headings and PO-backed tables when a manager or employee is signed in.
 
 Database ownership and existing admin workflows are unchanged.
 """
@@ -16,7 +16,14 @@ from typing import Any
 
 
 PATCH_MARKER = "_pb_po_admin_only_guard"
-PO_ROUTE_LABELS = {"Upload PO", "Purchase Orders", "Purchase Order", "Job Purchase Orders"}
+PO_ROUTE_LABELS = {
+    "Upload PO",
+    "Purchase Orders",
+    "Purchase Order",
+    "Job Purchase Orders",
+    "Purchasing",
+    "Procurement",
+}
 
 
 def _st() -> Any:
@@ -55,6 +62,9 @@ def is_po_sensitive_text(value: Any) -> bool:
     text = re.sub(r"[_-]+", " ", str(value or "")).strip()
     if not text:
         return False
+    folded = text.casefold()
+    if folded in {"purchasing", "procurement"}:
+        return True
     return bool(
         re.search(r"\bpurchase\s+orders?\b", text, flags=re.IGNORECASE)
         or re.search(r"\bPO\b", text, flags=re.IGNORECASE)
@@ -94,7 +104,11 @@ def _notice_once(st: Any) -> None:
     except Exception:
         pass
     try:
-        st.caption("Purchase order information is restricted to administrators.")
+        # This text is intentionally generic because the caption renderer itself
+        # is protected by this guard for non-admin users.
+        original_caption = getattr(getattr(st, "caption", None), "_pb_original", None)
+        if callable(original_caption):
+            original_caption("This financial information is restricted to administrators.")
     except Exception:
         pass
 
@@ -109,26 +123,32 @@ def _patch_choice(owner: Any, method_name: str, st: Any) -> bool:
             return original(*args, **kwargs)
         arg_list = list(args)
         options_index = None
-        if method_name in {"radio", "selectbox"}:
-            if len(arg_list) >= 2 and isinstance(arg_list[0], str):
-                options_index = 1
-            elif len(arg_list) >= 3:
-                options_index = 2
-            elif "options" in kwargs:
-                options_index = None
-            options = arg_list[options_index] if options_index is not None else kwargs.get("options")
-            filtered = filter_po_options(options, False)
-            if filtered != list(options or []):
-                if not filtered:
-                    _notice_once(st)
-                    return None
-                if options_index is not None:
-                    arg_list[options_index] = filtered
-                else:
-                    kwargs["options"] = filtered
-                # A stored index can now point outside the shorter option list.
-                if isinstance(kwargs.get("index"), int) and kwargs["index"] >= len(filtered):
-                    kwargs["index"] = 0
+        if len(arg_list) >= 2 and isinstance(arg_list[0], str):
+            options_index = 1
+        elif len(arg_list) >= 3:
+            options_index = 2
+        elif "options" in kwargs:
+            options_index = None
+        options = arg_list[options_index] if options_index is not None else kwargs.get("options")
+        filtered = filter_po_options(options, False)
+        if filtered != list(options or []):
+            if not filtered:
+                _notice_once(st)
+                return None
+            if options_index is not None:
+                arg_list[options_index] = filtered
+            else:
+                kwargs["options"] = filtered
+            if isinstance(kwargs.get("index"), int) and kwargs["index"] >= len(filtered):
+                kwargs["index"] = 0
+            # Clear a remembered restricted value before Streamlit validates the
+            # widget state against the now-shorter option list.
+            key = str(kwargs.get("key") or "")
+            try:
+                if key and st.session_state.get(key) not in filtered:
+                    st.session_state[key] = filtered[0]
+            except Exception:
+                pass
         return original(*tuple(arg_list), **kwargs)
 
     wrapper._pb_original = original
@@ -147,7 +167,6 @@ def _patch_text_control(owner: Any, method_name: str, st: Any, hidden_return: An
             return original(*args, **kwargs)
         label = kwargs.get("label")
         if label is None and args:
-            # DeltaGenerator methods include self as arg 0.
             label = args[1] if len(args) > 1 and not isinstance(args[0], str) else args[0]
         key = kwargs.get("key")
         if is_po_sensitive_text(label) or is_po_sensitive_text(key):
