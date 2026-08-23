@@ -7,15 +7,19 @@ from .blip_request_compat_guard import install_blip_request_compat_guard
 from .database_timeout_guard import install_database_timeout_guard
 from .document_centre_guard import install_document_centre_guard
 from .document_centre_versioning_guard import install_document_centre_versioning_guard
+from .employee_portal_home_guard import install_employee_portal_home_guard
 from .integration_health_guard import install_integration_health_guard
+from .job_folder_recent_uploads_bottom_guard import install_job_folder_recent_uploads_bottom_guard
 from .job_folder_uploaded_documents_guard import install_job_folder_uploaded_documents_guard
 from .mobile_sidebar_guard import install_mobile_sidebar_guard
 from .mobile_top_navigation_guard import install_mobile_top_navigation_guard
+from .navigation_simplifier_guard import install_navigation_simplifier_guard
 from .navigation_state_guard import install_navigation_state_guard
 from .notification_freeze_guard import install_notification_freeze_guard
 from .notification_wording_guard import install_notification_wording_guard
 from .page_render_freeze_guard import install_page_render_freeze_guard
 from .permission_policy_guard import install_permission_policy_guard
+from .po_admin_only_guard import install_po_admin_only_guard
 from .po_job_switch_guard import install_po_job_switch_guard
 from .po_stage_state_guard import install_po_stage_state_guard
 from .po_upload_native_guard import install_po_upload_native_guard
@@ -106,12 +110,16 @@ install_po_upload_guard()
 install_po_upload_performance_guard()
 install_po_upload_native_guard()
 
-# Upload PO is now a first-class route in pb_jobhub_app.py. Mobile navigation
-# reads that same native menu instead of relying on a radio/session wrapper.
+# Upload PO is a first-class route for administrators. Mobile navigation is
+# installed first; the simplifier and PO boundary then wrap it so desktop and
+# phone menus receive the same short, role-safe option list.
 install_mobile_top_navigation_guard()
+install_navigation_simplifier_guard()
+install_po_admin_only_guard()
 
 install_progress_baseline_unlock_guard()
 install_job_folder_uploaded_documents_guard()
+install_job_folder_recent_uploads_bottom_guard()
 install_progress_external_options_guard()
 install_stage_selection_guard()
 install_stage_preset_selector_fix_guard()
@@ -126,4 +134,5 @@ install_swms_guard()
 install_swms_attach_fallback_guard()
 install_swms_signature_index_guard()
 install_swms_visibility_guard()
+install_employee_portal_home_guard()
 install_ai_menu_guard()
