@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from jobhub_delete_integrity import _is_postgres_connection, ensure_job_delete_integrity
+from jobhub_delete_integrity import _ensure_postgres, _is_postgres_connection, ensure_job_delete_integrity
 
 
 class JobDeleteIntegrityRoutingTests(unittest.TestCase):
@@ -44,6 +44,22 @@ class JobDeleteIntegrityRoutingTests(unittest.TestCase):
                 self.assertEqual(conn.execute("SELECT COUNT(*) FROM paint_systems").fetchone()[0], 1)
             finally:
                 conn.close()
+
+    def test_postgres_job_cleanup_includes_takeoff_pack_imports(self):
+        """Permanent job delete must remove take-off pack import rows before jobs."""
+
+        class RecordingCursor:
+            def __init__(self):
+                self.statements: list[str] = []
+
+            def execute(self, statement, params=None):
+                self.statements.append(str(statement))
+
+        cur = RecordingCursor()
+        _ensure_postgres(cur)
+        sql = "\n".join(cur.statements)
+        self.assertIn("to_regclass('takeoff_pack_imports')", sql)
+        self.assertIn("DELETE FROM takeoff_pack_imports WHERE job_id = $1", sql)
 
 
 if __name__ == "__main__":
