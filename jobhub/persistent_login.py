@@ -1,12 +1,12 @@
 """Browser-persistent login support for Premier Brushworks JobHub.
 
 The core JobHub authentication already issues a random, revocable auth token and
-stores it server-side.  This module only remembers that token in this browser;
+stores it server-side. This module only remembers that token in this browser;
 it never stores a username or password.
 
 It is intentionally installed before ``pb_jobhub_app`` is imported so it can:
 - bootstrap a remembered token after Streamlit config is initialised;
-- add a "Stay signed in on this device" checkbox to the existing login form;
+- add a "Stay logged in on this device" checkbox to desktop and mobile login forms;
 - save the issued token after a successful login; and
 - discard stale/revoked tokens when the login form is shown again.
 """
@@ -27,12 +27,25 @@ def _js_string(value: Any) -> str:
     return json.dumps(str(value or ""))
 
 
+def _is_login_form_key(key: Any) -> bool:
+    """Return True for all JobHub authentication form variants.
+
+    The employee/mobile surface has used different form keys over time. Requiring
+    the key to be exactly ``login_form`` meant the persistence checkbox could be
+    present on desktop while being absent from a mobile/employee login form.
+    Login persistence is safe to expose on any form whose explicit key identifies
+    it as a login form.
+    """
+    normalised = str(key or "").strip().casefold().replace("-", "_").replace(" ", "_")
+    return "login" in normalised and "form" in normalised
+
+
 def _emit_script(script: str) -> None:
     """Emit same-origin browser JavaScript without taking visible page space."""
     try:
         st.html(f"<script>{script}</script>", unsafe_allow_javascript=True)
     except Exception:
-        # Stay-signed-in is a convenience feature; auth must continue working
+        # Stay-logged-in is a convenience feature; auth must continue working
         # normally if a Streamlit/browser version blocks the helper script.
         pass
 
@@ -119,7 +132,7 @@ def _clear_stale_browser_token() -> None:
 
 
 class _RememberForm:
-    """Context-manager proxy that inserts the remember checkbox in login form."""
+    """Context-manager proxy that inserts the remember checkbox in a login form."""
 
     def __init__(self, original_form: Any, key: str):
         self._original_form = original_form
@@ -129,9 +142,12 @@ class _RememberForm:
         entered = self._original_form.__enter__()
         _clear_stale_browser_token()
         st.checkbox(
-            "Stay signed in on this device",
+            "Stay logged in on this device",
             key=_REMEMBER_KEY,
-            help="Keeps this device signed in until you log out or the saved session is revoked.",
+            help=(
+                "Keeps this phone, tablet or computer signed in until you log out "
+                "or the saved session is revoked."
+            ),
         )
         return entered
 
@@ -165,7 +181,7 @@ def install() -> None:
 
         def form_with_remember(self, key, *args, **kwargs):
             form = original_form(self, key, *args, **kwargs)
-            if str(key) == "login_form":
+            if _is_login_form_key(key):
                 return _RememberForm(form, str(key))
             return form
 
