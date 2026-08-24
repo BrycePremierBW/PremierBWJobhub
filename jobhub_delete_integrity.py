@@ -13,7 +13,7 @@ from __future__ import annotations
 from typing import Any, Callable
 
 
-DELETE_INTEGRITY_VERSION = "2026.08.20-job-delete-integrity-v2"
+DELETE_INTEGRITY_VERSION = "2026.08.24-job-delete-integrity-v3"
 
 
 def _raw_connection(conn: Any) -> Any:
@@ -157,6 +157,9 @@ def _ensure_postgres(cur: Any) -> None:
             END IF;
             IF to_regclass('handover_packs') IS NOT NULL THEN
                 EXECUTE 'DELETE FROM handover_packs WHERE job_id = $1' USING OLD.id;
+            END IF;
+            IF to_regclass('takeoff_pack_imports') IS NOT NULL THEN
+                EXECUTE 'DELETE FROM takeoff_pack_imports WHERE job_id = $1' USING OLD.id;
             END IF;
             RETURN OLD;
         END;
