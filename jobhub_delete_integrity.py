@@ -13,7 +13,7 @@ from __future__ import annotations
 from typing import Any, Callable
 
 
-DELETE_INTEGRITY_VERSION = "2026.08.24-job-delete-integrity-v3"
+DELETE_INTEGRITY_VERSION = "2026.08.25-job-delete-integrity-v4"
 
 
 def _raw_connection(conn: Any) -> Any:
@@ -136,6 +136,9 @@ def _ensure_postgres(cur: Any) -> None:
             END IF;
             IF to_regclass('job_progress_settings') IS NOT NULL THEN
                 EXECUTE 'DELETE FROM job_progress_settings WHERE job_id = $1' USING OLD.id;
+            END IF;
+            IF to_regclass('job_comments') IS NOT NULL THEN
+                EXECUTE 'DELETE FROM job_comments WHERE job_id = $1' USING OLD.id;
             END IF;
             IF to_regclass('offline_sync_events') IS NOT NULL THEN
                 EXECUTE 'DELETE FROM offline_sync_events WHERE job_id = $1' USING OLD.id;
