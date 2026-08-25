@@ -61,6 +61,22 @@ class JobDeleteIntegrityRoutingTests(unittest.TestCase):
         self.assertIn("to_regclass('takeoff_pack_imports')", sql)
         self.assertIn("DELETE FROM takeoff_pack_imports WHERE job_id = $1", sql)
 
+    def test_postgres_job_cleanup_includes_job_comments(self):
+        """Permanent job delete must remove restrictive job comment rows first."""
+
+        class RecordingCursor:
+            def __init__(self):
+                self.statements: list[str] = []
+
+            def execute(self, statement, params=None):
+                self.statements.append(str(statement))
+
+        cur = RecordingCursor()
+        _ensure_postgres(cur)
+        sql = "\n".join(cur.statements)
+        self.assertIn("to_regclass('job_comments')", sql)
+        self.assertIn("DELETE FROM job_comments WHERE job_id = $1", sql)
+
 
 if __name__ == "__main__":
     unittest.main()

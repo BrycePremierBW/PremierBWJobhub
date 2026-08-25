@@ -42,6 +42,11 @@ def _create_schema(conn) -> None:
         cur.execute(
             """
             CREATE TABLE jobs(id INTEGER PRIMARY KEY);
+            CREATE TABLE job_comments(
+                id INTEGER PRIMARY KEY,
+                job_id INTEGER NOT NULL REFERENCES jobs(id),
+                comment TEXT NOT NULL
+            );
             CREATE TABLE timesheet_entries(
                 id INTEGER PRIMARY KEY,
                 job_id INTEGER NOT NULL REFERENCES jobs(id)
@@ -122,6 +127,10 @@ def _create_schema(conn) -> None:
 def _seed(conn, job_id: int) -> None:
     with conn.cursor() as cur:
         cur.execute("INSERT INTO jobs(id) VALUES(%s)", (job_id,))
+        cur.execute(
+            "INSERT INTO job_comments(id,job_id,comment) VALUES(%s,%s,%s)",
+            (job_id * 10 + 15, job_id, "Permanent delete regression"),
+        )
         cur.execute("INSERT INTO timesheet_entries(id,job_id) VALUES(%s,%s)", (job_id * 10 + 1, job_id))
         cur.execute(
             "INSERT INTO field_clock_entries(id,job_id,submitted_timesheet_id) VALUES(%s,%s,%s)",
@@ -223,6 +232,8 @@ def main() -> int:
                 cur.execute("DELETE FROM material_entries WHERE job_id=%s", (7,))
                 cur.execute("SELECT material_entry_id FROM purchase_order_lines WHERE purchase_order_id=%s", (79,))
                 assert cur.fetchone()[0] is None
+                # This direct jobs delete is blocked by job_comments without the
+                # BEFORE DELETE cleanup trigger, matching the production failure.
                 cur.execute("DELETE FROM jobs WHERE id=%s", (7,))
             conn.commit()
 
@@ -230,6 +241,7 @@ def main() -> int:
                 cur.execute("SELECT COUNT(*) FROM jobs WHERE id=%s", (7,))
                 assert int(cur.fetchone()[0]) == 0
                 for table in (
+                    "job_comments",
                     "field_clock_entries",
                     "job_progress_settings",
                     "job_dwelling_progress",
