@@ -44,6 +44,7 @@ from .stage_scope_refresh_guard import install_stage_scope_refresh_guard
 from .stage_selection_guard import install_stage_selection_guard
 from .stage_setup_simplifier_guard import install_stage_setup_simplifier_guard
 from .startup_database_resilience_guard import install_startup_database_resilience_guard
+from .subscriber_setup_guard import install_subscriber_setup_guard
 from .swms_attach_fallback_guard import install_swms_attach_fallback_guard
 from .swms_guard import install_swms_guard
 from .swms_signature_index_guard import install_swms_signature_index_guard
@@ -96,6 +97,7 @@ install_permission_policy_guard()
 install_system_health_guard()
 install_integration_health_guard()
 install_setup_defaults_guard()
+install_subscriber_setup_guard()
 install_setup_crew_leader_guard()
 # The crew bridge performs a compatibility schema check during installation.
 # Make only transient PostgreSQL connection failures fail-soft so a Render DB
