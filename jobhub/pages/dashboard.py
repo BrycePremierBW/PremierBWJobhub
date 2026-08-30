@@ -4,6 +4,134 @@ from __future__ import annotations
 from ..runtime import *
 
 
+def _dashboard_counts():
+    """Load core dashboard counters in two database round trips at most."""
+    job_counts = df_query("""
+        SELECT COUNT(*) AS jobs_count,
+               SUM(CASE
+                       WHEN COALESCE(status, '') NOT IN ('Completed', 'Paid', 'Archived')
+                       THEN 1 ELSE 0
+                   END) AS active_jobs_count
+        FROM jobs
+    """)
+    jobs_count = int(job_counts.iloc[0]["jobs_count"] or 0)
+    active_jobs_count = int(job_counts.iloc[0]["active_jobs_count"] or 0)
+
+    pending_timesheets = 0
+    open_variations = 0
+    overdue_claims = 0
+    overdue_value = 0.0
+    try:
+        operational = df_query("""
+            SELECT
+                (SELECT COUNT(*)
+                   FROM timesheet_entries
+                  WHERE COALESCE(status, 'Submitted') = 'Submitted') AS pending_timesheets,
+                (SELECT COUNT(*)
+                   FROM job_variations
+                  WHERE COALESCE(status, 'Draft')
+                        NOT IN ('Approved', 'Rejected', 'Invoiced')) AS open_variations,
+                (SELECT COUNT(*)
+                   FROM invoice_claims
+                  WHERE COALESCE(status, '') <> 'Paid'
+                    AND due_date IS NOT NULL
+                    AND due_date <> ''
+                    AND due_date < ?) AS overdue_claims,
+                (SELECT COALESCE(SUM(COALESCE(amount_ex_gst, 0)), 0)
+                   FROM invoice_claims
+                  WHERE COALESCE(status, '') <> 'Paid'
+                    AND due_date IS NOT NULL
+                    AND due_date <> ''
+                    AND due_date < ?) AS overdue_value
+        """, (str(jobhub_today()), str(jobhub_today())))
+        row = operational.iloc[0]
+        pending_timesheets = int(row["pending_timesheets"] or 0)
+        open_variations = int(row["open_variations"] or 0)
+        overdue_claims = int(row["overdue_claims"] or 0)
+        overdue_value = float(row["overdue_value"] or 0)
+    except Exception:
+        # Keep the dashboard usable during a partial/legacy schema upgrade.
+        pass
+
+    return {
+        "jobs_count": jobs_count,
+        "active_jobs_count": active_jobs_count,
+        "pending_timesheets": pending_timesheets,
+        "open_variations": open_variations,
+        "overdue_claims": overdue_claims,
+        "overdue_value": overdue_value,
+    }
+
+
+def _render_open_jobs():
+    active = df_query("""
+        SELECT j.job_no AS 'Job No',
+               j.job_name AS 'Job Name',
+               bc.name AS 'Builder / Client',
+               j.site_address AS 'Site Address',
+               j.status AS 'Status',
+               j.leading_hand AS 'Leading Hand',
+               j.start_date AS 'Start Date',
+               j.end_date AS 'End Date'
+        FROM jobs j
+        LEFT JOIN builders_clients bc ON bc.id = j.builder_client_id
+        WHERE COALESCE(j.status, '') NOT IN ('Completed', 'Paid', 'Archived')
+        ORDER BY j.job_no
+    """)
+    if active.empty:
+        pb_empty_state("No open jobs", "Active and upcoming jobs will appear here once they are added.")
+    else:
+        st.dataframe(active, width="stretch", hide_index=True)
+
+
+def _render_upcoming_work():
+    upcoming = df_query("""
+        SELECT j.job_no AS 'Job No',
+               j.job_name AS 'Job Name',
+               COALESCE(bc.name, '') AS 'Builder / Client',
+               j.start_date AS 'Start Date',
+               j.leading_hand AS 'Leading Hand',
+               j.status AS 'Status'
+        FROM jobs j
+        LEFT JOIN builders_clients bc ON bc.id = j.builder_client_id
+        WHERE COALESCE(j.status, '') IN ('Not Started', 'Quoted', 'Booked')
+        ORDER BY j.start_date, j.job_no
+    """)
+    if upcoming.empty:
+        pb_empty_state("No upcoming work", "Quoted, booked and not-started jobs will appear here.")
+    else:
+        st.dataframe(upcoming, width="stretch", hide_index=True)
+
+
+def _render_attention(pending_timesheets, overdue_claims):
+    missing_details = df_query("""
+        SELECT j.job_no AS 'Job No',
+               j.job_name AS 'Job Name',
+               j.status AS 'Status',
+               j.leading_hand AS 'Leading Hand',
+               j.start_date AS 'Start Date',
+               CASE
+                   WHEN COALESCE(j.leading_hand, '') = '' THEN 'Leading hand missing'
+                   WHEN COALESCE(j.start_date, '') = '' THEN 'Start date missing'
+                   ELSE 'Review'
+               END AS 'Attention'
+        FROM jobs j
+        WHERE COALESCE(j.status, '') NOT IN ('Completed', 'Paid', 'Archived')
+          AND (COALESCE(j.leading_hand, '') = '' OR COALESCE(j.start_date, '') = '')
+        ORDER BY j.job_no
+    """)
+
+    a1, a2, a3 = st.columns(3)
+    a1.metric("Missing job details", len(missing_details.index))
+    a2.metric("Pending timesheets", pending_timesheets)
+    a3.metric("Overdue claims", overdue_claims)
+
+    if missing_details.empty:
+        st.success("No open jobs are missing a leading hand or start date.")
+    else:
+        st.dataframe(missing_details, width="stretch", hide_index=True)
+
+
 def render_dashboard():
     pb_page_header(
         "Dashboard",
@@ -11,47 +139,13 @@ def render_dashboard():
         "Operations overview",
     )
 
-    jobs_count = int(df_query("SELECT COUNT(*) AS c FROM jobs").iloc[0]["c"])
-    active_jobs_count = int(df_query("""
-        SELECT COUNT(*) AS c
-        FROM jobs
-        WHERE COALESCE(status, '') NOT IN ('Completed', 'Paid', 'Archived')
-    """).iloc[0]["c"])
-
-    try:
-        pending_timesheets = int(df_query("""
-            SELECT COUNT(*) AS c
-            FROM timesheet_entries
-            WHERE COALESCE(status, 'Submitted') = 'Submitted'
-        """).iloc[0]["c"])
-    except Exception:
-        pending_timesheets = 0
-
-    try:
-        open_variations = int(df_query("""
-            SELECT COUNT(*) AS c
-            FROM job_variations
-            WHERE COALESCE(status, 'Draft')
-                  NOT IN ('Approved', 'Rejected', 'Invoiced')
-        """).iloc[0]["c"])
-    except Exception:
-        open_variations = 0
-
-    try:
-        overdue_claims_df = df_query("""
-            SELECT COUNT(*) AS c,
-                   COALESCE(SUM(COALESCE(amount_ex_gst, 0)), 0) AS total
-            FROM invoice_claims
-            WHERE COALESCE(status, '') <> 'Paid'
-              AND due_date IS NOT NULL
-              AND due_date <> ''
-              AND due_date < ?
-        """, (str(jobhub_today()),))
-        overdue_claims = int(overdue_claims_df.iloc[0]["c"])
-        overdue_value = float(overdue_claims_df.iloc[0]["total"] or 0)
-    except Exception:
-        overdue_claims = 0
-        overdue_value = 0
+    counts = _dashboard_counts()
+    jobs_count = counts["jobs_count"]
+    active_jobs_count = counts["active_jobs_count"]
+    pending_timesheets = counts["pending_timesheets"]
+    open_variations = counts["open_variations"]
+    overdue_claims = counts["overdue_claims"]
+    overdue_value = counts["overdue_value"]
 
     m1, m2, m3, m4 = st.columns(4)
 
@@ -96,7 +190,7 @@ def render_dashboard():
             st.session_state["go_to_control_centre_section"] = "Invoice / Claim Tracker"
             st.rerun()
 
-    st.markdown("#### Quick access")
+    pb_section_heading("Quick access", "Common management actions without digging through menus.")
     q1, q2, q3, q4 = st.columns(4)
 
     if q1.button("Add or edit a job", key="tidy_quick_jobs", width="stretch"):
@@ -116,75 +210,21 @@ def render_dashboard():
         st.session_state["go_to_menu"] = "Reports / Export"
         st.rerun()
 
-    tab_open, tab_upcoming, tab_attention = st.tabs(
-        ["Open Jobs", "Upcoming Work", "Attention"]
+    pb_section_heading("Work overview", "Only the selected view is queried and rendered.")
+    view = st.radio(
+        "Work overview",
+        ["Open Jobs", "Upcoming Work", "Attention"],
+        horizontal=True,
+        key="dashboard_work_overview",
+        label_visibility="collapsed",
     )
 
-    with tab_open:
-        active = df_query("""
-            SELECT j.job_no AS 'Job No',
-                   j.job_name AS 'Job Name',
-                   bc.name AS 'Builder / Client',
-                   j.site_address AS 'Site Address',
-                   j.status AS 'Status',
-                   j.leading_hand AS 'Leading Hand',
-                   j.start_date AS 'Start Date',
-                   j.end_date AS 'End Date'
-            FROM jobs j
-            LEFT JOIN builders_clients bc ON bc.id = j.builder_client_id
-            WHERE COALESCE(j.status, '') NOT IN ('Completed', 'Paid', 'Archived')
-            ORDER BY j.job_no
-        """)
-        if active.empty:
-            st.info("No open jobs found.")
-        else:
-            st.dataframe(active, width="stretch", hide_index=True)
-
-    with tab_upcoming:
-        upcoming = df_query("""
-            SELECT j.job_no AS 'Job No',
-                   j.job_name AS 'Job Name',
-                   COALESCE(bc.name, '') AS 'Builder / Client',
-                   j.start_date AS 'Start Date',
-                   j.leading_hand AS 'Leading Hand',
-                   j.status AS 'Status'
-            FROM jobs j
-            LEFT JOIN builders_clients bc ON bc.id = j.builder_client_id
-            WHERE COALESCE(j.status, '') IN ('Not Started', 'Quoted', 'Booked')
-            ORDER BY j.start_date, j.job_no
-        """)
-        if upcoming.empty:
-            st.info("No upcoming work is currently recorded.")
-        else:
-            st.dataframe(upcoming, width="stretch", hide_index=True)
-
-    with tab_attention:
-        missing_details = df_query("""
-            SELECT j.job_no AS 'Job No',
-                   j.job_name AS 'Job Name',
-                   j.status AS 'Status',
-                   j.leading_hand AS 'Leading Hand',
-                   j.start_date AS 'Start Date',
-                   CASE
-                       WHEN COALESCE(j.leading_hand, '') = '' THEN 'Leading hand missing'
-                       WHEN COALESCE(j.start_date, '') = '' THEN 'Start date missing'
-                       ELSE 'Review'
-                   END AS 'Attention'
-            FROM jobs j
-            WHERE COALESCE(j.status, '') NOT IN ('Completed', 'Paid', 'Archived')
-              AND (COALESCE(j.leading_hand, '') = '' OR COALESCE(j.start_date, '') = '')
-            ORDER BY j.job_no
-        """)
-
-        a1, a2, a3 = st.columns(3)
-        a1.metric("Missing job details", len(missing_details.index))
-        a2.metric("Pending timesheets", pending_timesheets)
-        a3.metric("Overdue claims", overdue_claims)
-
-        if missing_details.empty:
-            st.success("No open jobs are missing a leading hand or start date.")
-        else:
-            st.dataframe(missing_details, width="stretch", hide_index=True)
+    if view == "Upcoming Work":
+        _render_upcoming_work()
+    elif view == "Attention":
+        _render_attention(pending_timesheets, overdue_claims)
+    else:
+        _render_open_jobs()
 
 
 # =============================
