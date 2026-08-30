@@ -75,7 +75,7 @@ def _render_add_job(builder_options):
             end_date = excluded.end_date,
             contract_value = excluded.contract_value,
             notes = excluded.notes
-    "", (job_no, job_name, builder_id, site_address, status, leading_hand, start_date, end_date, contract_value, notes))
+    """, (job_no, job_name, builder_id, site_address, status, leading_hand, start_date, end_date, contract_value, notes))
     st.success(f"Saved job {job_no}")
     refresh()
 
@@ -144,7 +144,7 @@ def _render_edit_job(builder_options):
         SET job_no = ?, job_name = ?, builder_client_id = ?, site_address = ?, status = ?,
             leading_hand = ?, start_date = ?, end_date = ?, contract_value = ?, notes = ?
         WHERE id = ?
-    "", (
+    """, (
         edit_job_no, edit_job_name, edit_builder_id, edit_site_address, edit_status,
         edit_leading_hand, edit_start_date, edit_end_date, edit_contract_value, edit_notes, selected_id,
     ))
@@ -272,7 +272,7 @@ def _render_archived_jobs():
                 SET job_no = ?, job_name = ?, builder_client_id = ?, site_address = ?, status = ?,
                     leading_hand = ?, start_date = ?, end_date = ?, contract_value = ?, notes = ?
                 WHERE id = ?
-            "", (
+            """, (
                 edit_job_no, edit_job_name, edit_builder_id, edit_site_address, edit_status,
                 edit_leading_hand, edit_start_date, edit_end_date, edit_contract_value,
                 edit_notes, selected_archived_id,
@@ -323,7 +323,7 @@ def _render_search_by_builder(builder_options):
         JOIN builders_clients bc ON bc.id = j.builder_client_id
         WHERE bc.name = ?
         ORDER BY j.job_no
-    "", (selected_builder,))
+    """, (selected_builder,))
     if search_df.empty:
         pb_empty_state("No linked jobs", "No jobs are currently associated with this builder or client.")
     else:
