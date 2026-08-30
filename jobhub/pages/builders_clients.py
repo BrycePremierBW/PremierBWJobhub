@@ -40,7 +40,7 @@ def _render_add_builder():
                 abn = excluded.abn,
                 terms = excluded.terms,
                 notes = excluded.notes
-        "", (typ, name, contact, phone, email, address, qbcc, abn, terms, notes))
+        """, (typ, name, contact, phone, email, address, qbcc, abn, terms, notes))
         st.success(f"Saved {name}")
         refresh()
 
@@ -79,7 +79,7 @@ def _render_edit_builder():
             SET type = ?, name = ?, contact_name = ?, phone = ?, email = ?, address = ?,
                 qbcc = ?, abn = ?, terms = ?, notes = ?
             WHERE id = ?
-        "", (typ, name, contact, phone, email, address, qbcc, abn, terms, notes, selected_id))
+        """, (typ, name, contact, phone, email, address, qbcc, abn, terms, notes, selected_id))
         st.success(f"Updated {name}")
         refresh()
 
