@@ -1,6 +1,9 @@
 """Reusable branded Streamlit user-interface helpers.
 
-Generated from the previously working JobHub monolith.
+The UI defaults to Premier Brushworks for the existing production tenant, while
+allowing subscriber-specific company identity to be supplied through session
+state. This keeps commercial branding concerns in one place instead of spreading
+hard-coded company names throughout individual pages.
 """
 
 from __future__ import annotations
@@ -8,8 +11,68 @@ from __future__ import annotations
 from .runtime import *
 
 
-def pb_logo_data_uri():
-    """Return the Premier Brushworks logo as a browser-safe data URI for CSS backgrounds."""
+DEFAULT_COMPANY_NAME = "Premier Brushworks"
+DEFAULT_PRODUCT_NAME = "JobHub"
+DEFAULT_PRODUCT_SUBTITLE = "Jobs, site operations and estimating"
+
+
+def pb_html(value):
+    return html.escape(str(value or ""))
+
+
+def pb_money(value):
+    try:
+        return f"${float(value or 0):,.0f}"
+    except Exception:
+        return "$0"
+
+
+def pb_company_initials(company_name):
+    words = [part for part in re.split(r"\s+", str(company_name or "").strip()) if part]
+    if not words:
+        return "JH"
+    if len(words) == 1:
+        cleaned = "".join(ch for ch in words[0] if ch.isalnum())
+        return (cleaned[:2] or "JH").upper()
+    return f"{words[0][0]}{words[1][0]}".upper()
+
+
+def pb_brand_context(session_state=None):
+    """Return the active tenant-facing brand without requiring database access."""
+    if session_state is None:
+        try:
+            session_state = st.session_state
+        except Exception:
+            session_state = {}
+    try:
+        get_value = session_state.get
+    except Exception:
+        session_state = {}
+        get_value = session_state.get
+
+    company_name = str(get_value("jobhub_company_name", "") or "").strip() or DEFAULT_COMPANY_NAME
+    product_name = str(get_value("jobhub_product_name", "") or "").strip() or DEFAULT_PRODUCT_NAME
+    subtitle = str(get_value("jobhub_company_subtitle", "") or "").strip() or DEFAULT_PRODUCT_SUBTITLE
+    logo_data_uri = str(get_value("jobhub_company_logo_data_uri", "") or "").strip()
+    return {
+        "company_name": company_name,
+        "product_name": product_name,
+        "subtitle": subtitle,
+        "logo_data_uri": logo_data_uri,
+        "initials": pb_company_initials(company_name),
+    }
+
+
+def pb_logo_data_uri(company_name=None):
+    """Return the active tenant logo, falling back to PB only for the PB tenant."""
+    brand = pb_brand_context()
+    if brand["logo_data_uri"]:
+        return brand["logo_data_uri"]
+
+    active_company = str(company_name or brand["company_name"] or "").strip()
+    if active_company.casefold() != DEFAULT_COMPANY_NAME.casefold():
+        return ""
+
     possible_paths = [
         PB_LOGO_BACKGROUND_IMAGE,
         os.path.join(os.path.dirname(__file__), "PB_Logo_Main_PNG.png"),
@@ -24,17 +87,9 @@ def pb_logo_data_uri():
             pass
     return ""
 
-def pb_html(value):
-    return html.escape(str(value or ""))
-
-def pb_money(value):
-    try:
-        return f"${float(value or 0):,.0f}"
-    except Exception:
-        return "$0"
 
 def apply_pb_branding():
-    """Apply a clean, consistent Premier Brushworks interface theme."""
+    """Apply the shared JobHub design system across desktop and mobile."""
     st.markdown(
         """
         <style>
@@ -141,6 +196,20 @@ def apply_pb_branding():
             transform: none !important;
         }
 
+        .stButton > button:focus-visible,
+        .stDownloadButton > button:focus-visible,
+        [data-baseweb="input"] input:focus-visible,
+        textarea:focus-visible {
+            outline: 3px solid rgba(138, 107, 75, 0.25) !important;
+            outline-offset: 2px !important;
+        }
+
+        .stButton > button:disabled,
+        .stDownloadButton > button:disabled {
+            opacity: 0.55 !important;
+            cursor: not-allowed !important;
+        }
+
         button[kind="primary"] {
             background: var(--pb-sidebar) !important;
             color: white !important;
@@ -161,6 +230,28 @@ def apply_pb_branding():
         [data-baseweb="input"] > div,
         [data-baseweb="select"] > div,
         textarea { border-radius: 9px !important; }
+
+        [data-testid="stFileUploader"] section {
+            border-radius: 12px !important;
+            border-color: var(--pb-border) !important;
+            background: var(--pb-soft) !important;
+        }
+
+        div[data-testid="stForm"] {
+            border-color: var(--pb-border) !important;
+            border-radius: var(--pb-radius) !important;
+            background: var(--pb-surface) !important;
+        }
+
+        div[data-testid="stAlert"] {
+            border-radius: 12px !important;
+        }
+
+        details[data-testid="stExpander"] {
+            border: 1px solid var(--pb-border) !important;
+            border-radius: 12px !important;
+            background: var(--pb-surface) !important;
+        }
 
         [data-testid="stDataFrame"], [data-testid="stTable"] {
             border: 1px solid var(--pb-border);
@@ -199,6 +290,41 @@ def apply_pb_branding():
             color: var(--pb-muted);
             margin-top: 0.35rem;
             line-height: 1.45;
+        }
+
+        .pb-section-heading {
+            display: flex;
+            align-items: flex-end;
+            justify-content: space-between;
+            gap: 0.75rem;
+            margin: 1.35rem 0 0.65rem;
+        }
+
+        .pb-section-title {
+            color: var(--pb-text);
+            font-size: 1.05rem;
+            font-weight: 750;
+        }
+
+        .pb-section-subtitle {
+            color: var(--pb-muted);
+            font-size: 0.82rem;
+            margin-top: 0.15rem;
+        }
+
+        .pb-empty-state {
+            border: 1px dashed var(--pb-border);
+            border-radius: 14px;
+            background: var(--pb-soft);
+            padding: 1rem 1.1rem;
+            color: var(--pb-muted);
+            margin: 0.4rem 0 0.8rem;
+        }
+
+        .pb-empty-state strong {
+            color: var(--pb-text);
+            display: block;
+            margin-bottom: 0.2rem;
         }
 
         .pb-card {
@@ -245,15 +371,23 @@ def apply_pb_branding():
 
         .pb-logo-mark {
             display: inline-flex;
-            width: 38px;
-            height: 38px;
+            width: 42px;
+            height: 42px;
             align-items: center;
             justify-content: center;
-            border-radius: 10px;
+            border-radius: 11px;
             background: #f5f2ec;
             color: #181817;
             font-weight: 800;
             margin-bottom: 0.6rem;
+            overflow: hidden;
+        }
+
+        .pb-logo-mark img {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+            background: white;
         }
 
         .pb-sidebar-title { color: #ffffff; font-size: 1rem; font-weight: 700; }
@@ -339,33 +473,72 @@ def apply_pb_branding():
                 white-space: normal !important;
             }
             .pb-page-title { font-size: 1.4rem; }
+            .pb-section-heading { align-items: flex-start; flex-direction: column; }
         }
         </style>
         """,
         unsafe_allow_html=True,
     )
 
-def pb_sidebar_header():
+
+def pb_sidebar_header(company_name=None, subtitle=None, logo_data_uri=None):
+    brand = pb_brand_context()
+    company_name = str(company_name or brand["company_name"] or DEFAULT_COMPANY_NAME).strip()
+    subtitle = str(subtitle or brand["subtitle"] or DEFAULT_PRODUCT_SUBTITLE).strip()
+    logo_data_uri = str(logo_data_uri or brand["logo_data_uri"] or pb_logo_data_uri(company_name) or "").strip()
+    if logo_data_uri:
+        mark = f'<img src="{pb_html(logo_data_uri)}" alt="{pb_html(company_name)} logo">'
+    else:
+        mark = pb_html(pb_company_initials(company_name))
+
     st.sidebar.markdown(
-        """
+        f"""
         <div class="pb-sidebar-logo">
-            <div class="pb-logo-mark">PB</div>
-            <div class="pb-sidebar-title">Premier Brushworks JobHub</div>
-            <div class="pb-sidebar-subtitle">Jobs, site operations and estimating</div>
+            <div class="pb-logo-mark">{mark}</div>
+            <div class="pb-sidebar-title">{pb_html(company_name)} {pb_html(brand['product_name'])}</div>
+            <div class="pb-sidebar-subtitle">{pb_html(subtitle)}</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
     st.sidebar.divider()
 
-def pb_page_header(title, subtitle="", eyebrow="Premier Brushworks"):
+
+def pb_page_header(title, subtitle="", eyebrow=None):
+    if eyebrow is None:
+        eyebrow = pb_brand_context()["company_name"]
+    subtitle_html = f'<div class="pb-page-subtitle">{pb_html(subtitle)}</div>' if str(subtitle or "").strip() else ""
     st.markdown(f"""
     <div class="pb-page-hero">
         <div class="pb-page-eyebrow">{pb_html(eyebrow)}</div>
         <div class="pb-page-title">{pb_html(title)}</div>
-        <div class="pb-page-subtitle">{pb_html(subtitle)}</div>
+        {subtitle_html}
     </div>
     """, unsafe_allow_html=True)
+
+
+def pb_section_header(title, subtitle=""):
+    subtitle_html = f'<div class="pb-section-subtitle">{pb_html(subtitle)}</div>' if str(subtitle or "").strip() else ""
+    st.markdown(
+        f"""
+        <div class="pb-section-heading">
+            <div>
+                <div class="pb-section-title">{pb_html(title)}</div>
+                {subtitle_html}
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def pb_empty_state(title, message=""):
+    message_html = pb_html(message) if str(message or "").strip() else ""
+    st.markdown(
+        f'<div class="pb-empty-state"><strong>{pb_html(title)}</strong>{message_html}</div>',
+        unsafe_allow_html=True,
+    )
+
 
 def pb_metric_card(label, value, subtitle="", tone="taupe"):
     st.markdown(f"""
@@ -376,6 +549,7 @@ def pb_metric_card(label, value, subtitle="", tone="taupe"):
     </div>
     """, unsafe_allow_html=True)
 
+
 def pb_status_tone(status):
     status_text = str(status or "").strip().lower()
     if status_text in ["active", "booked", "approved", "paid", "complete", "completed"]:
@@ -385,6 +559,7 @@ def pb_status_tone(status):
     if status_text in ["archived", "closed", "cancelled", "rejected"]:
         return "grey"
     return "taupe"
+
 
 def pb_job_header(row):
     status = row.get("Status", "") if hasattr(row, "get") else ""
