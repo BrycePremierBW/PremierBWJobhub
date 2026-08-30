@@ -51,6 +51,7 @@ from .swms_signature_index_guard import install_swms_signature_index_guard
 from .swms_visibility_guard import install_swms_visibility_guard
 from .system_health_v2_guard import install_system_health_guard
 from .timesheet_area_guard import install_timesheet_area_guard
+from .xero_setup_guard import install_xero_setup_guard
 
 
 def _retired_po_upload_route_guard() -> bool:
@@ -98,6 +99,7 @@ install_system_health_guard()
 install_integration_health_guard()
 install_setup_defaults_guard()
 install_subscriber_setup_guard()
+install_xero_setup_guard()
 install_setup_crew_leader_guard()
 # The crew bridge performs a compatibility schema check during installation.
 # Make only transient PostgreSQL connection failures fail-soft so a Render DB
