@@ -2,9 +2,10 @@
 
 Streamlit re-runs the script after many normal interactions. Native ``st.tabs``
 then reopens the first tab, which makes JobHub feel like it keeps jumping back
-to Add Job after an employee or manager selects a job in Job Register.  This
-small browser-side guard remembers the last clicked tracked tab and restores it
-after the rerun finishes rendering.
+to Add Job after an employee or manager selects a job in Job Register, or
+snapping back to Add Timesheet when selecting an employee, date, or action on
+the Timesheets page.  This small browser-side guard remembers the last clicked
+tracked tab and restores it after the rerun finishes rendering.
 """
 
 from __future__ import annotations
@@ -23,6 +24,17 @@ _TRACKED_TAB_SETS = (
         "Archived Jobs",
         "Search by Builder",
         "Job Register",
+    }),
+    frozenset({
+        "Add Timesheet",
+        "Review Timesheets",
+        "Timesheets by Job",
+        "Timesheets by Employee",
+        "Hours Summary",
+    }),
+    frozenset({
+        "Submit Timesheet",
+        "My Timesheets",
     }),
 )
 
