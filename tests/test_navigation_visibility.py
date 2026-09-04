@@ -82,6 +82,30 @@ class NavigationVisibilityRegressionTests(unittest.TestCase):
         ):
             self.assertIn(f'"{persisted_key}"', reset_block)
 
+    def test_timesheets_tab_selections_persist_across_reruns(self):
+        """Verify the Timesheets tabs are tracked by the navigation state guard.
+
+        User-reported regression: selecting an employee, date, timesheet row, or
+        action in any Timesheets tab (Review, by Job, by Employee, etc.) caused a
+        full Streamlit rerun that snapped the tab back to 'Add Timesheet'.
+        The navigation_state_guard fixes this by remembering the active tab via
+        JS/localStorage, but only for tab sets listed in _TRACKED_TAB_SETS.
+        """
+        guard_source = (Path(__file__).resolve().parents[1]
+                        / "jobhub" / "navigation_state_guard.py").read_text(encoding="utf-8")
+        self.assertIn("Add Timesheet", guard_source)
+        self.assertIn("Review Timesheets", guard_source)
+        self.assertIn("Timesheets by Job", guard_source)
+        self.assertIn("Timesheets by Employee", guard_source)
+        self.assertIn("Hours Summary", guard_source)
+        self.assertIn("Submit Timesheet", guard_source)
+        self.assertIn("My Timesheets", guard_source)
+        # Confirm they are inside _TRACKED_TAB_SETS, not just any random string.
+        start = guard_source.index("_TRACKED_TAB_SETS")
+        tracked_section = guard_source[start:start + 1200]
+        self.assertIn("Add Timesheet", tracked_section)
+        self.assertIn("Submit Timesheet", tracked_section)
+
     def test_radio_labels_can_wrap_without_clipping(self):
         self.assertRegex(
             self.source,
